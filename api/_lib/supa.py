@@ -28,6 +28,26 @@ async def select(table: str, *, params: dict | None = None, headers: dict | None
         return r.json()
 
 
+async def select_all(table: str, *, params: dict | None = None, page: int = 1000, cap: int = 500000) -> list:
+    """อ่านทั้งตาราง (ข้ามลิมิต 1000 แถวของ PostgREST) ด้วยการ page ต่อเนื่อง"""
+    base = dict(params or {})
+    base.pop("limit", None)
+    base.pop("offset", None)
+    out: list = []
+    offset = 0
+    async with httpx.AsyncClient(timeout=30) as c:
+        while offset < cap:
+            q = {**base, "limit": str(page), "offset": str(offset)}
+            r = await c.get(f"{_base()}/{table}", headers=_headers(), params=q)
+            r.raise_for_status()
+            batch = r.json()
+            out.extend(batch)
+            if len(batch) < page:
+                break
+            offset += page
+    return out
+
+
 async def count(table: str, params: dict | None = None) -> int:
     async with httpx.AsyncClient(timeout=30) as c:
         r = await c.get(

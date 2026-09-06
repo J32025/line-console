@@ -149,8 +149,8 @@ async def richmenus(admin=Depends(current_admin)):
 @app.get("/api/richmenu/usage")
 async def richmenu_usage(admin=Depends(current_admin)):
     """นับจำนวน user ที่ผูกแต่ละ rich menu อยู่ (จาก DB) เรียงมาก→น้อย"""
-    rows = await supa.select("line_users", params={
-        "select": "current_rich_menu_id", "is_following": "eq.true", "limit": "200000",
+    rows = await supa.select_all("line_users", params={
+        "select": "current_rich_menu_id", "is_following": "eq.true",
     })
     counts: dict[str, int] = {}
     for r in rows:
@@ -241,12 +241,12 @@ async def assign(req: Request, admin=Depends(current_admin)):
     if target == "list":
         uids = [u.strip() for u in b.get("userIds", []) if u.strip()]
     else:
-        params = {"select": "line_user_id", "is_following": "eq.true", "limit": "100000"}
+        params = {"select": "line_user_id", "is_following": "eq.true"}
         if target == "none":
             params["rich_menu_status"] = "eq.none"
         elif target == "tag":
             params["tags"] = f"cs.{{{b.get('tag','')}}}"
-        rows = await supa.select("line_users", params=params)
+        rows = await supa.select_all("line_users", params=params)
         uids = [r["line_user_id"] for r in rows]
 
     if not uids:
@@ -333,8 +333,8 @@ async def richmenu_sync(req: Request, admin=Depends(current_admin)):
     if b.get("target") == "list":
         uids = [u.strip() for u in b.get("userIds", []) if u.strip()]
     else:
-        rows = await supa.select("line_users", params={
-            "select": "line_user_id", "is_following": "eq.true", "limit": "100000",
+        rows = await supa.select_all("line_users", params={
+            "select": "line_user_id", "is_following": "eq.true",
         })
         uids = [r["line_user_id"] for r in rows]
     if not uids:
@@ -353,9 +353,9 @@ async def cron_sync_richmenu(request: Request):
         if key != CRON_SECRET:
             raise HTTPException(403, "bad cron key")
     try:
-        limit = min(int(request.query_params.get("limit", "1500")), 5000)
+        limit = min(int(request.query_params.get("limit", "1000")), 1000)  # 1 หน้า PostgREST, พอดี < 60s
     except ValueError:
-        limit = 1500
+        limit = 1000
 
     rows = await supa.select("line_users", params={
         "select": "line_user_id", "is_following": "eq.true",
@@ -407,9 +407,12 @@ async def users_import(req: Request, admin=Depends(current_admin)):
     if not uids:
         raise HTTPException(400, "ไม่พบ userId ที่ถูกต้อง (U + 32 hex)")
 
-    existing = {r["line_user_id"] for r in await supa.select("line_users", params={
-        "select": "line_user_id", "line_user_id": f"in.({','.join(uids)})", "limit": "100000",
-    })}
+    existing = set()
+    for i in range(0, len(uids), 800):
+        chunk = uids[i:i + 800]
+        existing |= {r["line_user_id"] for r in await supa.select("line_users", params={
+            "select": "line_user_id", "line_user_id": f"in.({','.join(chunk)})", "limit": "1000",
+        })}
     new = [u for u in uids if u not in existing]
     ts = NOW()
     rows = [{
@@ -567,12 +570,12 @@ async def msg_broadcast(req: Request, admin=Depends(current_admin)):
 async def msg_multicast_db(req: Request, admin=Depends(current_admin)):
     """ส่งหา user ใน DB ตาม filter (tag / menu / following)"""
     b = await req.json()
-    params = {"select": "line_user_id", "is_following": "eq.true", "limit": "100000"}
+    params = {"select": "line_user_id", "is_following": "eq.true"}
     if b.get("tag"):
         params["tags"] = f"cs.{{{b['tag']}}}"
     if b.get("menu"):
         params["current_rich_menu_id"] = f"eq.{b['menu']}"
-    rows = await supa.select("line_users", params=params)
+    rows = await supa.select_all("line_users", params=params)
     uids = [r["line_user_id"] for r in rows]
     if not uids:
         raise HTTPException(400, "ไม่มีปลายทาง")
