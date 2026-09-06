@@ -34,6 +34,7 @@ export const api = {
   syncMenu: (payload) => req('POST', '/richmenu/sync', payload),
 
   users: (qs = {}) => req('GET', '/users?' + new URLSearchParams(qs)),
+  userDetail: (uid) => req('GET', `/users/${uid}`),
   importUsers: (payload) => req('POST', '/users/import', payload),
   refreshProfiles: (payload) => req('POST', '/users/refresh-profile', payload),
   syncFollowers: () => req('POST', '/users/sync-followers'),

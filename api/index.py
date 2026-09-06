@@ -428,19 +428,40 @@ async def users_import(req: Request, admin=Depends(current_admin)):
             "duplicate": len(uids) - len(new), "duplicates": list(existing & set(uids))}
 
 
+def _clean_str(s):
+    if not s:
+        return s
+    s = "".join(ch for ch in s if ch in "\n\t" or ord(ch) >= 0x20)
+    return s or None
+
+
 @app.post("/api/users/refresh-profile")
 async def refresh_profile(req: Request, admin=Depends(current_admin)):
+    """ดึง displayName/รูป/statusMessage/ภาษา จาก LINE
+    target: 'list' (userIds), 'missing' (ที่ยังไม่มีชื่อ, default), 'all' (ทุกคน)
+    เรียกซ้ำจนกว่า remaining = 0 (batch ละ ~limit คน)"""
     b = await req.json()
-    if b.get("target") == "list":
+    target = b.get("target", "missing")
+    limit = min(int(b.get("limit", 400)), 800)
+
+    if target == "list":
         uids = [u.strip() for u in b.get("userIds", []) if u.strip()]
+        remaining_after = 0
     else:
-        rows = await supa.select("line_users", params={
-            "select": "line_user_id", "display_name": "is.null",
-            "is_following": "eq.true", "limit": str(int(b.get("limit", 500))),
-        })
+        params = {"select": "line_user_id", "is_following": "eq.true",
+                  "order": "updated_at.asc", "limit": str(limit)}
+        if target == "missing":
+            params["display_name"] = "is.null"
+        rows = await supa.select("line_users", params=params)
         uids = [r["line_user_id"] for r in rows]
-    sem = asyncio.Semaphore(10)
+        remaining_after = 0
+        if target == "missing":
+            remaining_after = max(0, await supa.count(
+                "line_users", {"is_following": "eq.true", "display_name": "is.null"}) - len(uids))
+
+    sem = asyncio.Semaphore(12)
     got = [0]
+    unfollow = [0]
     patch = []
 
     async def one(uid):
@@ -449,18 +470,24 @@ async def refresh_profile(req: Request, admin=Depends(current_admin)):
             if p:
                 got[0] += 1
                 patch.append({
-                    "line_user_id": uid, "display_name": p.get("displayName"),
-                    "picture_url": p.get("pictureUrl"), "status_message": p.get("statusMessage"),
-                    "language": p.get("language"), "updated_at": NOW(),
+                    "line_user_id": uid,
+                    "display_name": _clean_str(p.get("displayName")),
+                    "picture_url": _clean_str(p.get("pictureUrl")),
+                    "status_message": _clean_str(p.get("statusMessage")),
+                    "language": _clean_str(p.get("language")),
+                    "is_following": True, "updated_at": NOW(),
                 })
             else:
+                unfollow[0] += 1
                 patch.append({"line_user_id": uid, "is_following": False, "updated_at": NOW()})
 
     await asyncio.gather(*[one(u) for u in uids])
-    for i in range(0, len(patch), 500):
-        await supa.upsert("line_users", patch[i:i + 500], on_conflict="line_user_id")
-    await supa.log_operation(admin["userId"], "users.refresh_profile", {"count": len(uids)}, {"got": got[0]})
-    return {"total": len(uids), "profiles_fetched": got[0]}
+    for i in range(0, len(patch), 400):
+        await supa.upsert("line_users", patch[i:i + 400], on_conflict="line_user_id")
+    await supa.log_operation(admin["userId"], "users.refresh_profile",
+                             {"count": len(uids)}, {"got": got[0], "unfollow": unfollow[0]})
+    return {"processed": len(uids), "profiles_fetched": got[0],
+            "not_following": unfollow[0], "remaining": remaining_after}
 
 
 @app.post("/api/users/sync-followers")
@@ -485,6 +512,29 @@ async def sync_followers(admin=Depends(current_admin)):
         await supa.upsert("line_users", rows[i:i + 500], on_conflict="line_user_id")
     await supa.log_operation(admin["userId"], "users.sync_followers", None, {"count": len(rows)})
     return {"followers": len(rows), "pages": pages}
+
+
+@app.get("/api/users/{uid}")
+async def user_detail(uid: str, admin=Depends(current_admin)):
+    rows = await supa.select("line_users", params={"line_user_id": f"eq.{uid}", "select": "*", "limit": "1"})
+    if not rows:
+        raise HTTPException(404, "ไม่พบผู้ใช้")
+    user = rows[0]
+    events = await supa.select("webhook_events", params={
+        "line_user_id": f"eq.{uid}", "select": "event_type,message_type,text,created_at",
+        "order": "created_at.desc", "limit": "20",
+    })
+    # ดึงสด LINE profile + rich menu ปัจจุบัน
+    live = {}
+    try:
+        p = await line.get_profile(uid)
+        if p:
+            live["profile"] = p
+        rid = await line.user_richmenu_get(uid)
+        live["richMenuId"] = rid
+    except Exception as e:
+        live["error"] = str(e)
+    return {"user": user, "events": events, "live": live}
 
 
 @app.patch("/api/users/{uid}")

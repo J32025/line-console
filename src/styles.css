@@ -110,6 +110,29 @@ pre { background: #0f1b2d; color: #cdd5e0; padding: 12px; border-radius: 8px; ov
 .ln-carousel { display: flex; gap: 8px; overflow-x: auto; max-width: 280px; padding-bottom: 4px; }
 .ln-flexwrap { max-width: 280px; overflow-x: auto; }
 
+/* ---------- users ---------- */
+.user-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px; margin: 12px 0; }
+.user-card { display: flex; gap: 10px; padding: 10px; border: 1px solid var(--border); border-radius: 10px; cursor: pointer; background: #fff; }
+.user-card:hover { border-color: var(--primary); background: #f6fefa; }
+.user-pic { width: 48px; height: 48px; border-radius: 50%; object-fit: cover; flex-shrink: 0; background: #e5e7eb; }
+.user-info { min-width: 0; flex: 1; }
+.user-name { font-weight: 600; font-size: 14px; display: flex; align-items: center; gap: 6px; }
+.ellipsis { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.user-tags { display: flex; gap: 3px; flex-wrap: wrap; margin-top: 3px; }
+
+.modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: flex; align-items: flex-start; justify-content: center; padding: 40px 16px; z-index: 200; overflow-y: auto; }
+.modal { background: #fff; border-radius: 12px; padding: 20px; width: 100%; max-width: 520px; }
+.udetail-head { display: flex; gap: 14px; margin: 14px 0; align-items: center; }
+.udetail-pic { width: 72px; height: 72px; border-radius: 50%; object-fit: cover; background: #e5e7eb; }
+.udetail-name { font-size: 17px; font-weight: 700; }
+table.kv { width: 100%; }
+table.kv th { text-align: left; color: var(--muted); font-weight: 500; width: 110px; padding: 4px 8px 4px 0; vertical-align: top; text-transform: none; letter-spacing: 0; font-size: 13px; }
+table.kv td { padding: 4px 0; border: 0; font-size: 13px; word-break: break-all; }
+.udetail-edit { margin: 14px 0; padding: 12px; background: #f8f9fa; border-radius: 8px; }
+.udetail-edit label { display: block; margin-top: 6px; color: var(--muted); }
+.udetail-edit input, .udetail-edit textarea { width: 100%; margin: 3px 0; }
+.udetail-events { display: flex; flex-direction: column; gap: 5px; max-height: 220px; overflow-y: auto; }
+
 .toasts { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 8px; z-index: 100; }
 .toast { background: #1c1e21; color: #fff; padding: 10px 16px; border-radius: 8px; font-size: 13px; max-width: 360px; }
 .toast.ok { background: var(--primary-d); }
