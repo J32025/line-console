@@ -9,6 +9,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -763,6 +764,66 @@ async def msg_push(req: Request, admin=Depends(current_admin)):
     if code != 200:
         raise HTTPException(400, txt)
     return {"ok": True, "requestId": rid, "sent": cnt}
+
+
+@app.post("/api/message/bulk")
+async def msg_bulk(req: Request, admin=Depends(current_admin)):
+    """ส่งหา userId จำนวนมากพร้อมกัน — แบ่ง batch ละ 500 ยิง multicast ขนานกัน
+    body: { userIds: [...] | "…\\n…", messages, notificationDisabled }"""
+    b = await req.json()
+    raw = b.get("userIds", [])
+    if isinstance(raw, str):
+        raw = re.split(r"[\s,]+", raw)
+
+    seen, uids, invalid = set(), [], []
+    for u in raw:
+        u = str(u).strip()
+        if not u:
+            continue
+        if re.fullmatch(r"U[0-9a-f]{32}", u):
+            if u not in seen:
+                seen.add(u)
+                uids.append(u)
+        else:
+            invalid.append(u)
+    if not uids:
+        raise HTTPException(400, "ไม่มี userId ที่ถูกต้อง (ต้องเป็น U + 32 hex)")
+
+    msgs = _normalize_messages(b.get("messages", []))
+    nd = bool(b.get("notificationDisabled"))
+    chunks = [uids[i:i + 500] for i in range(0, len(uids), 500)]
+
+    sem = asyncio.Semaphore(5)
+    res = {"total": len(uids), "sent": 0, "failed": 0, "batches": len(chunks),
+           "ok_batches": 0, "errors": [], "duplicate": len(raw) - len(uids) - len(invalid),
+           "invalid": invalid[:30], "invalid_count": len(invalid)}
+    last_rid = [None]
+
+    async def one(idx, ch):
+        async with sem:
+            code, txt, rid = await line.multicast(ch, msgs, nd)
+            if rid:
+                last_rid[0] = rid
+            if code == 200:
+                res["sent"] += len(ch)
+                res["ok_batches"] += 1
+            else:
+                res["failed"] += len(ch)
+                if len(res["errors"]) < 20:
+                    res["errors"].append({"batch": idx, "n": len(ch), "code": code, "msg": txt[:150]})
+
+    await asyncio.gather(*[one(i, c) for i, c in enumerate(chunks)])
+
+    status = "sent" if res["failed"] == 0 else ("partial" if res["sent"] else "failed")
+    await supa.insert("broadcasts", {
+        "actor": admin["userId"], "kind": "multicast", "target_count": len(uids),
+        "messages": msgs, "line_request_id": last_rid[0],
+        "status": "sent" if status == "sent" else "failed",
+        "error": None if status == "sent" else f"{res['failed']} ล้มเหลว",
+    })
+    await supa.log_operation(admin["userId"], "message.bulk",
+                             {"total": len(uids), "batches": len(chunks)}, res, status)
+    return res
 
 
 @app.post("/api/message/broadcast")

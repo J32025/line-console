@@ -20,6 +20,7 @@ export default function Messaging() {
   const [segId, setSegId] = useState('')
   const [nc, setNc] = useState({ gender: [], ageGte: '', ageLt: '', areas: [] })
   const [notiOff, setNotiOff] = useState(false)
+  const [bulkResult, setBulkResult] = useState(null)
   const [busy, setBusy] = useState(false)
   const [history, setHistory] = useState([])
   const [usage, setUsage] = useState([])
@@ -88,10 +89,12 @@ export default function Messaging() {
   const addMsg = () => messages.length < 5 && setMessages((a) => [...a, blank('text')])
   const rmMsg = (i) => setMessages((a) => a.filter((_, j) => j !== i))
 
+  const toIds = to.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean)
+  const validIds = toIds.filter((u) => /^U[0-9a-f]{32}$/.test(u))
   const seg = segments.find((s) => String(s.id) === String(segId))
   const targetLabel = {
     broadcast: 'ทุกคนที่ติดตาม',
-    push: `${to.split(/[\s,]+/).filter(Boolean).length} userId`,
+    push: `${validIds.length.toLocaleString()} userId${toIds.length !== validIds.length ? ` (${toIds.length - validIds.length} ผิดรูปแบบ)` : ''}`,
     db: `${menu ? menus.find((m) => m.richMenuId === menu)?.name : 'ทุกเมนู'}${tag ? ` +tag:${tag}` : ''} · ~${selectedCount.toLocaleString()} คน`,
     segment: seg ? `${seg.name} · ~${(seg.last_count ?? 0).toLocaleString()} คน` : 'เลือกกลุ่ม',
     narrowcast: `demographic (${nc.gender.join('/') || 'ทุกเพศ'}${nc.ageGte ? ` ${nc.ageGte}+` : ''})`,
@@ -127,12 +130,16 @@ export default function Messaging() {
     setBusy(true)
     try {
       let r
+      setBulkResult(null)
       if (mode === 'broadcast') r = await api.broadcast({ messages })
-      else if (mode === 'push') r = await api.push({ to: to.split(/[\s,]+/).filter(Boolean), messages, notificationDisabled: notiOff })
+      else if (mode === 'push') {
+        r = await api.bulkSend({ userIds: toIds, messages, notificationDisabled: notiOff })
+        setBulkResult(r)
+      }
       else if (mode === 'segment') r = await api.multicastDb({ segmentId: segId, messages })
       else if (mode === 'narrowcast') r = await api.narrowcast({ demographic: buildDemographic(), messages })
       else r = await api.multicastDb({ tag, menu, messages })
-      t.ok('ส่งแล้ว ' + (r.sent != null ? `(${r.sent} คน)` : r.requestId ? `req ${r.requestId.slice(0, 8)}` : ''))
+      t.ok('ส่งแล้ว ' + (r.sent != null ? `(${r.sent.toLocaleString()} คน)` : r.requestId ? `req ${r.requestId.slice(0, 8)}` : ''))
       if (mode === 'narrowcast' && r.requestId) {
         setNcProgress({ requestId: r.requestId, phase: 'waiting' })
         setTimeout(async () => {
@@ -193,8 +200,26 @@ export default function Messaging() {
               </div>
             )}
             {mode === 'push' && (
-              <textarea rows={3} placeholder="userId คั่นด้วยขึ้นบรรทัด/comma (≤500 = multicast, 1 = push)"
-                        value={to} onChange={(e) => setTo(e.target.value)} />
+              <>
+                <textarea rows={5} placeholder="วาง userId เยอะแค่ไหนก็ได้ (คั่นด้วยขึ้นบรรทัด/comma) — ระบบแบ่งส่งทีละ 500 อัตโนมัติ"
+                          value={to} onChange={(e) => setTo(e.target.value)} />
+                <div className="row wrap">
+                  <label className="sm">
+                    อัปโหลดไฟล์ .txt/.csv:{' '}
+                    <input type="file" accept=".txt,.csv" onChange={(e) => {
+                      const f = e.target.files?.[0]; if (!f) return
+                      const rd = new FileReader()
+                      rd.onload = () => setTo((prev) => (prev ? prev + '\n' : '') + rd.result)
+                      rd.readAsText(f)
+                    }} />
+                  </label>
+                  <span className="sm muted">
+                    {validIds.length.toLocaleString()} ถูกต้อง
+                    {toIds.length !== validIds.length && ` · ${(toIds.length - validIds.length).toLocaleString()} ผิดรูปแบบ`}
+                    {validIds.length > 500 && ` · ${Math.ceil(validIds.length / 500)} batch`}
+                  </span>
+                </div>
+              </>
             )}
             {mode === 'db' && (
               <>
@@ -249,6 +274,24 @@ export default function Messaging() {
 
           {mode === 'push' && (
             <label className="row"><input type="checkbox" checked={notiOff} onChange={(e) => setNotiOff(e.target.checked)} /> ส่งเงียบ (ไม่เด้งแจ้งเตือน)</label>
+          )}
+
+          {bulkResult && (
+            <section className="card">
+              <h3>ผลการส่งแบบชุด</h3>
+              <div className="grid stats" style={{ gridTemplateColumns: 'repeat(4,1fr)' }}>
+                <div className="statcard"><div className="statval">{bulkResult.sent.toLocaleString()}</div><div className="statlabel">ส่งสำเร็จ</div></div>
+                <div className="statcard"><div className="statval">{bulkResult.failed.toLocaleString()}</div><div className="statlabel">ล้มเหลว</div></div>
+                <div className="statcard"><div className="statval">{bulkResult.ok_batches}/{bulkResult.batches}</div><div className="statlabel">batch สำเร็จ</div></div>
+                <div className="statcard"><div className="statval">{(bulkResult.duplicate + bulkResult.invalid_count).toLocaleString()}</div><div className="statlabel">ซ้ำ+ผิดรูปแบบ</div></div>
+              </div>
+              {bulkResult.errors?.length > 0 && (
+                <pre className="xs">{JSON.stringify(bulkResult.errors, null, 1)}</pre>
+              )}
+              {bulkResult.invalid?.length > 0 && (
+                <p className="muted xs">ผิดรูปแบบ (ตัวอย่าง): {bulkResult.invalid.join(', ')}</p>
+              )}
+            </section>
           )}
 
           {(mode === 'db' || mode === 'segment' || mode === 'push' || mode === 'broadcast') && (

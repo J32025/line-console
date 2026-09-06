@@ -44,6 +44,7 @@ export const api = {
 
   validateMsg: (messages) => req('POST', '/message/validate', { messages }),
   push: (payload) => req('POST', '/message/push', payload),
+  bulkSend: (payload) => req('POST', '/message/bulk', payload),
   broadcast: (payload) => req('POST', '/message/broadcast', payload),
   multicastDb: (payload) => req('POST', '/message/multicast-from-db', payload),
   broadcastHistory: () => req('GET', '/broadcasts'),
