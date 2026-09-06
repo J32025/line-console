@@ -18,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from _lib import line, supa
 from _lib.auth import current_admin
-from _lib.config import LINE_CHANNEL_SECRET
+from _lib.config import LINE_CHANNEL_SECRET, CRON_SECRET
 
 app = FastAPI(title="LINE Console API")
 app.add_middleware(
@@ -295,21 +295,9 @@ async def assign(req: Request, admin=Depends(current_admin)):
     return {"total": len(uids), **results}
 
 
-@app.post("/api/richmenu/sync")
-async def richmenu_sync(req: Request, admin=Depends(current_admin)):
-    """เช็ค richmenu ปัจจุบันของ user แล้วบันทึกลง DB"""
-    b = await req.json()
-    target = b.get("target", "all")
-    if target == "list":
-        uids = [u.strip() for u in b.get("userIds", []) if u.strip()]
-    else:
-        rows = await supa.select("line_users", params={
-            "select": "line_user_id", "is_following": "eq.true", "limit": "100000",
-        })
-        uids = [r["line_user_id"] for r in rows]
+async def _sync_richmenu_for(uids: list[str]) -> dict:
     if not uids:
-        raise HTTPException(400, "ไม่มี user ให้ sync")
-
+        return {"total": 0, "assigned": 0, "none": 0, "error": 0}
     menus = {m["richMenuId"]: m.get("name") for m in await line.richmenu_list()}
     sem = asyncio.Semaphore(10)
     summary = {"assigned": 0, "none": 0, "error": 0}
@@ -322,7 +310,7 @@ async def richmenu_sync(req: Request, admin=Depends(current_admin)):
                 st = "assigned" if rid else "none"
             except Exception:
                 rid, st = None, "error"
-            summary[st if st in summary else "error"] = summary.get(st, 0) + 1
+            summary[st] = summary.get(st, 0) + 1
             patch.append({
                 "line_user_id": uid, "current_rich_menu_id": rid or None,
                 "rich_menu_name": menus.get(rid) if rid else None,
@@ -335,8 +323,49 @@ async def richmenu_sync(req: Request, admin=Depends(current_admin)):
             await supa.upsert("line_users", patch[i:i + 500], on_conflict="line_user_id")
     except Exception as e:
         summary["db_error"] = str(e)
-    await supa.log_operation(admin["userId"], "richmenu.sync", {"count": len(uids)}, summary)
     return {"total": len(uids), **summary}
+
+
+@app.post("/api/richmenu/sync")
+async def richmenu_sync(req: Request, admin=Depends(current_admin)):
+    """เช็ค richmenu ปัจจุบันของ user แล้วบันทึกลง DB"""
+    b = await req.json()
+    if b.get("target") == "list":
+        uids = [u.strip() for u in b.get("userIds", []) if u.strip()]
+    else:
+        rows = await supa.select("line_users", params={
+            "select": "line_user_id", "is_following": "eq.true", "limit": "100000",
+        })
+        uids = [r["line_user_id"] for r in rows]
+    if not uids:
+        raise HTTPException(400, "ไม่มี user ให้ sync")
+    summary = await _sync_richmenu_for(uids)
+    await supa.log_operation(admin["userId"], "richmenu.sync", {"count": len(uids)}, summary)
+    return summary
+
+
+@app.api_route("/api/cron/sync-richmenu", methods=["GET", "POST"])
+async def cron_sync_richmenu(request: Request):
+    """เรียกโดย scheduler (Supabase pg_cron) — auth ด้วย ?key=CRON_SECRET
+    sync แบบ rolling: เอา user ที่ถูกเช็คนานสุดก่อน batch ละ ?limit (default 1500)"""
+    if CRON_SECRET:
+        key = request.query_params.get("key") or request.headers.get("x-cron-key", "")
+        if key != CRON_SECRET:
+            raise HTTPException(403, "bad cron key")
+    try:
+        limit = min(int(request.query_params.get("limit", "1500")), 5000)
+    except ValueError:
+        limit = 1500
+
+    rows = await supa.select("line_users", params={
+        "select": "line_user_id", "is_following": "eq.true",
+        "order": "rich_menu_checked_at.asc.nullsfirst",
+        "limit": str(limit),
+    })
+    uids = [r["line_user_id"] for r in rows]
+    summary = await _sync_richmenu_for(uids)
+    await supa.log_operation("cron", "richmenu.sync.cron", {"limit": limit}, summary)
+    return {"ok": True, **summary}
 
 
 # ============================================================

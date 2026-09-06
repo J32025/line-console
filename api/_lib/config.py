@@ -11,5 +11,8 @@ SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").stri
 # ถ้า true: ใครล็อกอิน LINE ก็เข้าได้ (ยังไม่เช็คตาราง admins) — ใช้ตอน bootstrap เท่านั้น
 OPEN_SIGNUP = os.environ.get("OPEN_SIGNUP", "").lower() in ("1", "true", "yes")
 
+# secret สำหรับ endpoint /api/cron/* (เรียกโดย Supabase pg_cron)
+CRON_SECRET = os.environ.get("CRON_SECRET", "").strip()
+
 LINE_API = "https://api.line.me"
 LINE_DATA_API = "https://api-data.line.me"
