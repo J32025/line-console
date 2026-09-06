@@ -5,17 +5,24 @@ import { Spinner, useToast } from '../lib/ui.jsx'
 export default function RichMenus() {
   const t = useToast()
   const [data, setData] = useState(null)
+  const [usage, setUsage] = useState({})
   const [busy, setBusy] = useState(false)
   const [sel, setSel] = useState('')
   const [target, setTarget] = useState('all')
   const [userIds, setUserIds] = useState('')
   const [setDefault, setSetDefault] = useState(true)
 
-  const load = () => api.richmenus().then(setData).catch((e) => t.err(e.message))
+  const load = () => {
+    api.richmenus().then(setData).catch((e) => t.err(e.message))
+    api.richmenuUsage()
+      .then((d) => setUsage(Object.fromEntries(d.items.map((i) => [i.richMenuId || '__none__', i.count]))))
+      .catch(() => {})
+  }
   useEffect(() => { load() }, [])
 
   if (!data) return <Spinner />
-  const { menus, defaultRichMenuId, aliases } = data
+  const { defaultRichMenuId, aliases } = data
+  const menus = [...data.menus].sort((a, b) => (usage[b.richMenuId] || 0) - (usage[a.richMenuId] || 0))
 
   const parseIds = () =>
     userIds.split(/[\s,]+/).map((s) => s.trim()).filter((s) => s.startsWith('U'))
@@ -53,13 +60,14 @@ export default function RichMenus() {
           <button className="sm" onClick={sync} disabled={busy}>Sync สถานะผู้ใช้ทั้งหมด</button>
         </div>
         <table>
-          <thead><tr><th></th><th>ชื่อ</th><th>chatBar</th><th>ขนาด</th><th>richMenuId</th><th></th></tr></thead>
+          <thead><tr><th></th><th>ชื่อ</th><th>ใช้อยู่</th><th>chatBar</th><th>ขนาด</th><th>richMenuId</th><th></th></tr></thead>
           <tbody>
             {menus.map((m) => (
               <tr key={m.richMenuId} className={sel === m.richMenuId ? 'selected' : ''}>
                 <td><input type="radio" checked={sel === m.richMenuId}
                            onChange={() => setSel(m.richMenuId)} /></td>
                 <td>{m.name} {m.richMenuId === defaultRichMenuId && <span className="chip ok">default</span>}</td>
+                <td><b>{(usage[m.richMenuId] || 0).toLocaleString()}</b></td>
                 <td>{m.chatBarText}</td>
                 <td className="muted sm">{m.size?.width}×{m.size?.height}</td>
                 <td className="mono xs">{m.richMenuId}</td>

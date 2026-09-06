@@ -82,6 +82,14 @@ pre { background: #0f1b2d; color: #cdd5e0; padding: 12px; border-radius: 8px; ov
 .actions-editor input { margin: 0; flex: 1; min-width: 90px; }
 .actions-editor select { margin: 0; }
 
+.usage-bars { margin-top: 10px; display: flex; flex-direction: column; gap: 4px; }
+.usage-row { display: grid; grid-template-columns: 130px 1fr 48px; gap: 8px; align-items: center; font-size: 12px; }
+.usage-row:hover .usage-track { background: #e5e7eb; }
+.usage-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--muted); }
+.usage-track { height: 14px; background: #eef0f2; border-radius: 4px; overflow: hidden; }
+.usage-fill { display: block; height: 100%; background: var(--primary); }
+.usage-count { text-align: right; font-variant-numeric: tabular-nums; }
+
 .preview-pane { position: sticky; top: 16px; }
 .phone { background: #7494c0; border-radius: 16px; padding: 8px; }
 .phone-head { color: #fff; font-size: 12px; text-align: center; padding: 4px 0 8px; opacity: .9; }

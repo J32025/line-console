@@ -146,6 +146,34 @@ async def richmenus(admin=Depends(current_admin)):
     return {"menus": menus, "defaultRichMenuId": default_id, "aliases": aliases}
 
 
+@app.get("/api/richmenu/usage")
+async def richmenu_usage(admin=Depends(current_admin)):
+    """นับจำนวน user ที่ผูกแต่ละ rich menu อยู่ (จาก DB) เรียงมาก→น้อย"""
+    rows = await supa.select("line_users", params={
+        "select": "current_rich_menu_id", "is_following": "eq.true", "limit": "200000",
+    })
+    counts: dict[str, int] = {}
+    for r in rows:
+        k = r.get("current_rich_menu_id") or "__none__"
+        counts[k] = counts.get(k, 0) + 1
+
+    names = {m["richMenuId"]: m.get("name") for m in await line.richmenu_list()}
+    try:
+        default_id = await line.richmenu_get_default()
+    except Exception:
+        default_id = None
+
+    items = [{
+        "richMenuId": None if k == "__none__" else k,
+        "name": "— ไม่มีเมนู —" if k == "__none__" else (names.get(k) or "(เมนูถูกลบแล้ว)"),
+        "count": v,
+        "isDefault": k == default_id,
+        "exists": k == "__none__" or k in names,
+    } for k, v in counts.items()]
+    items.sort(key=lambda x: -x["count"])
+    return {"total": len(rows), "items": items, "defaultRichMenuId": default_id}
+
+
 @app.post("/api/richmenu/default")
 async def set_default(req: Request, admin=Depends(current_admin)):
     b = await req.json()

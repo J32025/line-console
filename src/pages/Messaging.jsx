@@ -14,13 +14,18 @@ export default function Messaging() {
   const [menu, setMenu] = useState('')
   const [busy, setBusy] = useState(false)
   const [history, setHistory] = useState([])
-  const [menus, setMenus] = useState([])
+  const [usage, setUsage] = useState([]) // [{richMenuId, name, count}] เรียงมาก→น้อย
 
   const loadHistory = () => api.broadcastHistory().then((d) => setHistory(d.broadcasts)).catch(() => {})
   useEffect(() => {
     loadHistory()
-    api.richmenus().then((d) => setMenus(d.menus)).catch(() => {})
+    api.richmenuUsage().then((d) => setUsage(d.items)).catch(() => {})
   }, [])
+
+  const menus = usage.filter((u) => u.richMenuId)
+  const selectedCount = menu
+    ? usage.find((u) => u.richMenuId === menu)?.count ?? 0
+    : usage.reduce((s, u) => s + (u.richMenuId ? u.count : 0), 0)
 
   const setMsg = (i, m) => setMessages((arr) => arr.map((x, j) => (j === i ? m : x)))
   const addMsg = () => messages.length < 5 && setMessages((a) => [...a, blank('text')])
@@ -29,7 +34,7 @@ export default function Messaging() {
   const targetLabel = {
     broadcast: 'ทุกคนที่ติดตาม',
     push: `${to.split(/[\s,]+/).filter(Boolean).length} userId`,
-    db: `filter: ${tag || 'ทุก tag'} / ${menu ? menus.find((m) => m.richMenuId === menu)?.name : 'ทุกเมนู'}`,
+    db: `${menu ? menus.find((m) => m.richMenuId === menu)?.name : 'ทุกเมนู'}${tag ? ` +tag:${tag}` : ''} · ~${selectedCount.toLocaleString()} คน`,
   }[mode]
 
   const doValidate = async () => {
@@ -78,13 +83,33 @@ export default function Messaging() {
                         value={to} onChange={(e) => setTo(e.target.value)} />
             )}
             {mode === 'db' && (
-              <div className="row wrap">
-                <input placeholder="tag" value={tag} onChange={(e) => setTag(e.target.value)} />
-                <select value={menu} onChange={(e) => setMenu(e.target.value)}>
-                  <option value="">— ทุก rich menu —</option>
-                  {menus.map((m) => <option key={m.richMenuId} value={m.richMenuId}>{m.name}</option>)}
-                </select>
-              </div>
+              <>
+                <div className="row wrap">
+                  <input placeholder="tag" value={tag} onChange={(e) => setTag(e.target.value)} />
+                  <select value={menu} onChange={(e) => setMenu(e.target.value)}>
+                    <option value="">— ทุก rich menu ({menus.reduce((s, m) => s + m.count, 0).toLocaleString()} คน) —</option>
+                    {menus.map((m) => (
+                      <option key={m.richMenuId} value={m.richMenuId}>
+                        {m.name} — {m.count.toLocaleString()} คน{m.isDefault ? ' (default)' : ''}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="usage-bars">
+                  {usage.map((u) => {
+                    const max = usage[0]?.count || 1
+                    return (
+                      <div key={u.richMenuId || 'none'} className="usage-row"
+                           onClick={() => u.richMenuId && setMenu(u.richMenuId === menu ? '' : u.richMenuId)}
+                           style={{ cursor: u.richMenuId ? 'pointer' : 'default' }}>
+                        <span className="usage-name">{u.name}</span>
+                        <span className="usage-track"><span className="usage-fill" style={{ width: `${(u.count / max) * 100}%` }} /></span>
+                        <span className="usage-count">{u.count.toLocaleString()}</span>
+                      </div>
+                    )
+                  })}
+                </div>
+              </>
             )}
           </section>
 

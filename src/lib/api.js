@@ -26,6 +26,7 @@ export const api = {
   dashboard: () => req('GET', '/dashboard'),
 
   richmenus: () => req('GET', '/richmenus'),
+  richmenuUsage: () => req('GET', '/richmenu/usage'),
   setDefaultMenu: (richMenuId) => req('POST', '/richmenu/default', { richMenuId }),
   clearDefaultMenu: () => req('DELETE', '/richmenu/default'),
   deleteMenu: (rid) => req('DELETE', `/richmenu/${rid}`),
