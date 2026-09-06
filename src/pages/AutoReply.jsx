@@ -4,6 +4,7 @@ import { Spinner, useToast } from '../lib/ui.jsx'
 import { blank } from '../lib/messageTypes.js'
 import MessageEditor from '../components/MessageEditor.jsx'
 import MessagePreview from '../components/MessagePreview.jsx'
+import TemplateGallery from '../components/TemplateGallery.jsx'
 
 const MATCH = { contains: 'มีคำนี้', exact: 'ตรงเป๊ะ', prefix: 'ขึ้นต้นด้วย', any: 'ทุกข้อความ' }
 const EMPTY = { name: '', match_type: 'contains', keywords: '', priority: 0, enabled: true, messages: [blank('text')] }
@@ -13,6 +14,7 @@ export default function AutoReply() {
   const [rules, setRules] = useState(null)
   const [form, setForm] = useState(null)
   const [busy, setBusy] = useState(false)
+  const [gallery, setGallery] = useState(false)
 
   const load = () => api.autoReplies().then((d) => setRules(d.rules)).catch((e) => t.err(e.message))
   useEffect(() => { load() }, [])
@@ -98,8 +100,11 @@ export default function AutoReply() {
             )}
             <div className="row spread" style={{ marginTop: 8 }}>
               <b className="sm">ข้อความตอบ ({form.messages.length}/5)</b>
-              <button className="xs" disabled={form.messages.length >= 5}
-                      onClick={() => setForm({ ...form, messages: [...form.messages, blank('text')] })}>+ ข้อความ</button>
+              <div className="row">
+                <button className="xs primary" onClick={() => setGallery(true)}>📚 คลัง</button>
+                <button className="xs" disabled={form.messages.length >= 5}
+                        onClick={() => setForm({ ...form, messages: [...form.messages, blank('text')] })}>+ ข้อความ</button>
+              </div>
             </div>
             {form.messages.map((m, i) => (
               <MessageEditor key={i} index={i} msg={m}
@@ -114,6 +119,11 @@ export default function AutoReply() {
             <button className="primary" onClick={save} disabled={busy}>บันทึกกฎ</button>
           </div>
         </div>
+      )}
+
+      {gallery && (
+        <TemplateGallery onClose={() => setGallery(false)}
+          onPick={(msgs) => setForm((f) => ({ ...f, messages: msgs.slice(0, 5) }))} />
       )}
     </div>
   )

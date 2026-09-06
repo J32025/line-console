@@ -4,6 +4,7 @@ import { useToast } from '../lib/ui.jsx'
 import { blank } from '../lib/messageTypes.js'
 import MessageEditor from '../components/MessageEditor.jsx'
 import MessagePreview from '../components/MessagePreview.jsx'
+import TemplateGallery from '../components/TemplateGallery.jsx'
 
 const DRAFT_KEY = 'lc_msg_draft'
 
@@ -30,6 +31,7 @@ export default function Messaging() {
   const [scheduled, setScheduled] = useState([])
   const [preview, setPreview] = useState(null) // {count, sample}
   const [ncProgress, setNcProgress] = useState(null)
+  const [gallery, setGallery] = useState(false)
 
   const loadHistory = () => api.broadcastHistory().then((d) => setHistory(d.broadcasts)).catch(() => {})
   const loadScheduled = () => api.scheduled().then((d) => setScheduled(d.jobs)).catch(() => {})
@@ -255,12 +257,13 @@ export default function Messaging() {
           <section className="card">
             <div className="row spread wrap">
               <h3>ข้อความ ({messages.length}/5)</h3>
-              <div className="row">
+              <div className="row wrap">
+                <button className="sm primary" onClick={() => setGallery(true)}>📚 คลังเทมเพลต</button>
                 <select defaultValue="" onChange={(e) => { loadTemplate(e.target.value); e.target.value = '' }}>
-                  <option value="">โหลดเทมเพลต…</option>
+                  <option value="">เทมเพลตของฉัน…</option>
                   {templates.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}
                 </select>
-                <button className="xs" onClick={saveTemplate}>บันทึกเทมเพลต</button>
+                <button className="xs" onClick={saveTemplate}>บันทึก</button>
                 <button className="sm" onClick={addMsg} disabled={messages.length >= 5}>+ ข้อความ</button>
               </div>
             </div>
@@ -388,6 +391,13 @@ export default function Messaging() {
           </table>
         </div>
       </section>
+
+      {gallery && (
+        <TemplateGallery
+          onClose={() => setGallery(false)}
+          onPick={(msgs) => { setMessages(msgs.slice(0, 5)); window.scrollTo(0, 0); t.ok('ใส่เทมเพลตแล้ว — แก้เนื้อหา/ลิงก์/รูปก่อนส่ง') }}
+        />
+      )}
     </div>
   )
 }
