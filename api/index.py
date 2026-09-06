@@ -157,15 +157,25 @@ async def dashboard(admin=Depends(current_admin)):
     except Exception as e:
         bot = {"error": str(e)}
     recent_ops = await supa.select("operations", params={
-        "select": "id,actor,action,status,created_at", "order": "created_at.desc", "limit": "10",
+        "select": "id,actor,action,status,created_at", "order": "created_at.desc", "limit": "8",
     })
     recent_bc = await supa.select("broadcasts", params={
         "select": "id,kind,target_count,status,created_at", "order": "created_at.desc", "limit": "5",
     })
+    trend = await supa.select("stats_daily", params={
+        "select": "day,followers,targeted_reaches,blocks", "order": "day.desc", "limit": "30",
+    })
+    # นับ event 7 วันล่าสุด แยกชนิด
+    since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=7)).isoformat()
+    ev7 = {}
+    for et in ("follow", "unfollow", "message"):
+        ev7[et] = await supa.count("webhook_events", {"event_type": f"eq.{et}", "created_at": f"gte.{since}"})
     return {
         "users": {"total": total, "following": following, "no_menu": no_menu},
         "bot": bot, "quota": quota,
         "recent_operations": recent_ops, "recent_broadcasts": recent_bc,
+        "trend": list(reversed(trend)),
+        "events_7d": ev7,
     }
 
 
@@ -241,11 +251,44 @@ async def clear_default(admin=Depends(current_admin)):
 
 @app.post("/api/richmenu/create")
 async def create_menu(req: Request, admin=Depends(current_admin)):
+    """สร้าง rich menu + (ถ้าส่ง imageBase64 มา) อัปโหลดรูปให้เลย"""
     b = await req.json()
-    payload = b.get("richMenu") or b
+    payload = b.get("richMenu") or {k: v for k, v in b.items() if k != "imageBase64"}
     menu = await line.richmenu_create(payload)
+    rid = menu.get("richMenuId")
+
+    img = b.get("imageBase64")
+    if img and rid:
+        if "," in img:
+            header, img = img.split(",", 1)
+            ctype = "image/jpeg" if "jpeg" in header or "jpg" in header else "image/png"
+        else:
+            ctype = "image/png"
+        content = base64.b64decode(img)
+        ok, txt = await line.richmenu_upload_image(rid, content, ctype)
+        if not ok:
+            await line.richmenu_delete(rid)
+            raise HTTPException(400, f"อัปโหลดรูปไม่ผ่าน: {txt[:200]}")
+
+    if b.get("setDefault") and rid:
+        await line.richmenu_set_default(rid)
     await supa.log_operation(admin["userId"], "richmenu.create", payload, menu)
     return menu
+
+
+@app.post("/api/richmenu/{rid}/image")
+async def upload_menu_image(rid: str, req: Request, admin=Depends(current_admin)):
+    b = await req.json()
+    img = b.get("imageBase64", "")
+    if "," in img:
+        header, img = img.split(",", 1)
+        ctype = "image/jpeg" if "jpeg" in header or "jpg" in header else "image/png"
+    else:
+        ctype = "image/png"
+    ok, txt = await line.richmenu_upload_image(rid, base64.b64decode(img), ctype)
+    if not ok:
+        raise HTTPException(400, txt)
+    return {"ok": True}
 
 
 @app.delete("/api/richmenu/{rid}")
@@ -284,14 +327,17 @@ async def assign(req: Request, admin=Depends(current_admin)):
     # หา userIds
     if target == "list":
         uids = [u.strip() for u in b.get("userIds", []) if u.strip()]
-    else:
-        params = {"select": "line_user_id", "is_following": "eq.true"}
-        if target == "none":
-            params["rich_menu_status"] = "eq.none"
-        elif target == "tag":
-            params["tags"] = f"cs.{{{b.get('tag','')}}}"
-        rows = await supa.select_all("line_users", params=params)
-        uids = [r["line_user_id"] for r in rows]
+    elif target == "segment":
+        seg = await supa.select("segments", params={"id": f"eq.{b.get('segmentId')}", "select": "filter", "limit": "1"})
+        uids = await _uids_by_filter(seg[0]["filter"] if seg else {})
+    elif target == "filter":
+        uids = await _uids_by_filter(b.get("filter", {}))
+    elif target == "none":
+        uids = await _uids_by_filter({"noMenu": True})
+    elif target == "tag":
+        uids = await _uids_by_filter({"tag": b.get("tag", "")})
+    else:  # all
+        uids = await _uids_by_filter({})
 
     if not uids:
         raise HTTPException(400, "ไม่มี userId ปลายทาง")
@@ -662,15 +708,16 @@ async def msg_broadcast(req: Request, admin=Depends(current_admin)):
 
 @app.post("/api/message/multicast-from-db")
 async def msg_multicast_db(req: Request, admin=Depends(current_admin)):
-    """ส่งหา user ใน DB ตาม filter (tag / menu / following)"""
+    """ส่งหา user ใน DB ตาม filter / segmentId / tag+menu"""
     b = await req.json()
-    params = {"select": "line_user_id", "is_following": "eq.true"}
-    if b.get("tag"):
-        params["tags"] = f"cs.{{{b['tag']}}}"
-    if b.get("menu"):
-        params["current_rich_menu_id"] = f"eq.{b['menu']}"
-    rows = await supa.select_all("line_users", params=params)
-    uids = [r["line_user_id"] for r in rows]
+    if b.get("segmentId"):
+        seg = await supa.select("segments", params={"id": f"eq.{b['segmentId']}", "select": "filter", "limit": "1"})
+        f = seg[0]["filter"] if seg else {}
+    elif b.get("filter"):
+        f = b["filter"]
+    else:
+        f = {"tag": b.get("tag"), "menu": b.get("menu")}
+    uids = await _uids_by_filter(f)
     if not uids:
         raise HTTPException(400, "ไม่มีปลายทาง")
     msgs = _normalize_messages(b.get("messages", []))
@@ -881,6 +928,100 @@ async def create_scheduled(req: Request, admin=Depends(current_admin)):
 async def cancel_scheduled(jid: int, admin=Depends(current_admin)):
     await supa.update("scheduled_jobs", {"status": "cancelled"}, {"id": f"eq.{jid}", "status": "eq.pending"})
     return {"ok": True}
+
+
+# ============================================================
+# SEGMENTS (บันทึก filter เป็นกลุ่ม)
+# ============================================================
+def _filter_to_params(f: dict) -> dict:
+    p = {"select": "line_user_id"}
+    following = f.get("following")
+    if following in ("true", "false", True, False):
+        p["is_following"] = f"eq.{str(following).lower()}"
+    else:
+        p["is_following"] = "eq.true"
+    if f.get("menu") == "none" or f.get("noMenu"):
+        p["current_rich_menu_id"] = "is.null"
+    elif f.get("menu"):
+        p["current_rich_menu_id"] = f"eq.{f['menu']}"
+    if f.get("source"):
+        p["source"] = f"eq.{f['source']}"
+    tags = f.get("tags") or ([f["tag"]] if f.get("tag") else [])
+    if tags:
+        p["tags"] = "cs.{" + ",".join(tags) + "}"
+    if f.get("search"):
+        s = f["search"]
+        p["or"] = f"(line_user_id.ilike.*{s}*,display_name.ilike.*{s}*,note.ilike.*{s}*)"
+    return p
+
+
+async def _uids_by_filter(f: dict) -> list[str]:
+    rows = await supa.select_all("line_users", params=_filter_to_params(f))
+    return [r["line_user_id"] for r in rows]
+
+
+@app.get("/api/segments")
+async def list_segments(admin=Depends(current_admin)):
+    return {"segments": await supa.select("segments", params={"select": "*", "order": "updated_at.desc"})}
+
+
+@app.post("/api/segments")
+async def save_segment(req: Request, admin=Depends(current_admin)):
+    b = await req.json()
+    cnt = len(await _uids_by_filter(b.get("filter", {})))
+    row = {"name": b["name"], "description": b.get("description"),
+           "filter": b.get("filter", {}), "last_count": cnt,
+           "created_by": admin["userId"], "updated_at": NOW()}
+    if b.get("id"):
+        await supa.update("segments", row, {"id": f"eq.{b['id']}"})
+        return {"ok": True, "id": b["id"], "count": cnt}
+    r = await supa.insert("segments", row)
+    return {"ok": True, "segment": r[0] if r else None, "count": cnt}
+
+
+@app.get("/api/segments/{sid}/count")
+async def segment_count(sid: int, admin=Depends(current_admin)):
+    rows = await supa.select("segments", params={"id": f"eq.{sid}", "select": "filter", "limit": "1"})
+    if not rows:
+        raise HTTPException(404, "ไม่พบ segment")
+    uids = await _uids_by_filter(rows[0]["filter"])
+    await supa.update("segments", {"last_count": len(uids)}, {"id": f"eq.{sid}"})
+    return {"count": len(uids)}
+
+
+@app.delete("/api/segments/{sid}")
+async def delete_segment(sid: int, admin=Depends(current_admin)):
+    await supa.delete("segments", {"id": f"eq.{sid}"})
+    return {"ok": True}
+
+
+# ============================================================
+# NARROWCAST (ส่งตาม demographic ของ LINE)
+# ============================================================
+@app.post("/api/message/narrowcast")
+async def msg_narrowcast(req: Request, admin=Depends(current_admin)):
+    b = await req.json()
+    msgs = _normalize_messages(b.get("messages", []))
+    demo = b.get("demographic")   # LINE filter object (age/gender/area/...)
+    recipient = b.get("recipient")  # audience / redelivery object
+    limit = b.get("limit")
+    filter_ = {"demographic": demo} if demo else None
+    code, txt, rid = await line.narrowcast(msgs, recipient=recipient, filter_=filter_, limit=limit)
+    status = "sent" if code in (200, 202) else "failed"
+    await supa.insert("broadcasts", {
+        "actor": admin["userId"], "kind": "narrowcast", "target_count": None,
+        "messages": msgs, "line_request_id": rid, "status": status,
+        "error": None if status == "sent" else txt[:300],
+    })
+    if code not in (200, 202):
+        raise HTTPException(400, txt)
+    return {"ok": True, "requestId": rid}
+
+
+@app.get("/api/message/narrowcast/progress")
+async def narrowcast_progress(admin=Depends(current_admin), requestId: str = ""):
+    r = await line._req("GET", "/v2/bot/message/progress/narrowcast", params={"requestId": requestId})
+    return r.json()
 
 
 @app.get("/api/admins")

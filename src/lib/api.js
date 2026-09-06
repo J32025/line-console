@@ -27,6 +27,8 @@ export const api = {
 
   richmenus: () => req('GET', '/richmenus'),
   richmenuUsage: () => req('GET', '/richmenu/usage'),
+  createMenu: (payload) => req('POST', '/richmenu/create', payload),
+  uploadMenuImage: (rid, imageBase64) => req('POST', `/richmenu/${rid}/image`, { imageBase64 }),
   setDefaultMenu: (richMenuId) => req('POST', '/richmenu/default', { richMenuId }),
   clearDefaultMenu: () => req('DELETE', '/richmenu/default'),
   deleteMenu: (rid) => req('DELETE', `/richmenu/${rid}`),
@@ -64,4 +66,11 @@ export const api = {
   scheduled: () => req('GET', '/scheduled'),
   schedule: (payload) => req('POST', '/scheduled', payload),
   cancelScheduled: (id) => req('DELETE', `/scheduled/${id}`),
+
+  segments: () => req('GET', '/segments'),
+  saveSegment: (payload) => req('POST', '/segments', payload),
+  segmentCount: (id) => req('GET', `/segments/${id}/count`),
+  delSegment: (id) => req('DELETE', `/segments/${id}`),
+
+  narrowcast: (payload) => req('POST', '/message/narrowcast', payload),
 }

@@ -1,11 +1,13 @@
 import { useEffect, useState } from 'react'
 import { api } from '../lib/api.js'
 import { Spinner, useToast } from '../lib/ui.jsx'
+import RichMenuBuilder from '../components/RichMenuBuilder.jsx'
 
 export default function RichMenus() {
   const t = useToast()
   const [data, setData] = useState(null)
   const [usage, setUsage] = useState({})
+  const [building, setBuilding] = useState(false)
   const [busy, setBusy] = useState(false)
   const [sel, setSel] = useState('')
   const [target, setTarget] = useState('all')
@@ -57,7 +59,10 @@ export default function RichMenus() {
       <section className="card">
         <div className="row spread">
           <h3>รายการเมนู ({menus.length})</h3>
-          <button className="sm" onClick={sync} disabled={busy}>Sync สถานะผู้ใช้ทั้งหมด</button>
+          <div className="row">
+            <button className="sm primary" onClick={() => setBuilding(true)}>+ สร้างเมนูใหม่</button>
+            <button className="sm" onClick={sync} disabled={busy}>Sync สถานะผู้ใช้ทั้งหมด</button>
+          </div>
         </div>
         <table>
           <thead><tr><th></th><th>ชื่อ</th><th>ใช้อยู่</th><th>chatBar</th><th>ขนาด</th><th>richMenuId</th><th></th></tr></thead>
@@ -117,6 +122,8 @@ export default function RichMenus() {
           <button disabled={busy} onClick={() => run('unlink')}>ถอดเมนู</button>
         </div>
       </section>
+
+      {building && <RichMenuBuilder onCancel={() => setBuilding(false)} onDone={() => { setBuilding(false); load() }} />}
     </div>
   )
 }

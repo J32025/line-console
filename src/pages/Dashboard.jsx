@@ -1,29 +1,79 @@
 import { useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
+import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts'
 import { api } from '../lib/api.js'
-import { Spinner, Stat } from '../lib/ui.jsx'
+import { Spinner, Stat, useToast } from '../lib/ui.jsx'
 
 export default function Dashboard() {
+  const t = useToast()
+  const nav = useNavigate()
   const [d, setD] = useState(null)
   const [err, setErr] = useState('')
+  const [busy, setBusy] = useState('')
 
-  useEffect(() => {
-    api.dashboard().then(setD).catch((e) => setErr(e.message))
-  }, [])
+  const load = () => api.dashboard().then(setD).catch((e) => setErr(e.message))
+  useEffect(() => { load() }, [])
+
+  const quick = async (label, fn) => {
+    setBusy(label)
+    try { const r = await fn(); t.ok(`${label}: ` + JSON.stringify(r).slice(0, 90)); load() }
+    catch (e) { t.err(e.message) } finally { setBusy('') }
+  }
 
   if (err) return <p className="err">{err}</p>
   if (!d) return <Spinner />
 
   const q = d.quota?.quota || {}
+  const trend = (d.trend || []).map((x) => ({ ...x, day: x.day?.slice(5) }))
+
   return (
     <div>
       <h1>แดชบอร์ด</h1>
+
       <div className="grid stats">
-        <Stat label="ผู้ใช้ทั้งหมด" value={d.users.total} />
-        <Stat label="กำลังติดตาม" value={d.users.following} />
-        <Stat label="ไม่มี Rich Menu" value={d.users.no_menu} />
-        <Stat label="โควตาข้อความ" value={q.type === 'limited' ? q.value?.toLocaleString() : q.type || '–'}
-              sub={d.quota?.totalUsage != null ? `ใช้ไป ${d.quota.totalUsage.toLocaleString()}` : null} />
+        <Stat label="ผู้ใช้ในระบบ" value={d.users.total?.toLocaleString()} sub={`ติดตาม ${d.users.following?.toLocaleString()}`} />
+        <Stat label="ไม่มี Rich Menu" value={d.users.no_menu?.toLocaleString()} />
+        <Stat label="โควตาข้อความ"
+              value={q.type === 'limited' ? q.value?.toLocaleString() : q.type || '–'}
+              sub={d.quota?.totalUsage != null ? `ใช้ ${d.quota.totalUsage.toLocaleString()}` : null} />
+        <Stat label="Event 7 วัน"
+              value={Object.values(d.events_7d || {}).reduce((a, b) => a + b, 0).toLocaleString()}
+              sub={`follow ${d.events_7d?.follow ?? 0} · unfollow ${d.events_7d?.unfollow ?? 0}`} />
       </div>
+
+      <section className="card">
+        <h3>Quick actions</h3>
+        <div className="row wrap">
+          <button className="sm" disabled={busy} onClick={() => nav('/messaging')}>ส่งข้อความ</button>
+          <button className="sm" disabled={busy} onClick={() => quick('sync richmenu', () => api.syncMenu({ target: 'all' }))}>
+            {busy === 'sync richmenu' ? 'กำลัง sync…' : 'Sync Rich Menu ทั้งหมด'}
+          </button>
+          <button className="sm" disabled={busy} onClick={() => quick('ดึงโปรไฟล์', () => api.refreshProfiles({ target: 'missing', limit: 400 }))}>
+            ดึงโปรไฟล์ที่ค้าง
+          </button>
+          <button className="sm" disabled={busy} onClick={() => nav('/richmenus')}>จัดการ Rich Menu</button>
+          <button className="sm" disabled={busy} onClick={() => nav('/segments')}>กลุ่มเป้าหมาย</button>
+        </div>
+      </section>
+
+      <section className="card">
+        <h3>แนวโน้มผู้ติดตาม</h3>
+        {trend.length > 1 ? (
+          <ResponsiveContainer width="100%" height={240}>
+            <LineChart data={trend}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#eee" />
+              <XAxis dataKey="day" tick={{ fontSize: 11 }} />
+              <YAxis tick={{ fontSize: 11 }} />
+              <Tooltip />
+              <Line type="monotone" dataKey="followers" name="ผู้ติดตาม" stroke="#06c755" strokeWidth={2} dot={false} />
+              <Line type="monotone" dataKey="targeted_reaches" name="เข้าถึงได้" stroke="#0ea5e9" dot={false} />
+              <Line type="monotone" dataKey="blocks" name="บล็อก" stroke="#dc2626" dot={false} />
+            </LineChart>
+          </ResponsiveContainer>
+        ) : (
+          <p className="muted sm">ยังไม่มีข้อมูลพอ — ระบบเก็บ snapshot ทุกวัน 08:05 น. (จะสะสมไปเรื่อย ๆ)</p>
+        )}
+      </section>
 
       <div className="grid two">
         <section className="card">
@@ -34,7 +84,6 @@ export default function Dashboard() {
               <div>
                 <div><b>{d.bot.displayName}</b></div>
                 <div className="muted sm">{d.bot.basicId} · {d.bot.premiumId || 'unverified'}</div>
-                <div className="muted xs">chatMode: {d.bot.chatMode} · webhook: {d.bot.markAsReadMode}</div>
               </div>
             </div>
           ) : <p className="muted">{d.bot?.error || '–'}</p>}
@@ -45,8 +94,7 @@ export default function Dashboard() {
           <ul className="loglist">
             {d.recent_operations.map((o) => (
               <li key={o.id}>
-                <span className={`dot ${o.status}`} />
-                {o.action}
+                <span className={`dot ${o.status}`} />{o.action}
                 <span className="muted xs"> · {new Date(o.created_at).toLocaleString('th-TH')}</span>
               </li>
             ))}
@@ -62,7 +110,7 @@ export default function Dashboard() {
           <tbody>
             {d.recent_broadcasts.map((b) => (
               <tr key={b.id}>
-                <td>{b.kind}</td><td>{b.target_count?.toLocaleString()}</td>
+                <td>{b.kind}</td><td>{b.target_count?.toLocaleString() ?? '–'}</td>
                 <td><span className={`chip ${b.status}`}>{b.status}</span></td>
                 <td className="muted sm">{new Date(b.created_at).toLocaleString('th-TH')}</td>
               </tr>

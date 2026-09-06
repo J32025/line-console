@@ -8,13 +8,16 @@ import MessagePreview from '../components/MessagePreview.jsx'
 export default function Messaging() {
   const t = useToast()
   const [messages, setMessages] = useState([blank('text')])
-  const [mode, setMode] = useState('broadcast') // broadcast | push | db
+  const [mode, setMode] = useState('broadcast') // broadcast | push | db | segment | narrowcast
   const [to, setTo] = useState('')
   const [tag, setTag] = useState('')
   const [menu, setMenu] = useState('')
+  const [segId, setSegId] = useState('')
+  const [nc, setNc] = useState({ gender: [], ageGte: '', ageLt: '', areas: [] })
   const [busy, setBusy] = useState(false)
   const [history, setHistory] = useState([])
   const [usage, setUsage] = useState([]) // [{richMenuId, name, count}] เรียงมาก→น้อย
+  const [segments, setSegments] = useState([])
   const [schedAt, setSchedAt] = useState('')
   const [scheduled, setScheduled] = useState([])
 
@@ -23,6 +26,7 @@ export default function Messaging() {
   useEffect(() => {
     loadHistory(); loadScheduled()
     api.richmenuUsage().then((d) => setUsage(d.items)).catch(() => {})
+    api.segments().then((d) => setSegments(d.segments)).catch(() => {})
   }, [])
 
   const doSchedule = async () => {
@@ -43,11 +47,28 @@ export default function Messaging() {
   const addMsg = () => messages.length < 5 && setMessages((a) => [...a, blank('text')])
   const rmMsg = (i) => setMessages((a) => a.filter((_, j) => j !== i))
 
+  const seg = segments.find((s) => String(s.id) === String(segId))
   const targetLabel = {
     broadcast: 'ทุกคนที่ติดตาม',
     push: `${to.split(/[\s,]+/).filter(Boolean).length} userId`,
     db: `${menu ? menus.find((m) => m.richMenuId === menu)?.name : 'ทุกเมนู'}${tag ? ` +tag:${tag}` : ''} · ~${selectedCount.toLocaleString()} คน`,
+    segment: seg ? `${seg.name} · ~${(seg.last_count ?? 0).toLocaleString()} คน` : 'เลือกกลุ่ม',
+    narrowcast: `demographic (${nc.gender.join('/') || 'ทุกเพศ'}${nc.ageGte ? ` ${nc.ageGte}+` : ''})`,
   }[mode]
+
+  const buildDemographic = () => {
+    const parts = []
+    if (nc.gender.length) parts.push({ type: 'gender', oneOf: nc.gender })
+    if (nc.ageGte || nc.ageLt) {
+      const a = { type: 'age' }
+      if (nc.ageGte) a.gte = `age_${nc.ageGte}`
+      if (nc.ageLt) a.lt = `age_${nc.ageLt}`
+      parts.push(a)
+    }
+    if (nc.areas.length) parts.push({ type: 'area', oneOf: nc.areas })
+    if (!parts.length) return null
+    return parts.length === 1 ? parts[0] : { type: 'operator', and: parts }
+  }
 
   const doValidate = async () => {
     try { await api.validateMsg(messages); t.ok('รูปแบบข้อความถูกต้อง ✓') }
@@ -67,6 +88,8 @@ export default function Messaging() {
       let r
       if (mode === 'broadcast') r = await api.broadcast({ messages })
       else if (mode === 'push') r = await api.push({ to: to.split(/[\s,]+/).filter(Boolean), messages })
+      else if (mode === 'segment') r = await api.multicastDb({ segmentId: segId, messages })
+      else if (mode === 'narrowcast') r = await api.narrowcast({ demographic: buildDemographic(), messages })
       else r = await api.multicastDb({ tag, menu, messages })
       t.ok('ส่งแล้ว ' + (r.sent != null ? `(${r.sent} คน)` : r.requestId ? `req ${r.requestId.slice(0, 8)}` : ''))
       loadHistory()
@@ -83,13 +106,45 @@ export default function Messaging() {
           <section className="card">
             <h3>ปลายทาง</h3>
             <div className="row wrap">
-              {['broadcast', 'push', 'db'].map((m) => (
+              {['broadcast', 'push', 'db', 'segment', 'narrowcast'].map((m) => (
                 <label key={m}>
                   <input type="radio" checked={mode === m} onChange={() => setMode(m)} />{' '}
-                  {{ broadcast: 'Broadcast (ทุกคน)', push: 'Push (ระบุ userId)', db: 'ตาม filter ใน DB' }[m]}
+                  {{ broadcast: 'Broadcast', push: 'Push (userId)', db: 'filter DB', segment: 'กลุ่ม', narrowcast: 'Narrowcast (เพศ/อายุ/พื้นที่)' }[m]}
                 </label>
               ))}
             </div>
+            {mode === 'segment' && (
+              <select value={segId} onChange={(e) => setSegId(e.target.value)}>
+                <option value="">— เลือกกลุ่ม —</option>
+                {segments.map((s) => <option key={s.id} value={s.id}>{s.name} ({(s.last_count ?? 0).toLocaleString()})</option>)}
+              </select>
+            )}
+            {mode === 'narrowcast' && (
+              <div className="nc-form">
+                <div className="row wrap">
+                  <span className="sm muted">เพศ:</span>
+                  {['male', 'female'].map((g) => (
+                    <label key={g}>
+                      <input type="checkbox" checked={nc.gender.includes(g)}
+                             onChange={(e) => setNc((s) => ({ ...s, gender: e.target.checked ? [...s.gender, g] : s.gender.filter((x) => x !== g) }))} />
+                      {g === 'male' ? ' ชาย' : ' หญิง'}
+                    </label>
+                  ))}
+                </div>
+                <div className="row wrap">
+                  <span className="sm muted">อายุ:</span>
+                  <select value={nc.ageGte} onChange={(e) => setNc((s) => ({ ...s, ageGte: e.target.value }))}>
+                    <option value="">ตั้งแต่</option>
+                    {['15', '20', '25', '30', '35', '40', '45', '50'].map((a) => <option key={a}>{a}</option>)}
+                  </select>
+                  <select value={nc.ageLt} onChange={(e) => setNc((s) => ({ ...s, ageLt: e.target.value }))}>
+                    <option value="">ถึง (ไม่รวม)</option>
+                    {['20', '25', '30', '35', '40', '45', '50'].map((a) => <option key={a}>{a}</option>)}
+                  </select>
+                </div>
+                <p className="muted xs">narrowcast ต้องมีปลายทาง ≥ 100 คน และเป็นแบบ async — เช็คผลใน "ประวัติการส่ง"</p>
+              </div>
+            )}
             {mode === 'push' && (
               <textarea rows={3} placeholder="userId คั่นด้วยขึ้นบรรทัด/comma (≤500 = multicast, 1 = push)"
                         value={to} onChange={(e) => setTo(e.target.value)} />

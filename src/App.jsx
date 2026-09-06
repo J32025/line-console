@@ -7,6 +7,7 @@ import Dashboard from './pages/Dashboard.jsx'
 import RichMenus from './pages/RichMenus.jsx'
 import Messaging from './pages/Messaging.jsx'
 import AutoReply from './pages/AutoReply.jsx'
+import Segments from './pages/Segments.jsx'
 import Users from './pages/Users.jsx'
 import Stats from './pages/Stats.jsx'
 import Events from './pages/Events.jsx'
@@ -17,6 +18,7 @@ const NAV = [
   ['/richmenus', 'Rich Menu'],
   ['/messaging', 'ส่งข้อความ'],
   ['/auto-reply', 'ตอบอัตโนมัติ'],
+  ['/segments', 'กลุ่มเป้าหมาย'],
   ['/users', 'ผู้ใช้'],
   ['/stats', 'สถิติ'],
   ['/events', 'Events'],
@@ -70,6 +72,7 @@ export default function App() {
             <Route path="/richmenus" element={<RichMenus />} />
             <Route path="/messaging" element={<Messaging />} />
             <Route path="/auto-reply" element={<AutoReply />} />
+            <Route path="/segments" element={<Segments />} />
             <Route path="/users" element={<Users />} />
             <Route path="/stats" element={<Stats />} />
             <Route path="/events" element={<Events />} />
