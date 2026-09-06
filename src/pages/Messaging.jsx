@@ -15,12 +15,24 @@ export default function Messaging() {
   const [busy, setBusy] = useState(false)
   const [history, setHistory] = useState([])
   const [usage, setUsage] = useState([]) // [{richMenuId, name, count}] เรียงมาก→น้อย
+  const [schedAt, setSchedAt] = useState('')
+  const [scheduled, setScheduled] = useState([])
 
   const loadHistory = () => api.broadcastHistory().then((d) => setHistory(d.broadcasts)).catch(() => {})
+  const loadScheduled = () => api.scheduled().then((d) => setScheduled(d.jobs)).catch(() => {})
   useEffect(() => {
-    loadHistory()
+    loadHistory(); loadScheduled()
     api.richmenuUsage().then((d) => setUsage(d.items)).catch(() => {})
   }, [])
+
+  const doSchedule = async () => {
+    if (!schedAt) return t.err('เลือกเวลาก่อน')
+    setBusy(true)
+    try {
+      await api.schedule({ kind: 'broadcast', runAt: new Date(schedAt).toISOString(), messages })
+      t.ok('ตั้งเวลาส่ง broadcast แล้ว'); setSchedAt(''); loadScheduled()
+    } catch (e) { t.err(e.message) } finally { setBusy(false) }
+  }
 
   const menus = usage.filter((u) => u.richMenuId)
   const selectedCount = menu
@@ -130,6 +142,29 @@ export default function Messaging() {
             <button className="sm" onClick={sendTest} disabled={busy}>ส่งหาตัวเอง (ทดสอบ)</button>
             <button className="primary" onClick={send} disabled={busy}>ส่งจริง → {targetLabel}</button>
           </div>
+
+          <section className="card" style={{ marginTop: 16 }}>
+            <h3>ตั้งเวลาส่ง (Broadcast)</h3>
+            <div className="row wrap">
+              <input type="datetime-local" value={schedAt} onChange={(e) => setSchedAt(e.target.value)} />
+              <button className="sm" onClick={doSchedule} disabled={busy}>ตั้งเวลา</button>
+            </div>
+            {scheduled.filter((j) => j.status === 'pending').length > 0 && (
+              <table style={{ marginTop: 10 }}>
+                <thead><tr><th>เวลา</th><th>ชนิด</th><th></th></tr></thead>
+                <tbody>
+                  {scheduled.filter((j) => j.status === 'pending').map((j) => (
+                    <tr key={j.id}>
+                      <td className="sm">{new Date(j.run_at).toLocaleString('th-TH')}</td>
+                      <td>{j.kind}</td>
+                      <td><button className="xs danger" onClick={() => api.cancelScheduled(j.id).then(loadScheduled)}>ยกเลิก</button></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+            <p className="muted xs">ระบบเช็คทุก 5 นาที — เวลาส่งจริงอาจคลาดเคลื่อน ≤ 5 นาที</p>
+          </section>
         </div>
 
         {/* ---------- ขวา: พรีวิว ---------- */}

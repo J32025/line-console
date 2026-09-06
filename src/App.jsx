@@ -6,6 +6,7 @@ import { ToastProvider, Spinner } from './lib/ui.jsx'
 import Dashboard from './pages/Dashboard.jsx'
 import RichMenus from './pages/RichMenus.jsx'
 import Messaging from './pages/Messaging.jsx'
+import AutoReply from './pages/AutoReply.jsx'
 import Users from './pages/Users.jsx'
 import Stats from './pages/Stats.jsx'
 import Events from './pages/Events.jsx'
@@ -15,6 +16,7 @@ const NAV = [
   ['/', 'แดชบอร์ด'],
   ['/richmenus', 'Rich Menu'],
   ['/messaging', 'ส่งข้อความ'],
+  ['/auto-reply', 'ตอบอัตโนมัติ'],
   ['/users', 'ผู้ใช้'],
   ['/stats', 'สถิติ'],
   ['/events', 'Events'],
@@ -67,6 +69,7 @@ export default function App() {
             <Route path="/" element={<Dashboard />} />
             <Route path="/richmenus" element={<RichMenus />} />
             <Route path="/messaging" element={<Messaging />} />
+            <Route path="/auto-reply" element={<AutoReply />} />
             <Route path="/users" element={<Users />} />
             <Route path="/stats" element={<Stats />} />
             <Route path="/events" element={<Events />} />

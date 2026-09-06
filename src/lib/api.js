@@ -56,4 +56,12 @@ export const api = {
   admins: () => req('GET', '/admins'),
   addAdmin: (payload) => req('POST', '/admins', payload),
   delAdmin: (uid) => req('DELETE', `/admins/${uid}`),
+
+  autoReplies: () => req('GET', '/auto-replies'),
+  saveAutoReply: (payload) => req('POST', '/auto-replies', payload),
+  delAutoReply: (id) => req('DELETE', `/auto-replies/${id}`),
+
+  scheduled: () => req('GET', '/scheduled'),
+  schedule: (payload) => req('POST', '/scheduled', payload),
+  cancelScheduled: (id) => req('DELETE', `/scheduled/${id}`),
 }

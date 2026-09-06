@@ -148,6 +148,12 @@ async def richmenu_alias_delete(alias_id: str):
 
 
 # ---------- messaging ----------
+async def reply(reply_token: str, messages: list):
+    r = await _req("POST", "/v2/bot/message/reply",
+                   json={"replyToken": reply_token, "messages": messages})
+    return r.status_code, r.text
+
+
 async def push(to: str, messages: list, notification_disabled=False):
     r = await _req("POST", "/v2/bot/message/push",
                    json={"to": to, "messages": messages,

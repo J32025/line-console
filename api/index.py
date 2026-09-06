@@ -94,7 +94,51 @@ async def webhook(request: Request):
     except Exception as e:
         # ตอบ 200 เสมอ ไม่งั้น LINE จะ retry
         print("webhook store error:", e)
+
+    # ---- auto-reply ----
+    try:
+        await _handle_auto_replies(events)
+    except Exception as e:
+        print("auto-reply error:", e)
     return {"ok": True}
+
+
+def _match(rule: dict, text: str) -> bool:
+    t = (text or "").lower().strip()
+    kws = [k.lower().strip() for k in (rule.get("keywords") or []) if k.strip()]
+    mt = rule.get("match_type", "contains")
+    if mt == "any":
+        return True
+    if not kws:
+        return False
+    if mt == "exact":
+        return t in kws
+    if mt == "prefix":
+        return any(t.startswith(k) for k in kws)
+    return any(k in t for k in kws)  # contains
+
+
+async def _handle_auto_replies(events: list):
+    text_events = [e for e in events
+                   if e.get("type") == "message" and e.get("message", {}).get("type") == "text"
+                   and e.get("replyToken")]
+    if not text_events:
+        return
+    rules = await supa.select("auto_replies", params={
+        "select": "*", "enabled": "eq.true", "order": "priority.desc,id.asc", "limit": "200",
+    })
+    if not rules:
+        return
+    for e in text_events:
+        text = e["message"]["text"]
+        rule = next((r for r in rules if _match(r, text)), None)
+        if not rule:
+            continue
+        code, _ = await line.reply(e["replyToken"], rule["messages"][:5])
+        if code == 200:
+            await supa.update("auto_replies",
+                              {"hits": (rule.get("hits") or 0) + 1, "last_hit_at": NOW()},
+                              {"id": f"eq.{rule['id']}"})
 
 
 # ============================================================
@@ -708,6 +752,135 @@ async def operations(admin=Depends(current_admin), limit: int = 100):
     return {"operations": await supa.select("operations", params={
         "select": "*", "order": "created_at.desc", "limit": str(min(limit, 500)),
     })}
+
+
+# ============================================================
+# AUTO-REPLY (keyword responder)
+# ============================================================
+@app.get("/api/auto-replies")
+async def list_auto_replies(admin=Depends(current_admin)):
+    return {"rules": await supa.select("auto_replies", params={
+        "select": "*", "order": "priority.desc,id.asc",
+    })}
+
+
+@app.post("/api/auto-replies")
+async def create_auto_reply(req: Request, admin=Depends(current_admin)):
+    b = await req.json()
+    row = {
+        "name": b.get("name"),
+        "enabled": b.get("enabled", True),
+        "match_type": b.get("match_type", "contains"),
+        "keywords": b.get("keywords", []),
+        "messages": _normalize_messages(b.get("messages", [])),
+        "priority": int(b.get("priority", 0)),
+        "created_by": admin["userId"],
+    }
+    if b.get("id"):
+        await supa.update("auto_replies", row, {"id": f"eq.{b['id']}"})
+        return {"ok": True, "id": b["id"]}
+    r = await supa.insert("auto_replies", row)
+    return {"ok": True, "rule": r[0] if r else None}
+
+
+@app.delete("/api/auto-replies/{rid}")
+async def delete_auto_reply(rid: int, admin=Depends(current_admin)):
+    await supa.delete("auto_replies", {"id": f"eq.{rid}"})
+    return {"ok": True}
+
+
+# ============================================================
+# CRON: snapshot สถิติรายวัน + รัน scheduled jobs
+# ============================================================
+def _check_cron_key(request: Request):
+    if CRON_SECRET:
+        key = request.query_params.get("key") or request.headers.get("x-cron-key", "")
+        if key != CRON_SECRET:
+            raise HTTPException(403, "bad cron key")
+
+
+@app.api_route("/api/cron/snapshot-stats", methods=["GET", "POST"])
+async def cron_snapshot_stats(request: Request):
+    _check_cron_key(request)
+    date = (dt.date.today() - dt.timedelta(days=1)).strftime("%Y%m%d")
+    try:
+        followers = await line.insight_followers(date)
+        delivery = await line.insight_message_delivery(date)
+        quota = await line.message_quota()
+    except Exception as e:
+        raise HTTPException(400, f"insight error: {e}")
+
+    q = quota.get("quota", {}).get("quota") or quota.get("quota", {})
+    await supa.upsert("stats_daily", {
+        "day": f"{date[:4]}-{date[4:6]}-{date[6:]}",
+        "followers": followers.get("followers"),
+        "targeted_reaches": followers.get("targetedReaches"),
+        "blocks": followers.get("blocks"),
+        "quota_type": q.get("type") if isinstance(q, dict) else None,
+        "quota_limit": q.get("value") if isinstance(q, dict) else None,
+        "quota_used": quota.get("totalUsage"),
+        "raw": {"followers": followers, "delivery": delivery},
+        "captured_at": NOW(),
+    }, on_conflict="day")
+    await supa.log_operation("cron", "stats.snapshot", {"date": date}, followers)
+    return {"ok": True, "date": date, "followers": followers.get("followers")}
+
+
+@app.api_route("/api/cron/run-scheduled", methods=["GET", "POST"])
+async def cron_run_scheduled(request: Request):
+    _check_cron_key(request)
+    due = await supa.select("scheduled_jobs", params={
+        "select": "*", "status": "eq.pending", "run_at": f"lte.{NOW()}",
+        "order": "run_at.asc", "limit": "10",
+    })
+    ran = []
+    for job in due:
+        p = job["payload"]
+        try:
+            if job["kind"] == "broadcast":
+                code, txt, rid = await line.broadcast(_normalize_messages(p.get("messages", [])))
+                ok = code == 200
+                await supa.insert("broadcasts", {
+                    "actor": job.get("created_by"), "kind": "broadcast",
+                    "messages": p.get("messages"), "line_request_id": rid,
+                    "status": "sent" if ok else "failed",
+                })
+                res = {"code": code, "requestId": rid}
+            else:
+                ok, res = False, {"error": "unknown kind"}
+            await supa.update("scheduled_jobs",
+                              {"status": "done" if ok else "failed", "result": res},
+                              {"id": f"eq.{job['id']}"})
+            ran.append({"id": job["id"], "ok": ok})
+        except Exception as e:
+            await supa.update("scheduled_jobs", {"status": "failed", "result": {"error": str(e)}},
+                              {"id": f"eq.{job['id']}"})
+    return {"ok": True, "ran": ran}
+
+
+@app.get("/api/scheduled")
+async def list_scheduled(admin=Depends(current_admin)):
+    return {"jobs": await supa.select("scheduled_jobs", params={
+        "select": "*", "order": "run_at.desc", "limit": "50",
+    })}
+
+
+@app.post("/api/scheduled")
+async def create_scheduled(req: Request, admin=Depends(current_admin)):
+    b = await req.json()
+    r = await supa.insert("scheduled_jobs", {
+        "kind": b.get("kind", "broadcast"),
+        "run_at": b["runAt"],
+        "payload": {"messages": _normalize_messages(b.get("messages", []))},
+        "created_by": admin["userId"],
+    })
+    return {"ok": True, "job": r[0] if r else None}
+
+
+@app.delete("/api/scheduled/{jid}")
+async def cancel_scheduled(jid: int, admin=Depends(current_admin)):
+    await supa.update("scheduled_jobs", {"status": "cancelled"}, {"id": f"eq.{jid}", "status": "eq.pending"})
+    return {"ok": True}
 
 
 @app.get("/api/admins")
