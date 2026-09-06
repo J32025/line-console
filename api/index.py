@@ -456,6 +456,17 @@ async def msg_validate(req: Request, admin=Depends(current_admin)):
     return {"ok": ok, "detail": txt}
 
 
+@app.post("/api/message/test")
+async def msg_test(req: Request, admin=Depends(current_admin)):
+    """ส่งข้อความหาตัวเอง (ผู้ที่ล็อกอินอยู่) เพื่อทดสอบก่อนส่งจริง"""
+    b = await req.json()
+    msgs = _normalize_messages(b.get("messages", []))
+    code, txt, rid = await line.push(admin["userId"], msgs)
+    if code != 200:
+        raise HTTPException(400, txt)
+    return {"ok": True, "requestId": rid, "to": admin["userId"]}
+
+
 @app.post("/api/message/push")
 async def msg_push(req: Request, admin=Depends(current_admin)):
     b = await req.json()
