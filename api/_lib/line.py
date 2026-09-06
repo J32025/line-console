@@ -160,9 +160,10 @@ async def push(to: str, messages: list, notification_disabled=False):
                          "notificationDisabled": notification_disabled})
     return r.status_code, r.text, r.headers.get("x-line-request-id")
 
-async def multicast(to: list[str], messages: list):
+async def multicast(to: list[str], messages: list, notification_disabled=False):
     r = await _req("POST", "/v2/bot/message/multicast",
-                   json={"to": to, "messages": messages})
+                   json={"to": to, "messages": messages,
+                         "notificationDisabled": notification_disabled})
     return r.status_code, r.text, r.headers.get("x-line-request-id")
 
 async def broadcast(messages: list):

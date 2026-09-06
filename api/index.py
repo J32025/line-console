@@ -649,6 +649,77 @@ def _normalize_messages(raw):
     return out
 
 
+@app.post("/api/message/recipients-preview")
+async def recipients_preview(req: Request, admin=Depends(current_admin)):
+    """นับปลายทาง + ตัวอย่าง 12 คน (รูป+ชื่อ) ก่อนกดส่งจริง"""
+    b = await req.json()
+    if b.get("mode") == "broadcast":
+        cnt = await supa.count("line_users", {"is_following": "eq.true"})
+        sample = await supa.select("line_users", params={
+            "select": "line_user_id,display_name,picture_url", "is_following": "eq.true",
+            "order": "updated_at.desc", "limit": "12",
+        })
+        return {"count": cnt, "sample": sample, "exact": True}
+
+    if b.get("segmentId"):
+        seg = await supa.select("segments", params={"id": f"eq.{b['segmentId']}", "select": "filter", "limit": "1"})
+        f = seg[0]["filter"] if seg else {}
+    elif b.get("filter"):
+        f = b["filter"]
+    elif b.get("mode") == "push":
+        uids = [u.strip() for u in (b.get("to") or "").replace("\n", ",").split(",") if u.strip()]
+        sample = await supa.select("line_users", params={
+            "select": "line_user_id,display_name,picture_url",
+            "line_user_id": f"in.({','.join(uids[:12])})", "limit": "12",
+        }) if uids else []
+        return {"count": len(uids), "sample": sample, "exact": True}
+    else:
+        f = {"tag": b.get("tag"), "menu": b.get("menu")}
+
+    params = _filter_to_params(f)
+    uids = await _uids_by_filter(f)
+    sample_ids = uids[:12]
+    sample = await supa.select("line_users", params={
+        "select": "line_user_id,display_name,picture_url",
+        "line_user_id": f"in.({','.join(sample_ids)})", "limit": "12",
+    }) if sample_ids else []
+    return {"count": len(uids), "sample": sample, "exact": True}
+
+
+# ---------- message templates ----------
+@app.get("/api/message-templates")
+async def list_msg_templates(admin=Depends(current_admin)):
+    return {"templates": await supa.select("message_templates", params={
+        "select": "*", "order": "updated_at.desc",
+    })}
+
+
+@app.post("/api/message-templates")
+async def save_msg_template(req: Request, admin=Depends(current_admin)):
+    b = await req.json()
+    row = {"name": b["name"], "messages": _normalize_messages(b.get("messages", [])),
+           "created_by": admin["userId"], "updated_at": NOW()}
+    if b.get("id"):
+        await supa.update("message_templates", row, {"id": f"eq.{b['id']}"})
+        return {"ok": True, "id": b["id"]}
+    r = await supa.insert("message_templates", row)
+    return {"ok": True, "template": r[0] if r else None}
+
+
+@app.delete("/api/message-templates/{tid}")
+async def del_msg_template(tid: int, admin=Depends(current_admin)):
+    await supa.delete("message_templates", {"id": f"eq.{tid}"})
+    return {"ok": True}
+
+
+@app.get("/api/broadcasts/{bid}")
+async def get_broadcast(bid: int, admin=Depends(current_admin)):
+    rows = await supa.select("broadcasts", params={"id": f"eq.{bid}", "select": "*", "limit": "1"})
+    if not rows:
+        raise HTTPException(404, "ไม่พบ")
+    return rows[0]
+
+
 @app.post("/api/message/validate")
 async def msg_validate(req: Request, admin=Depends(current_admin)):
     b = await req.json()
@@ -671,12 +742,17 @@ async def msg_test(req: Request, admin=Depends(current_admin)):
 async def msg_push(req: Request, admin=Depends(current_admin)):
     b = await req.json()
     to = b.get("to")
+    nd = bool(b.get("notificationDisabled"))
     msgs = _normalize_messages(b.get("messages", []))
     if isinstance(to, list):
-        code, txt, rid = await line.multicast(to, msgs)
-        kind, cnt = "multicast", len(to)
+        if len(to) == 1:
+            code, txt, rid = await line.push(to[0], msgs, nd)
+            kind, cnt = "push", 1
+        else:
+            code, txt, rid = await line.multicast(to, msgs, nd)
+            kind, cnt = "multicast", len(to)
     else:
-        code, txt, rid = await line.push(to, msgs)
+        code, txt, rid = await line.push(to, msgs, nd)
         kind, cnt = "push", 1
     status = "sent" if code == 200 else "failed"
     await supa.insert("broadcasts", {

@@ -5,29 +5,70 @@ import { blank } from '../lib/messageTypes.js'
 import MessageEditor from '../components/MessageEditor.jsx'
 import MessagePreview from '../components/MessagePreview.jsx'
 
+const DRAFT_KEY = 'lc_msg_draft'
+
 export default function Messaging() {
   const t = useToast()
-  const [messages, setMessages] = useState([blank('text')])
+  const [messages, setMessages] = useState(() => {
+    try { const d = JSON.parse(localStorage.getItem(DRAFT_KEY)); if (d?.length) return d } catch {}
+    return [blank('text')]
+  })
   const [mode, setMode] = useState('broadcast') // broadcast | push | db | segment | narrowcast
   const [to, setTo] = useState('')
   const [tag, setTag] = useState('')
   const [menu, setMenu] = useState('')
   const [segId, setSegId] = useState('')
   const [nc, setNc] = useState({ gender: [], ageGte: '', ageLt: '', areas: [] })
+  const [notiOff, setNotiOff] = useState(false)
   const [busy, setBusy] = useState(false)
   const [history, setHistory] = useState([])
-  const [usage, setUsage] = useState([]) // [{richMenuId, name, count}] เรียงมาก→น้อย
+  const [usage, setUsage] = useState([])
   const [segments, setSegments] = useState([])
+  const [templates, setTemplates] = useState([])
   const [schedAt, setSchedAt] = useState('')
   const [scheduled, setScheduled] = useState([])
+  const [preview, setPreview] = useState(null) // {count, sample}
+  const [ncProgress, setNcProgress] = useState(null)
 
   const loadHistory = () => api.broadcastHistory().then((d) => setHistory(d.broadcasts)).catch(() => {})
   const loadScheduled = () => api.scheduled().then((d) => setScheduled(d.jobs)).catch(() => {})
+  const loadTemplates = () => api.get('/message-templates').then((d) => setTemplates(d.templates)).catch(() => {})
   useEffect(() => {
-    loadHistory(); loadScheduled()
+    loadHistory(); loadScheduled(); loadTemplates()
     api.richmenuUsage().then((d) => setUsage(d.items)).catch(() => {})
     api.segments().then((d) => setSegments(d.segments)).catch(() => {})
   }, [])
+
+  // autosave draft
+  useEffect(() => {
+    const id = setTimeout(() => {
+      try { localStorage.setItem(DRAFT_KEY, JSON.stringify(messages)) } catch {}
+    }, 800)
+    return () => clearTimeout(id)
+  }, [messages])
+
+  const targetPayload = () => {
+    if (mode === 'segment') return { mode, segmentId: segId }
+    if (mode === 'push') return { mode, to }
+    if (mode === 'db') return { mode, tag, menu }
+    return { mode }
+  }
+  const doPreview = async () => {
+    try { setPreview(await api.post('/message/recipients-preview', targetPayload())) }
+    catch (e) { t.err(e.message) }
+  }
+
+  const saveTemplate = async () => {
+    const name = prompt('ชื่อเทมเพลต:')
+    if (!name) return
+    try { await api.post('/message-templates', { name, messages }); t.ok('บันทึกเทมเพลตแล้ว'); loadTemplates() }
+    catch (e) { t.err(e.message) }
+  }
+  const loadTemplate = (id) => {
+    const tpl = templates.find((x) => String(x.id) === id)
+    if (tpl) setMessages(tpl.messages)
+  }
+  const resend = (b) => { setMessages(b.messages); t.info('โหลดข้อความจากประวัติแล้ว', 'ok'); window.scrollTo(0, 0) }
 
   const doSchedule = async () => {
     if (!schedAt) return t.err('เลือกเวลาก่อน')
@@ -87,11 +128,17 @@ export default function Messaging() {
     try {
       let r
       if (mode === 'broadcast') r = await api.broadcast({ messages })
-      else if (mode === 'push') r = await api.push({ to: to.split(/[\s,]+/).filter(Boolean), messages })
+      else if (mode === 'push') r = await api.push({ to: to.split(/[\s,]+/).filter(Boolean), messages, notificationDisabled: notiOff })
       else if (mode === 'segment') r = await api.multicastDb({ segmentId: segId, messages })
       else if (mode === 'narrowcast') r = await api.narrowcast({ demographic: buildDemographic(), messages })
       else r = await api.multicastDb({ tag, menu, messages })
       t.ok('ส่งแล้ว ' + (r.sent != null ? `(${r.sent} คน)` : r.requestId ? `req ${r.requestId.slice(0, 8)}` : ''))
+      if (mode === 'narrowcast' && r.requestId) {
+        setNcProgress({ requestId: r.requestId, phase: 'waiting' })
+        setTimeout(async () => {
+          try { setNcProgress({ ...await api.get(`/message/narrowcast/progress?requestId=${r.requestId}`), requestId: r.requestId }) } catch {}
+        }, 5000)
+      }
       loadHistory()
     } catch (e) { t.err(e.message) } finally { setBusy(false) }
   }
@@ -181,16 +228,58 @@ export default function Messaging() {
           </section>
 
           <section className="card">
-            <div className="row spread">
+            <div className="row spread wrap">
               <h3>ข้อความ ({messages.length}/5)</h3>
-              <button className="sm" onClick={addMsg} disabled={messages.length >= 5}>+ เพิ่มข้อความ</button>
+              <div className="row">
+                <select defaultValue="" onChange={(e) => { loadTemplate(e.target.value); e.target.value = '' }}>
+                  <option value="">โหลดเทมเพลต…</option>
+                  {templates.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}
+                </select>
+                <button className="xs" onClick={saveTemplate}>บันทึกเทมเพลต</button>
+                <button className="sm" onClick={addMsg} disabled={messages.length >= 5}>+ ข้อความ</button>
+              </div>
             </div>
             {messages.map((m, i) => (
               <MessageEditor key={i} index={i} msg={m}
                              onChange={(nm) => setMsg(i, nm)}
                              onRemove={() => rmMsg(i)} />
             ))}
+            <button className="xs" onClick={() => { setMessages([blank('text')]); localStorage.removeItem(DRAFT_KEY) }}>ล้างทั้งหมด</button>
           </section>
+
+          {mode === 'push' && (
+            <label className="row"><input type="checkbox" checked={notiOff} onChange={(e) => setNotiOff(e.target.checked)} /> ส่งเงียบ (ไม่เด้งแจ้งเตือน)</label>
+          )}
+
+          {(mode === 'db' || mode === 'segment' || mode === 'push' || mode === 'broadcast') && (
+            <section className="card">
+              <div className="row spread">
+                <button className="sm" onClick={doPreview}>ดูรายชื่อผู้รับ</button>
+                {preview && <span className="sm"><b>{preview.count.toLocaleString()}</b> คน</span>}
+              </div>
+              {preview?.sample?.length > 0 && (
+                <div className="recip-sample">
+                  {preview.sample.map((u) => (
+                    <div key={u.line_user_id} className="recip-chip" title={u.line_user_id}>
+                      {u.picture_url && <img src={u.picture_url} alt="" />}
+                      {u.display_name || u.line_user_id.slice(0, 8)}
+                    </div>
+                  ))}
+                  {preview.count > preview.sample.length && <span className="muted xs">…อีก {(preview.count - preview.sample.length).toLocaleString()} คน</span>}
+                </div>
+              )}
+            </section>
+          )}
+
+          {ncProgress && (
+            <section className="card">
+              <b className="sm">Narrowcast progress</b>
+              <pre className="xs">{JSON.stringify(ncProgress, null, 1)}</pre>
+              <button className="xs" onClick={async () => {
+                try { setNcProgress({ ...await api.get(`/message/narrowcast/progress?requestId=${ncProgress.requestId}`), requestId: ncProgress.requestId }) } catch (e) { t.err(e.message) }
+              }}>รีเฟรช</button>
+            </section>
+          )}
 
           <div className="row">
             <button className="sm" onClick={doValidate} disabled={busy}>ตรวจรูปแบบ</button>
@@ -228,7 +317,7 @@ export default function Messaging() {
             <div className="phone-head">พรีวิว</div>
             <div className="phone-body">
               {messages.map((m, i) => (
-                <div key={i} className="ln-row"><MessagePreview msg={m} /></div>
+                <MessagePreview key={i} msg={m} />
               ))}
             </div>
           </div>
@@ -240,15 +329,16 @@ export default function Messaging() {
         <h3>ประวัติการส่ง</h3>
         <div className="table-scroll">
           <table>
-            <thead><tr><th>ชนิด</th><th>ปลายทาง</th><th>ข้อความ</th><th>สถานะ</th><th>เวลา</th></tr></thead>
+            <thead><tr><th>ชนิด</th><th>ปลายทาง</th><th>ข้อความ</th><th>สถานะ</th><th>เวลา</th><th></th></tr></thead>
             <tbody>
               {history.map((b) => (
                 <tr key={b.id}>
                   <td>{b.kind}</td>
-                  <td>{b.target_count?.toLocaleString()}</td>
+                  <td>{b.target_count?.toLocaleString() ?? '–'}</td>
                   <td className="muted xs">{(b.messages || []).map((m) => m.type).join(', ')}</td>
                   <td><span className={`chip ${b.status}`}>{b.status}</span></td>
                   <td className="muted sm">{new Date(b.created_at).toLocaleString('th-TH')}</td>
+                  <td><button className="xs" onClick={() => resend(b)}>ใช้ซ้ำ</button></td>
                 </tr>
               ))}
             </tbody>

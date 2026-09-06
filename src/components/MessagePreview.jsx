@@ -13,9 +13,24 @@ function Actions({ actions = [] }) {
   )
 }
 
+function QuickReplyBar({ qr }) {
+  if (!qr?.items?.length) return null
+  return (
+    <div className="ln-qr">
+      {qr.items.map((it, i) => (
+        <span key={i} className="ln-qr-chip">{it.action?.label || it.action?.text || '—'}</span>
+      ))}
+    </div>
+  )
+}
+
 export default function MessagePreview({ msg }) {
   const kind = detectKind(msg)
+  const body = renderBody(msg, kind)
+  return <div className="ln-msg"><div className="ln-row">{body}</div><QuickReplyBar qr={msg.quickReply} /></div>
+}
 
+function renderBody(msg, kind) {
   if (kind === 'text')
     return <Bubble>{msg.text || <span className="muted">(ข้อความว่าง)</span>}</Bubble>
 

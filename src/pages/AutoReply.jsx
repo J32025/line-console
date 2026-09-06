@@ -108,7 +108,7 @@ export default function AutoReply() {
             ))}
             <div className="phone" style={{ margin: '10px 0' }}>
               <div className="phone-body">
-                {form.messages.map((m, i) => <div key={i} className="ln-row"><MessagePreview msg={m} /></div>)}
+                {form.messages.map((m, i) => <MessagePreview key={i} msg={m} />)}
               </div>
             </div>
             <button className="primary" onClick={save} disabled={busy}>บันทึกกฎ</button>

@@ -1,15 +1,25 @@
 import { useState } from 'react'
 import { blank, TYPE_LABELS, STICKERS, detectKind } from '../lib/messageTypes.js'
+import { FLEX_TEMPLATES } from '../lib/flexTemplates.js'
+import QuickReplyEditor from './QuickReplyEditor.jsx'
 
 const TYPES = ['text', 'sticker', 'image', 'video', 'audio', 'location', 'buttons', 'confirm', 'carousel', 'flex', 'raw']
+const QR_OK = ['text', 'sticker', 'image', 'video', 'audio', 'location']
 
 export default function MessageEditor({ msg, onChange, onRemove, index }) {
   const kind = detectKind(msg)
   const [raw, setRaw] = useState(kind === 'raw' || kind === 'flex')
   const [rawText, setRawText] = useState(JSON.stringify(msg, null, 2))
+  const [showQr, setShowQr] = useState(!!msg.quickReply)
 
   const set = (patch) => onChange({ ...msg, ...patch })
   const setTpl = (patch) => onChange({ ...msg, template: { ...msg.template, ...patch } })
+  const applyFlexTemplate = (key) => {
+    if (!key) return
+    const b = FLEX_TEMPLATES[key].build()
+    onChange(b)
+    setRawText(JSON.stringify(b, null, 2))
+  }
 
   const changeType = (newKind) => {
     if (newKind === 'raw') { setRaw(true); onChange(blank('text')); setRawText(JSON.stringify(blank('text'), null, 2)); return }
@@ -37,9 +47,21 @@ export default function MessageEditor({ msg, onChange, onRemove, index }) {
         <button className="xs danger" onClick={onRemove}>ลบ</button>
       </div>
 
+      {/* ---- flex template picker ---- */}
+      {kind === 'flex' && (
+        <select defaultValue="" onChange={(e) => { applyFlexTemplate(e.target.value); e.target.value = '' }} style={{ marginTop: 6 }}>
+          <option value="">เริ่มจากเทมเพลต…</option>
+          {Object.entries(FLEX_TEMPLATES).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+        </select>
+      )}
+
       {/* ---- raw / flex JSON ---- */}
       {(raw || kind === 'flex') && (
         <textarea rows={10} value={rawText} onChange={(e) => applyRaw(e.target.value)} spellCheck={false} />
+      )}
+
+      {kind === 'text' && (
+        <div className="muted xs" style={{ textAlign: 'right' }}>{(msg.text || '').length}/5000</div>
       )}
 
       {/* ---- structured forms ---- */}
@@ -122,6 +144,18 @@ export default function MessageEditor({ msg, onChange, onRemove, index }) {
                             onChange={(columns) => setTpl({ columns })} />
           )}
         </>
+      )}
+
+      {/* ---- quick reply ---- */}
+      {QR_OK.includes(kind) && (
+        <div style={{ marginTop: 8 }}>
+          {!showQr && !msg.quickReply ? (
+            <button className="xs" onClick={() => setShowQr(true)}>+ Quick Reply</button>
+          ) : (
+            <QuickReplyEditor value={msg.quickReply}
+                              onChange={(qr) => { set({ quickReply: qr }); if (!qr) setShowQr(false) }} />
+          )}
+        </div>
       )}
     </div>
   )
