@@ -467,16 +467,18 @@ async def _handle_auto_replies(events: list):
         return name_cache[uid]
 
     out_msgs = []
+    replied_uids: set[str] = set()   # กันตอบซ้ำใน batch เดียว (เช่น ปุ่ม rich menu ส่ง message + postback)
     for e in repliable:
         try:
             uid = e.get("source", {}).get("userId")
-            if uid in paused:
+            if uid in paused or uid in replied_uids:
                 continue
             rule = _pick_rule(e, rules)
             if not rule:
                 continue
             nm = await name_of(uid) if _has_placeholder(rule["messages"]) else None
             if await _reply_rule(e["replyToken"], rule, nm):
+                replied_uids.add(uid)
                 for m in rule["messages"][:5]:
                     out_msgs.append({"line_user_id": uid, "direction": "out", "by": "auto",
                                      "msg_type": m.get("type"), "text": m.get("text"), "payload": m})
