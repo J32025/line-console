@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { api } from '../lib/api.js'
 import { SkeletonCards, InlineSpinner, useToast } from '../lib/ui.jsx'
 
-const TABS = [['new', 'ใหม่'], ['verified', 'ผ่าน'], ['rejected', 'ไม่ผ่าน'], ['', 'ทั้งหมด']]
+const TABS = [['new', 'ใหม่'], ['review', 'ต้องตรวจเอง'], ['verified', 'ผ่าน'], ['rejected', 'ไม่ผ่าน'], ['', 'ทั้งหมด']]
 
 export default function Slips() {
   const t = useToast()
@@ -48,15 +48,20 @@ export default function Slips() {
                   <span className={`chip ${s.status === 'verified' ? 'ok' : s.status === 'rejected' ? 'failed' : ''}`}>{s.status}</span>
                 </div>
                 {s.amount && <div className="sm">💰 {Number(s.amount).toLocaleString()} บาท {s.bank && `· ${s.bank}`}</div>}
+                {s.expected_course && <span className="chip">{s.expected_course}{s.matched === true ? ' ✓' : s.matched === false ? ' ✗ยอดไม่ตรง' : ''}</span>}
                 {s.ref && <div className="muted xs">ref: {s.ref}</div>}
+                {s.auto_note && <div className="xs" style={{ color: s.status === 'verified' ? 'var(--primary-d)' : 'var(--warn)' }}>{s.auto_note}</div>}
                 <div className="muted xs">{new Date(s.created_at).toLocaleString('th-TH')}</div>
-                {s.status === 'new' && (
+                {(s.status === 'new' || s.status === 'review') && (
                   <div className="row" style={{ marginTop: 6 }}>
                     <button className="xs primary" disabled={busy === s.id} onClick={() => act(s, 'verified', true)}>
                       {busy === s.id ? <InlineSpinner /> : '✓'} ผ่าน + แจ้ง user
                     </button>
                     <button className="xs danger" disabled={busy === s.id} onClick={() => act(s, 'rejected', true)}>✕ ไม่ผ่าน</button>
                   </div>
+                )}
+                {s.status !== 'new' && s.status !== 'review' && s.reviewed_at && (
+                  <div className="muted xs">ตรวจโดย {s.reviewed_by?.slice(0, 8)} · {new Date(s.reviewed_at).toLocaleString('th-TH')}</div>
                 )}
               </div>
             </div>

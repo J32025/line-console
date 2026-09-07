@@ -355,7 +355,12 @@ async def _get_setting(key: str, default=None):
         return default
 
 
+def _digits(s):
+    return re.sub(r"\D", "", str(s or ""))
+
+
 async def _easyslip_verify(image_bytes: bytes):
+    """เรียก EasySlip -> คืน dict (verified, amount, receiver_acc, receiver_bank, ref, date) หรือ None"""
     if not EASYSLIP_TOKEN:
         return None
     b64 = base64.b64encode(image_bytes).decode()
@@ -365,13 +370,21 @@ async def _easyslip_verify(image_bytes: bytes):
                              headers={"Authorization": f"Bearer {EASYSLIP_TOKEN}"},
                              json={"image": b64})
         j = r.json()
+        if j.get("status") != 200:
+            return {"verified": False, "error": j.get("message") or j.get("status"), "raw": j}
         d = j.get("data") or {}
+        amt = d.get("amount")
+        amount = amt.get("amount") if isinstance(amt, dict) else amt
+        recv = d.get("receiver") or {}
+        racc = (recv.get("account") or {})
         return {
-            "amount": (d.get("amount") or {}).get("amount") if isinstance(d.get("amount"), dict) else d.get("amount"),
-            "bank": ((d.get("receiver") or {}).get("bank") or {}).get("short") or ((d.get("receivingBank") or {})),
+            "verified": True,
+            "amount": amount,
+            "receiver_acc": racc.get("bank", {}).get("account") or racc.get("proxy", {}).get("account") or racc.get("value"),
+            "receiver_name": racc.get("name", {}).get("th") or racc.get("name", {}).get("en") if isinstance(racc.get("name"), dict) else racc.get("name"),
+            "receiver_bank": (recv.get("bank") or {}).get("short") or (recv.get("bank") or {}).get("name"),
             "ref": d.get("transRef") or d.get("ref"),
             "date": d.get("date") or d.get("transDate"),
-            "sender": ((d.get("sender") or {}).get("account") or {}).get("name", {}),
             "raw": j,
         }
     except Exception as e:
@@ -416,26 +429,67 @@ async def _handle_slips(img_events: list):
         if not (notify_all or pay_ctx):
             continue
 
+        # ---- เดาหลักสูตรจากบทสนทนา ----
+        exp_course = None
+        for c in ("FC", "IC", "PC", "AC"):
+            if f"หลักสูตร {c}" in blob or f"course={c}" in blob or f"{c}70" in blob:
+                exp_course = c
+                break
+
         ocr = await _easyslip_verify(content) if content else None
         prof = await line.get_profile(uid)
         name = (prof or {}).get("displayName") or uid[:10]
 
-        slip = {"line_user_id": uid, "message_id": mid, "media_url": media_url,
-                "ocr": ocr}
-        if ocr:
-            slip["amount"] = ocr.get("amount")
-            slip["bank"] = ocr.get("bank") if isinstance(ocr.get("bank"), str) else None
-            slip["ref"] = ocr.get("ref")
-            slip["slip_date"] = str(ocr.get("date")) if ocr.get("date") else None
+        status, matched, auto_note, dup_ref = "new", None, None, None
+        amount = ocr.get("amount") if ocr else None
+        ref = ocr.get("ref") if ocr else None
+
+        if ocr and ocr.get("verified"):
+            accounts = await supa.select("payment_accounts", params={"select": "*", "active": "eq.true"})
+            racc = _digits(ocr.get("receiver_acc"))
+            acc = next((a for a in accounts if racc and (_digits(a["account_no"])[-4:] == racc[-4:])), None)
+            # ตรวจซ้ำ
+            if ref:
+                exist = await supa.select("slips", params={"ref": f"eq.{ref}", "select": "line_user_id,id", "limit": "1"})
+                if exist:
+                    status, dup_ref = "rejected", ref
+                    auto_note = "สลิปนี้เคยส่งมาแล้ว (ref ซ้ำ)"
+            if status != "rejected":
+                if not acc:
+                    status, auto_note = "review", f"บัญชีปลายทางไม่ตรงรายการ ({ocr.get('receiver_acc')})"
+                else:
+                    matched = (float(amount or 0) in (float(acc["price"] or 0), float(acc["full_price"] or 0))
+                               or abs(float(amount or 0) - float(acc["price"] or 0)) < 1)
+                    exp_course = exp_course or acc["course"]
+                    if matched:
+                        status, auto_note = "verified", f"✓ {acc['course']} · {amount} บาท · {acc['bank']}"
+                    else:
+                        status, auto_note = "review", f"ยอดไม่ตรง: โอน {amount} / ราคา {acc['price']} ({acc['course']})"
+        elif ocr and not ocr.get("verified"):
+            status, auto_note = "review", f"ตรวจสลิปไม่ผ่าน: {ocr.get('error')}"
+        elif EASYSLIP_TOKEN:
+            status, auto_note = "review", "อ่านสลิปไม่ได้"
+
+        slip = {"line_user_id": uid, "message_id": mid, "media_url": media_url, "ocr": ocr,
+                "amount": amount, "ref": ref, "bank": ocr.get("receiver_bank") if ocr else None,
+                "slip_date": str(ocr.get("date")) if ocr and ocr.get("date") else None,
+                "status": status, "matched": matched, "auto_note": auto_note,
+                "dup_ref": dup_ref, "expected_course": exp_course}
         try:
             await supa.insert("slips", slip)
         except Exception as ex:
             print("slip insert error:", ex)
 
-        detail = f"จาก: {name}\nเปิดดู: {APP_URL}/inbox"
-        if ocr and ocr.get("amount"):
-            detail = f"จาก: {name}\nยอด: {ocr['amount']} บาท" + (f" · {ocr.get('bank')}" if ocr.get("bank") else "") + f"\nเปิดดู: {APP_URL}/inbox"
-        await alert_admin("🧾 มีสลิป/รูปเข้ามา", detail, throttle_key=f"slip_{mid}")
+        # ตอบ user ตามผลตรวจอัตโนมัติ
+        if status == "verified":
+            await line.push(uid, [{"type": "text", "text": f"✅ ตรวจสอบสลิปเรียบร้อยแล้ว\nยอด {amount} บาท · หลักสูตร {exp_course}\nขอบคุณครับ 🙏"}])
+        elif status == "rejected":
+            await line.push(uid, [{"type": "text", "text": "สลิปนี้เคยส่งเข้ามาแล้วครับ หากต้องการสอบถามเพิ่มเติมพิมพ์ 'ติดต่อแอดมิน'"}])
+
+        # แจ้งแอดมิน
+        emoji = {"verified": "✅", "rejected": "⛔", "review": "⚠️"}.get(status, "🧾")
+        detail = f"จาก: {name}\n" + (auto_note + "\n" if auto_note else "") + f"เปิดดู: {APP_URL}/slips"
+        await alert_admin(f"{emoji} สลิป: {status}", detail, throttle_key=f"slip_{mid}")
 
 
 async def _enroll_automations(trigger: str, uids: list[str]):
@@ -2388,6 +2442,28 @@ async def update_slip(sid: int, req: Request, admin=Depends(current_admin)):
                    if b["status"] == "verified" else
                    "สลิปที่ส่งมายังตรวจสอบไม่ผ่าน รบกวนส่งใหม่หรือติดต่อแอดมินครับ 🙏")
             await line.push(rows[0]["line_user_id"], [{"type": "text", "text": b.get("replyText") or msg}])
+    return {"ok": True}
+
+
+@app.get("/api/payment-accounts")
+async def list_pay_accounts(admin=Depends(current_admin)):
+    return {"accounts": await supa.select("payment_accounts", params={"select": "*", "order": "course"})}
+
+
+@app.post("/api/payment-accounts")
+async def save_pay_account(req: Request, admin=Depends(current_admin)):
+    b = await req.json()
+    row = {k: b[k] for k in ("course", "bank", "account_no", "account_name", "price", "full_price", "active") if k in b}
+    if b.get("id"):
+        await supa.update("payment_accounts", row, {"id": f"eq.{b['id']}"})
+    else:
+        await supa.insert("payment_accounts", row)
+    return {"ok": True}
+
+
+@app.delete("/api/payment-accounts/{aid}")
+async def del_pay_account(aid: int, admin=Depends(current_admin)):
+    await supa.delete("payment_accounts", {"id": f"eq.{aid}"})
     return {"ok": True}
 
 

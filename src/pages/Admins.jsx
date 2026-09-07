@@ -13,6 +13,8 @@ export default function Admins({ me }) {
   const [fields, setFields] = useState([])
   const [nf, setNf] = useState({ key: '', label: '', type: 'text', options: '' })
   const [settings, setSettings] = useState({})
+  const [accts, setAccts] = useState([])
+  const [na, setNa] = useState({ course: '', bank: '', account_no: '', account_name: '', price: '', full_price: '' })
   const [busy, setBusy] = useState('')
 
   const load = () => api.admins().then((d) => setRows(d.admins)).catch((e) => t.err(e.message))
@@ -21,6 +23,13 @@ export default function Admins({ me }) {
     api.backupList().then((d) => setBackups(d.backups)).catch(() => {})
     api.fields().then((d) => setFields(d.fields)).catch(() => {})
     api.settings().then((d) => setSettings(d.settings)).catch(() => {})
+    api.payAccounts().then((d) => setAccts(d.accounts)).catch(() => {})
+  }
+  const addAcct = async () => {
+    try {
+      await api.savePayAccount({ ...na, price: +na.price || null, full_price: +na.full_price || null })
+      t.ok('เพิ่มบัญชีแล้ว'); setNa({ course: '', bank: '', account_no: '', account_name: '', price: '', full_price: '' }); loadSys()
+    } catch (e) { t.err(e.message) }
   }
   const toggleSetting = async (key, val) => {
     setSettings((s) => ({ ...s, [key]: val }))
@@ -116,13 +125,35 @@ export default function Admins({ me }) {
       </section>
 
       <section className="card">
-        <h3>การแจ้งเตือน</h3>
+        <h3>การแจ้งเตือน + ตรวจสลิป</h3>
         <label className="row">
           <input type="checkbox" checked={settings.slip_notify_all_images !== false}
                  onChange={(e) => toggleSetting('slip_notify_all_images', e.target.checked)} />
           แจ้งแอดมิน (เข้า LINE) ทุกครั้งที่มีรูป/สลิปเข้ามา
         </label>
-        <p className="muted xs">ถ้าปิด จะแจ้งเฉพาะรูปที่ส่งหลังคุยเรื่องชำระเงิน/สมัคร · ต้องตั้ง ALERT_USER_IDS · ตรวจสลิปอัตโนมัติ (ยอด/ธนาคาร) ต้องตั้ง env EASYSLIP_TOKEN</p>
+        <p className="muted xs">ปิด = แจ้งเฉพาะรูปหลังคุยเรื่องชำระเงิน · ต้องตั้ง env ALERT_USER_IDS · ตรวจสลิปอัตโนมัติ (ยอด/ธนาคาร/ซ้ำ) ต้องตั้ง env <code>EASYSLIP_TOKEN</code></p>
+
+        <h4 className="sm">บัญชีรับเงิน (ใช้ match สลิปอัตโนมัติ)</h4>
+        <table>
+          <thead><tr><th>หลักสูตร</th><th>ธนาคาร</th><th>เลขบัญชี</th><th>ราคา</th><th>เต็ม</th><th></th></tr></thead>
+          <tbody>
+            {accts.map((a) => (
+              <tr key={a.id}>
+                <td>{a.course}</td><td>{a.bank}</td><td className="mono xs">{a.account_no}</td>
+                <td>{a.price}</td><td className="muted">{a.full_price}</td>
+                <td><button className="xs danger" onClick={() => confirm('ลบ?') && api.delPayAccount(a.id).then(loadSys)}>ลบ</button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <div className="row wrap" style={{ marginTop: 6 }}>
+          <input placeholder="หลักสูตร" style={{ width: 80 }} value={na.course} onChange={(e) => setNa({ ...na, course: e.target.value })} />
+          <input placeholder="ธนาคาร" style={{ width: 120 }} value={na.bank} onChange={(e) => setNa({ ...na, bank: e.target.value })} />
+          <input placeholder="เลขบัญชี" style={{ width: 130 }} value={na.account_no} onChange={(e) => setNa({ ...na, account_no: e.target.value })} />
+          <input placeholder="ราคา" type="number" style={{ width: 80 }} value={na.price} onChange={(e) => setNa({ ...na, price: e.target.value })} />
+          <input placeholder="ราคาเต็ม" type="number" style={{ width: 80 }} value={na.full_price} onChange={(e) => setNa({ ...na, full_price: e.target.value })} />
+          <button className="primary sm" onClick={addAcct}>เพิ่ม</button>
+        </div>
       </section>
 
       <section className="card">

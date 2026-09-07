@@ -90,6 +90,9 @@ export const api = {
 
   slips: (status = '') => req('GET', '/slips' + (status ? `?status=${status}` : '')),
   updateSlip: (id, payload) => req('POST', `/slips/${id}`, payload),
+  payAccounts: () => req('GET', '/payment-accounts'),
+  savePayAccount: (payload) => req('POST', '/payment-accounts', payload),
+  delPayAccount: (id) => req('DELETE', `/payment-accounts/${id}`),
   settings: () => req('GET', '/settings'),
   setSetting: (key, value) => req('POST', '/settings', { key, value }),
 
