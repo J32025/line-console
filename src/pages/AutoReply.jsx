@@ -6,11 +6,21 @@ import MessageEditor from '../components/MessageEditor.jsx'
 import MessagePreview from '../components/MessagePreview.jsx'
 import TemplateGallery from '../components/TemplateGallery.jsx'
 
-const MATCH = {
-  contains: 'มีคำนี้', exact: 'ตรงเป๊ะ', prefix: 'ขึ้นต้นด้วย', any: 'ทุกข้อความ',
-  welcome: 'เมื่อเพิ่มเพื่อน (ต้อนรับ)', postback: 'postback (จากปุ่ม/rich menu)',
-}
-const EMPTY = { name: '', match_type: 'contains', keywords: '', priority: 0, enabled: true, messages: [blank('text')] }
+const TRIGGERS = [
+  { v: 'text', label: 'ผู้ใช้พิมพ์ข้อความ (ระบุคำ)', kw: true },
+  { v: 'fallback', label: 'พิมพ์ข้อความ แต่ไม่ตรงคำใดเลย (fallback)' },
+  { v: 'follow', label: 'เพิ่มเพื่อน / ปลดบล็อก (ต้อนรับ)' },
+  { v: 'postback', label: 'กดปุ่ม / Rich Menu (postback)', kw: true, kwLabel: 'ค่า postback data' },
+  { v: 'sticker', label: 'ส่งสติกเกอร์' },
+  { v: 'image', label: 'ส่งรูปภาพ' },
+  { v: 'video', label: 'ส่งวิดีโอ' },
+  { v: 'audio', label: 'ส่งเสียง' },
+  { v: 'file', label: 'ส่งไฟล์' },
+  { v: 'location', label: 'ส่งตำแหน่ง / พิกัด' },
+  { v: 'beacon', label: 'เข้าใกล้ LINE Beacon' },
+]
+const MATCH = { contains: 'มีคำนี้', exact: 'ตรงเป๊ะ', prefix: 'ขึ้นต้นด้วย', any: 'พิมพ์อะไรก็ตอบ' }
+const EMPTY = { trigger: 'text', name: '', match_type: 'contains', keywords: '', priority: 0, enabled: true, messages: [blank('text')] }
 
 export default function AutoReply() {
   const t = useToast()
@@ -22,8 +32,10 @@ export default function AutoReply() {
   const load = () => api.autoReplies().then((d) => setRules(d.rules)).catch((e) => t.err(e.message))
   useEffect(() => { load() }, [])
 
+  const trg = (v) => TRIGGERS.find((x) => x.v === v) || TRIGGERS[0]
+
   const edit = (r) => setForm({
-    ...r, keywords: (r.keywords || []).join(', '),
+    ...EMPTY, ...r, keywords: (r.keywords || []).join(', '),
     messages: r.messages?.length ? r.messages : [blank('text')],
   })
 
@@ -31,10 +43,8 @@ export default function AutoReply() {
     setBusy(true)
     try {
       await api.saveAutoReply({
-        id: form.id,
-        name: form.name,
-        match_type: form.match_type,
-        enabled: form.enabled,
+        id: form.id, name: form.name, trigger: form.trigger,
+        match_type: form.match_type, enabled: form.enabled,
         priority: Number(form.priority) || 0,
         keywords: form.keywords.split(',').map((s) => s.trim()).filter(Boolean),
         messages: form.messages,
@@ -49,64 +59,83 @@ export default function AutoReply() {
   }
 
   if (!rules) return <Spinner />
+  const cur = form && trg(form.trigger)
 
   return (
     <div>
-      <h1>ตอบกลับอัตโนมัติ</h1>
+      <h1>ตอบอัตโนมัติ</h1>
 
       <section className="card">
         <div className="row spread">
           <h3>กฎ ({rules.length})</h3>
           <button className="sm primary" onClick={() => setForm({ ...EMPTY })}>+ เพิ่มกฎ</button>
         </div>
-        <table>
-          <thead><tr><th>เปิด</th><th>ชื่อ</th><th>เงื่อนไข</th><th>คำ</th><th>ครั้งที่ตอบ</th><th></th></tr></thead>
-          <tbody>
-            {rules.map((r) => (
-              <tr key={r.id}>
-                <td><input type="checkbox" checked={r.enabled} onChange={() => toggle(r)} /></td>
-                <td>{r.name || <span className="muted">(ไม่มีชื่อ)</span>}</td>
-                <td>{MATCH[r.match_type]}</td>
-                <td className="sm">{(r.keywords || []).join(', ') || (r.match_type === 'any' ? '—' : '')}</td>
-                <td>{r.hits || 0}</td>
-                <td className="row">
-                  <button className="xs" onClick={() => edit(r)}>แก้ไข</button>
-                  <button className="xs danger" onClick={() => confirm('ลบกฎนี้?') && api.delAutoReply(r.id).then(() => { t.ok('ลบแล้ว'); load() })}>ลบ</button>
-                </td>
-              </tr>
-            ))}
-            {!rules.length && <tr><td colSpan={6} className="muted center">ยังไม่มีกฎ</td></tr>}
-          </tbody>
-        </table>
-        <p className="muted xs">ทำงานเมื่อ webhook ตั้งค่าไว้แล้ว — user พิมพ์ข้อความเข้ามา ระบบจะตอบด้วย reply token ทันที (ฟรี ไม่กินโควตา)</p>
+        <div className="table-scroll">
+          <table>
+            <thead><tr><th>เปิด</th><th>ชื่อ</th><th>ทำงานเมื่อ</th><th>คำ/data</th><th>ตอบด้วย</th><th>ตอบไป</th><th></th></tr></thead>
+            <tbody>
+              {rules.map((r) => (
+                <tr key={r.id}>
+                  <td><input type="checkbox" checked={r.enabled} onChange={() => toggle(r)} /></td>
+                  <td>{r.name || <span className="muted">(ไม่มีชื่อ)</span>}</td>
+                  <td className="sm">{trg(r.trigger).label}{trg(r.trigger).kw && ` · ${MATCH[r.match_type]}`}</td>
+                  <td className="sm">{(r.keywords || []).join(', ') || '—'}</td>
+                  <td className="muted xs">{(r.messages || []).map((m) => m.type).join(', ')}</td>
+                  <td>{r.hits || 0}</td>
+                  <td className="row">
+                    <button className="xs" onClick={() => edit(r)}>แก้ไข</button>
+                    <button className="xs danger" onClick={() => confirm('ลบกฎนี้?') && api.delAutoReply(r.id).then(() => { t.ok('ลบแล้ว'); load() })}>ลบ</button>
+                  </td>
+                </tr>
+              ))}
+              {!rules.length && <tr><td colSpan={7} className="muted center">ยังไม่มีกฎ</td></tr>}
+            </tbody>
+          </table>
+        </div>
+        <p className="muted xs">ทำงานเมื่อตั้ง Webhook URL ใน LINE แล้ว — ตอบด้วย reply token (ฟรี ไม่กินโควตา) · กฎเรียงตาม priority มาก→น้อย เอากฎแรกที่ตรง</p>
       </section>
 
       {form && (
         <div className="modal-bg" onClick={() => setForm(null)}>
-          <div className="modal" style={{ maxWidth: 620 }} onClick={(e) => e.stopPropagation()}>
+          <div className="modal" style={{ maxWidth: 640 }} onClick={(e) => e.stopPropagation()}>
             <div className="row spread">
               <h3>{form.id ? 'แก้ไขกฎ' : 'กฎใหม่'}</h3>
               <button className="xs" onClick={() => setForm(null)}>✕</button>
             </div>
-            <input placeholder="ชื่อกฎ" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
-            <div className="row wrap">
-              <select value={form.match_type} onChange={(e) => setForm({ ...form, match_type: e.target.value })}>
-                {Object.entries(MATCH).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
-              </select>
-              <input placeholder="priority" type="number" style={{ width: 90 }}
-                     value={form.priority} onChange={(e) => setForm({ ...form, priority: e.target.value })} />
-              <label><input type="checkbox" checked={form.enabled} onChange={(e) => setForm({ ...form, enabled: e.target.checked })} /> เปิดใช้</label>
-            </div>
-            {!['any', 'welcome'].includes(form.match_type) && (
-              <input placeholder={form.match_type === 'postback' ? 'ค่า postback data ที่จะจับ คั่นด้วย ,' : 'คำ/วลี คั่นด้วย , (เช่น สวัสดี, hello, hi)'}
-                     value={form.keywords} onChange={(e) => setForm({ ...form, keywords: e.target.value })} />
+
+            <label className="sm">ชื่อกฎ</label>
+            <input placeholder="เช่น ต้อนรับ, ตอบเมื่อส่งรูป" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+
+            <label className="sm">ทำงานเมื่อ (event)</label>
+            <select value={form.trigger} onChange={(e) => setForm({ ...form, trigger: e.target.value })}>
+              {TRIGGERS.map((x) => <option key={x.v} value={x.v}>{x.label}</option>)}
+            </select>
+
+            {cur.kw && (
+              <>
+                <div className="row wrap" style={{ marginTop: 6 }}>
+                  <select value={form.match_type} onChange={(e) => setForm({ ...form, match_type: e.target.value })}>
+                    {Object.entries(MATCH).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+                  </select>
+                  <span className="sm muted">{cur.kwLabel || 'คำ/วลี'}</span>
+                </div>
+                {form.match_type !== 'any' && (
+                  <input placeholder={`${cur.kwLabel || 'คำ/วลี'} คั่นด้วย , เช่น สวัสดี, hello`}
+                         value={form.keywords} onChange={(e) => setForm({ ...form, keywords: e.target.value })} />
+                )}
+              </>
             )}
-            {form.match_type === 'welcome' && <p className="muted xs">ตอบทันทีที่มีคนกดเพิ่มเพื่อน (reply token — ฟรี)</p>}
+
+            <div className="row wrap" style={{ marginTop: 6 }}>
+              <label><input type="checkbox" checked={form.enabled} onChange={(e) => setForm({ ...form, enabled: e.target.checked })} /> เปิดใช้</label>
+              <label>priority <input type="number" style={{ width: 70 }} value={form.priority} onChange={(e) => setForm({ ...form, priority: e.target.value })} /></label>
+            </div>
             <p className="muted xs">💡 ใส่ <code>{'{name}'}</code> ในข้อความ = แทนที่ด้วยชื่อ LINE ของผู้ใช้อัตโนมัติ</p>
+
             <div className="row spread" style={{ marginTop: 8 }}>
               <b className="sm">ข้อความตอบ ({form.messages.length}/5)</b>
               <div className="row">
-                <button className="xs primary" onClick={() => setGallery(true)}>📚 คลัง</button>
+                <button className="xs primary" onClick={() => setGallery(true)}>📚 คลังเทมเพลต</button>
                 <button className="xs" disabled={form.messages.length >= 5}
                         onClick={() => setForm({ ...form, messages: [...form.messages, blank('text')] })}>+ ข้อความ</button>
               </div>

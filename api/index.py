@@ -179,6 +179,10 @@ def _match(rule: dict, text: str) -> bool:
     return any(k in t for k in kws)  # contains / postback
 
 
+# trigger -> ประเภท event/message ที่ทำให้กฎทำงาน
+TEXT_TRIGGERS = ("text", "fallback")
+MSG_TYPE_TRIGGERS = ("sticker", "image", "video", "audio", "file", "location")
+
 _PLACEHOLDERS = ("{name}", "{displayName}", "{{name}}", "{{displayName}}", "{ชื่อ}")
 
 
@@ -214,19 +218,43 @@ async def _reply_rule(reply_token: str, rule: dict, name: str | None = None):
     return code == 200
 
 
+def _pick_rule(event: dict, rules: list):
+    """เลือกกฎแรกที่ตรงกับ event (rules เรียง priority.desc แล้ว)"""
+    et = event["type"]
+    if et == "follow":
+        return next((r for r in rules if r["trigger"] == "follow"), None)
+    if et == "postback":
+        data = event.get("postback", {}).get("data", "")
+        return next((r for r in rules if r["trigger"] == "postback" and _match(r, data)), None)
+    if et == "beacon":
+        return next((r for r in rules if r["trigger"] == "beacon"), None)
+    if et == "message":
+        mtype = event.get("message", {}).get("type")
+        if mtype == "text":
+            text = event["message"]["text"]
+            r = next((r for r in rules if r["trigger"] == "text" and _match(r, text)), None)
+            if r:
+                return r
+            # ไม่มีคีย์เวิร์ดไหนตรง -> fallback
+            return next((r for r in rules if r["trigger"] == "fallback"), None)
+        if mtype in MSG_TYPE_TRIGGERS:
+            return next((r for r in rules if r["trigger"] == mtype), None)
+    return None
+
+
 async def _handle_auto_replies(events: list):
     repliable = [e for e in events if e.get("replyToken") and e.get("type") in
-                 ("message", "follow", "postback")]
+                 ("message", "follow", "postback", "beacon")]
     if not repliable:
         return
     rules = await supa.select("auto_replies", params={
-        "select": "*", "enabled": "eq.true", "order": "priority.desc,id.asc", "limit": "200",
+        "select": "*", "enabled": "eq.true", "order": "priority.desc,id.asc", "limit": "300",
     })
+    for r in rules:
+        r.setdefault("trigger", "text")
     if not rules:
         return
-    welcome = [r for r in rules if r.get("match_type") == "welcome"]
 
-    # cache profile ต่อ userId (ดึงชื่อไปแทน {name})
     name_cache: dict[str, str] = {}
     async def name_of(uid):
         if not uid:
@@ -237,23 +265,12 @@ async def _handle_auto_replies(events: list):
         return name_cache[uid]
 
     for e in repliable:
-        et = e["type"]
+        rule = _pick_rule(e, rules)
+        if not rule:
+            continue
         uid = e.get("source", {}).get("userId")
-        if et == "follow" and welcome:
-            await _reply_rule(e["replyToken"], welcome[0],
-                              await name_of(uid) if _has_placeholder(welcome[0]["messages"]) else None)
-        elif et == "message" and e.get("message", {}).get("type") == "text":
-            text = e["message"]["text"]
-            rule = next((r for r in rules if r.get("match_type") not in ("welcome",) and _match(r, text)), None)
-            if rule:
-                nm = await name_of(uid) if _has_placeholder(rule["messages"]) else None
-                await _reply_rule(e["replyToken"], rule, nm)
-        elif et == "postback":
-            data = e.get("postback", {}).get("data", "")
-            rule = next((r for r in rules if r.get("match_type") == "postback" and _match(r, data)), None)
-            if rule:
-                nm = await name_of(uid) if _has_placeholder(rule["messages"]) else None
-                await _reply_rule(e["replyToken"], rule, nm)
+        nm = await name_of(uid) if _has_placeholder(rule["messages"]) else None
+        await _reply_rule(e["replyToken"], rule, nm)
 
 
 # ============================================================
@@ -1127,6 +1144,7 @@ async def create_auto_reply(req: Request, admin=Depends(current_admin)):
     row = {
         "name": b.get("name"),
         "enabled": b.get("enabled", True),
+        "trigger": b.get("trigger", "text"),
         "match_type": b.get("match_type", "contains"),
         "keywords": b.get("keywords", []),
         "messages": _normalize_messages(b.get("messages", [])),
