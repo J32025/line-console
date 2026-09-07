@@ -30,6 +30,7 @@ export default function Messaging() {
   const [segments, setSegments] = useState([])
   const [templates, setTemplates] = useState([])
   const [schedAt, setSchedAt] = useState('')
+  const [repeat, setRepeat] = useState('')
   const [scheduled, setScheduled] = useState([])
   const [preview, setPreview] = useState(null) // {count, sample}
   const [ncProgress, setNcProgress] = useState(null)
@@ -79,8 +80,8 @@ export default function Messaging() {
     if (!schedAt) return t.err('เลือกเวลาก่อน')
     setBusy(true)
     try {
-      await api.schedule({ kind: 'broadcast', runAt: new Date(schedAt).toISOString(), messages })
-      t.ok('ตั้งเวลาส่ง broadcast แล้ว'); setSchedAt(''); loadScheduled()
+      await api.schedule({ kind: 'broadcast', runAt: new Date(schedAt).toISOString(), messages, repeat: repeat || undefined })
+      t.ok(repeat ? 'ตั้งส่งประจำแล้ว' : 'ตั้งเวลาส่ง broadcast แล้ว'); setSchedAt(''); loadScheduled()
     } catch (e) { t.err(e.message) } finally { setBusy(false) }
   }
 
@@ -370,6 +371,13 @@ export default function Messaging() {
             <h3>ตั้งเวลาส่ง (Broadcast)</h3>
             <div className="row wrap">
               <input type="datetime-local" value={schedAt} onChange={(e) => setSchedAt(e.target.value)} />
+              <select value={repeat} onChange={(e) => setRepeat(e.target.value)}>
+                <option value="">ครั้งเดียว</option>
+                <option value="daily">ทุกวัน</option>
+                <option value="weekly">ทุกสัปดาห์</option>
+                <option value="biweekly">ทุก 2 สัปดาห์</option>
+                <option value="monthly">ทุกเดือน</option>
+              </select>
               <button className="sm" onClick={doSchedule} disabled={busy}>ตั้งเวลา</button>
             </div>
             {scheduled.filter((j) => j.status === 'pending').length > 0 && (

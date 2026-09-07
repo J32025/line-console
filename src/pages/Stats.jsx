@@ -9,12 +9,14 @@ export default function Stats() {
   const [history, setHistory] = useState([])
   const [quota, setQuota] = useState(null)
   const [follows, setFollows] = useState(null)
+  const [funnel, setFunnel] = useState(null)
 
   useEffect(() => {
     api.quota().then(setQuota).catch(() => {})
     api.insight().then(setInsight).catch((e) => t.err(e.message))
     api.statsHistory(30).then((d) => setHistory([...d.days].reverse())).catch(() => {})
     api.followStats(14).then(setFollows).catch(() => {})
+    api.funnel().then(setFunnel).catch(() => {})
   }, []) // eslint-disable-line
 
   if (!insight) return <Spinner />
@@ -34,6 +36,38 @@ export default function Stats() {
               value={q.type === 'limited' ? q.value?.toLocaleString() : q.type}
               sub={quota?.totalUsage != null ? quota.totalUsage.toLocaleString() : null} />
       </div>
+
+      {funnel && (
+        <div className="grid two">
+          <section className="card">
+            <h3>Funnel</h3>
+            {funnel.funnel.map((f, i) => {
+              const max = funnel.funnel[0].count || 1
+              return (
+                <div key={i} className="usage-row" style={{ gridTemplateColumns: '110px 1fr 90px' }}>
+                  <span className="usage-name">{f.step}</span>
+                  <span className="usage-track"><span className="usage-fill" style={{ width: `${(f.count / max) * 100}%` }} /></span>
+                  <span className="usage-count">{f.count.toLocaleString()} <span className="muted">({Math.round(f.count / max * 100)}%)</span></span>
+                </div>
+              )
+            })}
+          </section>
+          <section className="card">
+            <h3>Cohort — ยังติดตามอยู่ (ตามเดือนที่เพิ่มเพื่อน)</h3>
+            {funnel.cohorts.length ? (
+              <table>
+                <thead><tr><th>เดือน</th><th>เพิ่มเพื่อน</th><th>ยังอยู่</th><th>%</th></tr></thead>
+                <tbody>
+                  {funnel.cohorts.map((c) => (
+                    <tr key={c.month}><td>{c.month}</td><td>{c.joined}</td><td>{c.retained}</td>
+                      <td><b>{c.rate}%</b></td></tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : <p className="muted sm">ยังไม่มีข้อมูล follow_history พอ (มาจาก webhook)</p>}
+          </section>
+        </div>
+      )}
 
       {follows?.series?.length > 0 && (
         <section className="card">

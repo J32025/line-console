@@ -79,6 +79,7 @@ export const api = {
   insight: (date) => req('GET', '/stats/insight' + (date ? `?date=${date}` : '')),
   statsHistory: (days = 30) => req('GET', `/stats/history?days=${days}`),
   followStats: (days = 14) => req('GET', `/stats/follows?days=${days}`),
+  funnel: (tag = '') => req('GET', `/stats/funnel${tag ? `?tag=${tag}` : ''}`),
 
   events: (qs = {}) => req('GET', '/events?' + new URLSearchParams(qs)),
   operations: () => req('GET', '/operations'),

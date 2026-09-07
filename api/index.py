@@ -1486,6 +1486,47 @@ async def stats_insight(admin=Depends(current_admin), date: str = ""):
     return {"date": date, "followers": followers, "demographic": demo, "delivery": delivery}
 
 
+@app.get("/api/stats/funnel")
+async def stats_funnel(admin=Depends(current_admin), tag: str = ""):
+    total = await supa.count("line_users")
+    following = await supa.count("line_users", {"is_following": "eq.true"})
+    messaged = await supa.count("line_users", {"is_following": "eq.true", "last_message_at": "not.is.null"})
+    has_menu = await supa.count("line_users", {"is_following": "eq.true", "current_rich_menu_id": "not.is.null"})
+    tagged = await supa.count("line_users", {"is_following": "eq.true", "tags": "cs.{" + tag + "}"}) if tag else None
+
+    # cohort: follow แต่ละสัปดาห์ (8 สัปดาห์) -> ยัง follow กี่ %
+    fh = await supa.select_all("follow_history", params={"select": "line_user_id,action,event_ts"})
+    first_follow: dict[str, str] = {}
+    for r in sorted(fh, key=lambda x: x.get("event_ts") or ""):
+        if r["action"] == "follow" and r["line_user_id"] not in first_follow:
+            first_follow[r["line_user_id"]] = (r.get("event_ts") or "")[:10]
+    still = {u["line_user_id"] for u in await supa.select_all("line_users", params={
+        "select": "line_user_id", "is_following": "eq.true"})}
+    cohorts: dict[str, dict] = {}
+    for uid, d in first_follow.items():
+        if not d:
+            continue
+        wk = d[:7]  # เดือน
+        c = cohorts.setdefault(wk, {"month": wk, "joined": 0, "retained": 0})
+        c["joined"] += 1
+        if uid in still:
+            c["retained"] += 1
+    cohort_list = sorted(cohorts.values(), key=lambda x: x["month"])[-8:]
+    for c in cohort_list:
+        c["rate"] = round(c["retained"] / c["joined"] * 100) if c["joined"] else 0
+
+    return {
+        "funnel": [
+            {"step": "ผู้ใช้ในระบบ", "count": total},
+            {"step": "กำลังติดตาม", "count": following},
+            {"step": "เคยทักเข้ามา", "count": messaged},
+            {"step": "มี Rich Menu", "count": has_menu},
+            *([{"step": f"tag: {tag}", "count": tagged}] if tag else []),
+        ],
+        "cohorts": cohort_list,
+    }
+
+
 @app.get("/api/stats/history")
 async def stats_history(admin=Depends(current_admin), days: int = 30):
     return {"days": await supa.select("stats_daily", params={
@@ -1794,9 +1835,10 @@ async def cron_run_scheduled(request: Request):
     })
     ran = []
     for job in due:
-        p = job["payload"]
+        p = job["payload"] or {}
         try:
-            if job["kind"] == "broadcast":
+            kind = job["kind"]
+            if kind == "broadcast":
                 code, txt, rid = await line.broadcast(_normalize_messages(p.get("messages", [])))
                 ok = code == 200
                 await supa.insert("broadcasts", {
@@ -1805,12 +1847,27 @@ async def cron_run_scheduled(request: Request):
                     "status": "sent" if ok else "failed",
                 })
                 res = {"code": code, "requestId": rid}
+            elif kind == "richmenu_default":
+                ok, txt = await line.richmenu_set_default(p["richMenuId"])
+                res = {"ok": ok, "resp": txt[:150]}
             else:
                 ok, res = False, {"error": "unknown kind"}
             await supa.update("scheduled_jobs",
                               {"status": "done" if ok else "failed", "result": res},
                               {"id": f"eq.{job['id']}"})
             ran.append({"id": job["id"], "ok": ok})
+
+            # recurring -> ตั้ง job รอบถัดไป
+            rep = job.get("repeat")
+            if ok and rep:
+                delta = {"daily": 1, "weekly": 7, "biweekly": 14, "monthly": 30}.get(rep)
+                if delta:
+                    nxt = dt.datetime.fromisoformat(job["run_at"]) + dt.timedelta(days=delta)
+                    await supa.insert("scheduled_jobs", {
+                        "kind": kind, "run_at": nxt.isoformat(), "payload": p,
+                        "repeat": rep, "label": job.get("label"),
+                        "created_by": job.get("created_by"),
+                    })
         except Exception as e:
             await supa.update("scheduled_jobs", {"status": "failed", "result": {"error": str(e)}},
                               {"id": f"eq.{job['id']}"})
@@ -1827,10 +1884,15 @@ async def list_scheduled(admin=Depends(current_admin)):
 @app.post("/api/scheduled")
 async def create_scheduled(req: Request, admin=Depends(current_admin)):
     b = await req.json()
+    kind = b.get("kind", "broadcast")
+    payload = {}
+    if kind == "broadcast":
+        payload = {"messages": _normalize_messages(b.get("messages", []))}
+    elif kind == "richmenu_default":
+        payload = {"richMenuId": b["richMenuId"]}
     r = await supa.insert("scheduled_jobs", {
-        "kind": b.get("kind", "broadcast"),
-        "run_at": b["runAt"],
-        "payload": {"messages": _normalize_messages(b.get("messages", []))},
+        "kind": kind, "run_at": b["runAt"], "payload": payload,
+        "repeat": b.get("repeat"), "label": b.get("label"),
         "created_by": admin["userId"],
     })
     return {"ok": True, "job": r[0] if r else None}

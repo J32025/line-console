@@ -10,6 +10,7 @@ export default function RichMenus() {
   const [data, setData] = useState(null)
   const [usage, setUsage] = useState({})
   const [building, setBuilding] = useState(false)
+  const [schedAt, setSchedAt] = useState('')
   const [busy, setBusy] = useState(false)
   const [sel, setSel] = useState('')
   const [target, setTarget] = useState('all')
@@ -143,6 +144,21 @@ export default function RichMenus() {
             ผูกเมนูที่เลือก {sel && `(${menus.find((m) => m.richMenuId === sel)?.name})`}
           </button>
           <button disabled={busy} onClick={() => run('unlink')}>ถอดเมนู</button>
+        </div>
+      </section>
+
+      <section className="card">
+        <h3>ตั้งเวลาสลับ Default Menu</h3>
+        <p className="muted xs">เลือกเมนูด้านบน + เวลา → ระบบจะตั้งเป็น default menu ให้อัตโนมัติ (เช็คทุก 5 นาที)</p>
+        <div className="row wrap">
+          <input type="datetime-local" value={schedAt} onChange={(e) => setSchedAt(e.target.value)} />
+          <button className="sm" disabled={!sel || !schedAt} onClick={async () => {
+            try {
+              await api.schedule({ kind: 'richmenu_default', richMenuId: sel, runAt: new Date(schedAt).toISOString(),
+                                   label: `default → ${menus.find((m) => m.richMenuId === sel)?.name}` })
+              t.ok('ตั้งเวลาแล้ว'); setSchedAt('')
+            } catch (e) { t.err(e.message) }
+          }}>ตั้งเวลา</button>
         </div>
       </section>
 
