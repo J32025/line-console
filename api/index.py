@@ -140,7 +140,7 @@ async def webhook(request: Request):
     if follow_uids:
         try:
             patch = []
-            for uid in set(follow_uids):
+            for uid in list(set(follow_uids))[:20]:
                 p = await line.get_profile(uid)
                 if p:
                     patch.append({
@@ -156,11 +156,11 @@ async def webhook(request: Request):
         except Exception as e:
             print("follow profile fetch error:", e)
 
-    # ---- auto-reply ----
+    # ---- auto-reply (ห้าม block webhook เกิน 12 วิ, ห้าม 500) ----
     try:
-        await _handle_auto_replies(events)
-    except Exception as e:
-        print("auto-reply error:", e)
+        await asyncio.wait_for(_handle_auto_replies(events), timeout=12)
+    except BaseException as e:  # noqa: BLE001 — webhook ต้องตอบ 200 เสมอ
+        print("auto-reply error:", repr(e))
     return {"ok": True}
 
 
@@ -265,12 +265,15 @@ async def _handle_auto_replies(events: list):
         return name_cache[uid]
 
     for e in repliable:
-        rule = _pick_rule(e, rules)
-        if not rule:
-            continue
-        uid = e.get("source", {}).get("userId")
-        nm = await name_of(uid) if _has_placeholder(rule["messages"]) else None
-        await _reply_rule(e["replyToken"], rule, nm)
+        try:
+            rule = _pick_rule(e, rules)
+            if not rule:
+                continue
+            uid = e.get("source", {}).get("userId")
+            nm = await name_of(uid) if _has_placeholder(rule["messages"]) else None
+            await _reply_rule(e["replyToken"], rule, nm)
+        except Exception as ex:
+            print("auto-reply one error:", repr(ex))
 
 
 # ============================================================

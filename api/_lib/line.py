@@ -149,9 +149,14 @@ async def richmenu_alias_delete(alias_id: str):
 
 # ---------- messaging ----------
 async def reply(reply_token: str, messages: list):
-    r = await _req("POST", "/v2/bot/message/reply",
-                   json={"replyToken": reply_token, "messages": messages})
-    return r.status_code, r.text
+    # reply token หมดอายุเร็ว — ไม่ต้อง retry, timeout สั้น
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.post(f"{LINE_API}/v2/bot/message/reply", headers=_auth(),
+                             json={"replyToken": reply_token, "messages": messages})
+        return r.status_code, r.text
+    except Exception as e:
+        return 0, str(e)
 
 
 async def push(to: str, messages: list, notification_disabled=False):
