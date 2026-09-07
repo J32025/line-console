@@ -52,6 +52,7 @@ export const api = {
   quota: () => req('GET', '/stats/quota'),
   insight: (date) => req('GET', '/stats/insight' + (date ? `?date=${date}` : '')),
   statsHistory: (days = 30) => req('GET', `/stats/history?days=${days}`),
+  followStats: (days = 14) => req('GET', `/stats/follows?days=${days}`),
 
   events: (qs = {}) => req('GET', '/events?' + new URLSearchParams(qs)),
   operations: () => req('GET', '/operations'),

@@ -56,7 +56,8 @@ async def webhook(request: Request):
 
     data = json.loads(body or "{}")
     events = data.get("events", [])
-    rows_ev, user_patches = [], {}
+    rows_ev, user_patches, follow_rows = [], {}, []
+    follow_uids, unfollow_uids = [], []
 
     for ev in events:
         et = ev.get("type")
@@ -64,40 +65,95 @@ async def webhook(request: Request):
         uid = src.get("userId")
         msg = ev.get("message", {})
         pb = ev.get("postback", {})
+        ts_ms = ev.get("timestamp")
+        event_ts = dt.datetime.fromtimestamp(ts_ms / 1000, dt.timezone.utc).isoformat() if ts_ms else NOW()
+        dc = ev.get("deliveryContext", {})
+
         rows_ev.append({
             "event_type": et, "line_user_id": uid,
             "message_type": msg.get("type"), "text": msg.get("text") or pb.get("data"),
             "reply_token": ev.get("replyToken"),
             "postback_data": pb.get("data"),
+            "webhook_event_id": ev.get("webhookEventId"),
+            "event_ts": event_ts,
+            "is_redelivery": bool(dc.get("isRedelivery")),
             "payload": ev,
         })
         if not uid:
             continue
+
         if et == "follow":
+            follow_uids.append(uid)
+            is_unblocked = bool(ev.get("follow", {}).get("isUnblocked"))
+            follow_rows.append({"line_user_id": uid, "action": "follow",
+                                "is_unblocked": is_unblocked, "event_ts": event_ts})
             user_patches[uid] = {
-                "line_user_id": uid, "is_following": True,
-                "followed_at": NOW(), "unfollowed_at": None,
+                "line_user_id": uid, "is_following": True, "unfollowed_at": None,
+                "followed_at": event_ts, "last_event_at": event_ts,
                 "source": "webhook", "updated_at": NOW(),
             }
         elif et == "unfollow":
+            unfollow_uids.append(uid)
+            follow_rows.append({"line_user_id": uid, "action": "unfollow", "event_ts": event_ts})
             user_patches[uid] = {
                 "line_user_id": uid, "is_following": False,
-                "unfollowed_at": NOW(), "source": "webhook", "updated_at": NOW(),
+                "unfollowed_at": event_ts, "last_event_at": event_ts,
+                "source": "webhook", "updated_at": NOW(),
             }
         else:
             user_patches.setdefault(uid, {
                 "line_user_id": uid, "is_following": True,
-                "source": "webhook", "updated_at": NOW(),
+                "last_event_at": event_ts, "source": "webhook", "updated_at": NOW(),
             })
 
     try:
         if rows_ev:
-            await supa.insert("webhook_events", rows_ev)
+            # on_conflict webhook_event_id -> กัน redelivery ซ้ำ
+            await supa.upsert("webhook_events", rows_ev, on_conflict="webhook_event_id")
+        if follow_rows:
+            await supa.insert("follow_history", follow_rows)
+
+        # อัปเดต counter + first_followed_at (ต้องอ่านค่าเดิมก่อน)
+        touched = set(follow_uids) | set(unfollow_uids)
+        if touched:
+            existing = {r["line_user_id"]: r for r in await supa.select("line_users", params={
+                "select": "line_user_id,follow_count,block_count,first_followed_at",
+                "line_user_id": f"in.({','.join(touched)})", "limit": "1000",
+            })}
+            for uid in touched:
+                old = existing.get(uid, {})
+                p = user_patches[uid]
+                if uid in follow_uids:
+                    p["follow_count"] = (old.get("follow_count") or 0) + 1
+                    if not old.get("first_followed_at"):
+                        p["first_followed_at"] = p["followed_at"]
+                if uid in unfollow_uids:
+                    p["block_count"] = (old.get("block_count") or 0) + 1
+
         if user_patches:
             await supa.upsert("line_users", list(user_patches.values()), on_conflict="line_user_id")
     except Exception as e:
-        # ตอบ 200 เสมอ ไม่งั้น LINE จะ retry
         print("webhook store error:", e)
+
+    # ---- ดึงโปรไฟล์คนที่เพิ่ง follow (จังหวะที่ดีที่สุด) ----
+    if follow_uids:
+        try:
+            patch = []
+            for uid in set(follow_uids):
+                p = await line.get_profile(uid)
+                if p:
+                    patch.append({
+                        "line_user_id": uid,
+                        "display_name": _clean_str(p.get("displayName")),
+                        "picture_url": _clean_str(p.get("pictureUrl")),
+                        "status_message": _clean_str(p.get("statusMessage")),
+                        "language": _clean_str(p.get("language")),
+                        "updated_at": NOW(),
+                    })
+            if patch:
+                await supa.upsert("line_users", patch, on_conflict="line_user_id")
+        except Exception as e:
+            print("follow profile fetch error:", e)
 
     # ---- auto-reply ----
     try:
@@ -629,7 +685,11 @@ async def user_detail(uid: str, admin=Depends(current_admin)):
         raise HTTPException(404, "ไม่พบผู้ใช้")
     user = rows[0]
     events = await supa.select("webhook_events", params={
-        "line_user_id": f"eq.{uid}", "select": "event_type,message_type,text,created_at",
+        "line_user_id": f"eq.{uid}", "select": "event_type,message_type,text,postback_data,created_at",
+        "order": "created_at.desc", "limit": "20",
+    })
+    follows = await supa.select("follow_history", params={
+        "line_user_id": f"eq.{uid}", "select": "action,is_unblocked,event_ts",
         "order": "created_at.desc", "limit": "20",
     })
     # ดึงสด LINE profile + rich menu ปัจจุบัน
@@ -642,7 +702,7 @@ async def user_detail(uid: str, admin=Depends(current_admin)):
         live["richMenuId"] = rid
     except Exception as e:
         live["error"] = str(e)
-    return {"user": user, "events": events, "live": live}
+    return {"user": user, "events": events, "follow_history": follows, "live": live}
 
 
 @app.patch("/api/users/{uid}")
@@ -933,6 +993,36 @@ async def stats_history(admin=Depends(current_admin), days: int = 30):
     return {"days": await supa.select("stats_daily", params={
         "select": "*", "order": "day.desc", "limit": str(days),
     })}
+
+
+@app.get("/api/stats/follows")
+async def stats_follows(admin=Depends(current_admin), days: int = 14):
+    """สรุป follow/unfollow จาก webhook (real-time) รายวัน"""
+    since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)).isoformat()
+    rows = await supa.select_all("follow_history", params={
+        "select": "action,is_unblocked,event_ts,created_at",
+    })
+    by_day: dict[str, dict] = {}
+    unblocked = newfollow = unfollow = 0
+    for r in rows:
+        d = (r.get("event_ts") or r["created_at"])[:10]
+        b = by_day.setdefault(d, {"day": d, "follow": 0, "unfollow": 0, "unblock": 0})
+        if r["action"] == "follow":
+            b["follow"] += 1
+            if r.get("is_unblocked"):
+                b["unblock"] += 1
+                unblocked += 1
+            else:
+                newfollow += 1
+        else:
+            b["unfollow"] += 1
+            unfollow += 1
+    series = sorted(by_day.values(), key=lambda x: x["day"])[-days:]
+    for s in series:
+        s["net"] = s["follow"] - s["unfollow"]
+    return {"series": series,
+            "totals": {"new_follow": newfollow, "unblock": unblocked, "unfollow": unfollow,
+                       "net": newfollow + unblocked - unfollow}}
 
 
 # ============================================================

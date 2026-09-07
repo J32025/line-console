@@ -60,15 +60,34 @@ export default function UserDetail({ uid, onClose, onSaved }) {
             <table className="kv">
               <tbody>
                 <tr><th>userId</th><td className="mono xs">{u.line_user_id}</td></tr>
+                <tr><th>ภาษา</th><td>{prof?.language || u.language || '–'}</td></tr>
                 <tr><th>Rich Menu (DB)</th><td>{u.rich_menu_name || u.rich_menu_status || '–'}</td></tr>
                 <tr><th>Rich Menu (สด)</th><td className="mono xs">{live.richMenuId || (live.error ? `err: ${live.error}` : '– ไม่มี')}</td></tr>
                 <tr><th>ที่มา</th><td>{u.source}</td></tr>
-                <tr><th>เห็นครั้งแรก</th><td className="muted sm">{fmt(u.first_seen_at)}</td></tr>
-                <tr><th>follow เมื่อ</th><td className="muted sm">{fmt(u.followed_at)}</td></tr>
-                {u.unfollowed_at && <tr><th>unfollow เมื่อ</th><td className="muted sm">{fmt(u.unfollowed_at)}</td></tr>}
-                <tr><th>อัปเดตล่าสุด</th><td className="muted sm">{fmt(u.updated_at)}</td></tr>
+                <tr><th>follow / block</th><td>{u.follow_count ?? 0} ครั้ง / บล็อก {u.block_count ?? 0} ครั้ง</td></tr>
+                <tr><th>เพิ่มเพื่อนครั้งแรก</th><td className="muted sm">{fmt(u.first_followed_at)}</td></tr>
+                <tr><th>follow ล่าสุด</th><td className="muted sm">{fmt(u.followed_at)}</td></tr>
+                {u.unfollowed_at && <tr><th>unfollow ล่าสุด</th><td className="muted sm">{fmt(u.unfollowed_at)}</td></tr>}
+                <tr><th>เห็นในระบบครั้งแรก</th><td className="muted sm">{fmt(u.first_seen_at)}</td></tr>
+                <tr><th>event ล่าสุด</th><td className="muted sm">{fmt(u.last_event_at)}</td></tr>
               </tbody>
             </table>
+
+            {d.follow_history?.length > 0 && (
+              <>
+                <h4 className="sm">ประวัติ follow/unfollow</h4>
+                <div className="udetail-events">
+                  {d.follow_history.map((f, i) => (
+                    <div key={i} className="row" style={{ fontSize: 12 }}>
+                      <span className={`chip ${f.action === 'follow' ? 'ok' : 'failed'}`}>
+                        {f.action === 'follow' ? (f.is_unblocked ? 'เพิ่มใหม่ (unblock)' : 'เพิ่มเพื่อน') : 'บล็อก/ลบ'}
+                      </span>
+                      <span className="muted xs" style={{ marginLeft: 'auto' }}>{fmt(f.event_ts)}</span>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
 
             <div className="udetail-edit">
               <label className="sm">Tags (คั่นด้วย ,)</label>

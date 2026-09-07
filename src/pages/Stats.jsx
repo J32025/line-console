@@ -8,11 +8,13 @@ export default function Stats() {
   const [insight, setInsight] = useState(null)
   const [history, setHistory] = useState([])
   const [quota, setQuota] = useState(null)
+  const [follows, setFollows] = useState(null)
 
   useEffect(() => {
     api.quota().then(setQuota).catch(() => {})
     api.insight().then(setInsight).catch((e) => t.err(e.message))
     api.statsHistory(30).then((d) => setHistory([...d.days].reverse())).catch(() => {})
+    api.followStats(14).then(setFollows).catch(() => {})
   }, []) // eslint-disable-line
 
   if (!insight) return <Spinner />
@@ -33,9 +35,30 @@ export default function Stats() {
               sub={quota?.totalUsage != null ? quota.totalUsage.toLocaleString() : null} />
       </div>
 
+      {follows?.series?.length > 0 && (
+        <section className="card">
+          <h3>Follow / Unfollow แบบเรียลไทม์ (จาก webhook, 14 วัน)</h3>
+          <div className="stat" style={{ marginBottom: 10 }}>
+            <div><b>+{follows.totals.new_follow}</b><span className="muted"> เพิ่มใหม่</span></div>
+            <div><b>+{follows.totals.unblock}</b><span className="muted"> unblock</span></div>
+            <div><b>-{follows.totals.unfollow}</b><span className="muted"> บล็อก/ลบ</span></div>
+            <div><b>{follows.totals.net >= 0 ? '+' : ''}{follows.totals.net}</b><span className="muted"> สุทธิ</span></div>
+          </div>
+          <ResponsiveContainer width="100%" height={220}>
+            <BarChart data={follows.series}>
+              <XAxis dataKey="day" tick={{ fontSize: 10 }} tickFormatter={(d) => d.slice(5)} />
+              <YAxis tick={{ fontSize: 11 }} />
+              <Tooltip />
+              <Bar dataKey="follow" name="follow" fill="#06c755" stackId="a" />
+              <Bar dataKey="unfollow" name="unfollow" fill="#dc2626" stackId="a" />
+            </BarChart>
+          </ResponsiveContainer>
+        </section>
+      )}
+
       {!!history.length && (
         <section className="card">
-          <h3>แนวโน้มผู้ติดตาม (30 วัน)</h3>
+          <h3>แนวโน้มผู้ติดตาม (LINE insight, 30 วัน)</h3>
           <ResponsiveContainer width="100%" height={240}>
             <LineChart data={history}>
               <XAxis dataKey="day" tick={{ fontSize: 11 }} />
