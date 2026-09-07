@@ -63,9 +63,12 @@ async def webhook(request: Request):
         src = ev.get("source", {})
         uid = src.get("userId")
         msg = ev.get("message", {})
+        pb = ev.get("postback", {})
         rows_ev.append({
             "event_type": et, "line_user_id": uid,
-            "message_type": msg.get("type"), "text": msg.get("text"),
+            "message_type": msg.get("type"), "text": msg.get("text") or pb.get("data"),
+            "reply_token": ev.get("replyToken"),
+            "postback_data": pb.get("data"),
             "payload": ev,
         })
         if not uid:
@@ -108,38 +111,52 @@ def _match(rule: dict, text: str) -> bool:
     t = (text or "").lower().strip()
     kws = [k.lower().strip() for k in (rule.get("keywords") or []) if k.strip()]
     mt = rule.get("match_type", "contains")
-    if mt == "any":
-        return True
+    if mt in ("any", "welcome"):
+        return mt == "any"  # welcome จับที่ event follow แยกต่างหาก
     if not kws:
         return False
     if mt == "exact":
         return t in kws
     if mt == "prefix":
         return any(t.startswith(k) for k in kws)
-    return any(k in t for k in kws)  # contains
+    return any(k in t for k in kws)  # contains / postback
+
+
+async def _reply_rule(reply_token: str, rule: dict):
+    code, _ = await line.reply(reply_token, rule["messages"][:5])
+    if code == 200:
+        await supa.update("auto_replies",
+                          {"hits": (rule.get("hits") or 0) + 1, "last_hit_at": NOW()},
+                          {"id": f"eq.{rule['id']}"})
+    return code == 200
 
 
 async def _handle_auto_replies(events: list):
-    text_events = [e for e in events
-                   if e.get("type") == "message" and e.get("message", {}).get("type") == "text"
-                   and e.get("replyToken")]
-    if not text_events:
+    # event ที่ตอบกลับได้ (มี replyToken)
+    repliable = [e for e in events if e.get("replyToken") and e.get("type") in
+                 ("message", "follow", "postback")]
+    if not repliable:
         return
     rules = await supa.select("auto_replies", params={
         "select": "*", "enabled": "eq.true", "order": "priority.desc,id.asc", "limit": "200",
     })
     if not rules:
         return
-    for e in text_events:
-        text = e["message"]["text"]
-        rule = next((r for r in rules if _match(r, text)), None)
-        if not rule:
-            continue
-        code, _ = await line.reply(e["replyToken"], rule["messages"][:5])
-        if code == 200:
-            await supa.update("auto_replies",
-                              {"hits": (rule.get("hits") or 0) + 1, "last_hit_at": NOW()},
-                              {"id": f"eq.{rule['id']}"})
+    welcome = [r for r in rules if r.get("match_type") == "welcome"]
+    for e in repliable:
+        et = e["type"]
+        if et == "follow" and welcome:
+            await _reply_rule(e["replyToken"], welcome[0])
+        elif et == "message" and e.get("message", {}).get("type") == "text":
+            text = e["message"]["text"]
+            rule = next((r for r in rules if r.get("match_type") not in ("welcome",) and _match(r, text)), None)
+            if rule:
+                await _reply_rule(e["replyToken"], rule)
+        elif et == "postback":
+            data = e.get("postback", {}).get("data", "")
+            rule = next((r for r in rules if r.get("match_type") == "postback" and _match(r, data)), None)
+            if rule:
+                await _reply_rule(e["replyToken"], rule)
 
 
 # ============================================================
@@ -923,12 +940,37 @@ async def stats_history(admin=Depends(current_admin), days: int = 30):
 # ============================================================
 @app.get("/api/events")
 async def events(admin=Depends(current_admin), limit: int = 100, type: str = "", uid: str = ""):
-    params = {"select": "*", "order": "created_at.desc", "limit": str(min(limit, 500))}
+    params = {"select": "id,event_type,line_user_id,message_type,text,reply_token,postback_data,auto_replied,created_at",
+              "order": "created_at.desc", "limit": str(min(limit, 500))}
     if type:
         params["event_type"] = f"eq.{type}"
     if uid:
         params["line_user_id"] = f"eq.{uid}"
     return {"events": await supa.select("webhook_events", params=params)}
+
+
+@app.post("/api/events/{eid}/reply")
+async def reply_to_event(eid: int, req: Request, admin=Depends(current_admin)):
+    """ตอบกลับด้วย replyToken ของ event นั้น (ใช้ได้ ~1 นาทีหลัง event เข้ามา)"""
+    b = await req.json()
+    rows = await supa.select("webhook_events", params={
+        "id": f"eq.{eid}", "select": "reply_token,line_user_id,created_at", "limit": "1"})
+    if not rows or not rows[0].get("reply_token"):
+        raise HTTPException(400, "event นี้ไม่มี reply token")
+    ev = rows[0]
+    age = (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(ev["created_at"])).total_seconds()
+    msgs = _normalize_messages(b.get("messages", []))
+    code, txt = await line.reply(ev["reply_token"], msgs)
+    if code != 200:
+        # reply token หมดอายุ -> fallback เป็น push
+        if ev.get("line_user_id"):
+            pc, ptxt, prid = await line.push(ev["line_user_id"], msgs)
+            if pc == 200:
+                await supa.update("webhook_events", {"auto_replied": True}, {"id": f"eq.{eid}"})
+                return {"ok": True, "via": "push", "note": f"reply token ใช้ไม่ได้ (อายุ {int(age)}s) เลยส่ง push แทน"}
+        raise HTTPException(400, f"reply ไม่สำเร็จ: {txt[:150]}")
+    await supa.update("webhook_events", {"auto_replied": True}, {"id": f"eq.{eid}"})
+    return {"ok": True, "via": "reply"}
 
 
 @app.get("/api/operations")

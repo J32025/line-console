@@ -6,7 +6,10 @@ import MessageEditor from '../components/MessageEditor.jsx'
 import MessagePreview from '../components/MessagePreview.jsx'
 import TemplateGallery from '../components/TemplateGallery.jsx'
 
-const MATCH = { contains: 'มีคำนี้', exact: 'ตรงเป๊ะ', prefix: 'ขึ้นต้นด้วย', any: 'ทุกข้อความ' }
+const MATCH = {
+  contains: 'มีคำนี้', exact: 'ตรงเป๊ะ', prefix: 'ขึ้นต้นด้วย', any: 'ทุกข้อความ',
+  welcome: 'เมื่อเพิ่มเพื่อน (ต้อนรับ)', postback: 'postback (จากปุ่ม/rich menu)',
+}
 const EMPTY = { name: '', match_type: 'contains', keywords: '', priority: 0, enabled: true, messages: [blank('text')] }
 
 export default function AutoReply() {
@@ -94,10 +97,11 @@ export default function AutoReply() {
                      value={form.priority} onChange={(e) => setForm({ ...form, priority: e.target.value })} />
               <label><input type="checkbox" checked={form.enabled} onChange={(e) => setForm({ ...form, enabled: e.target.checked })} /> เปิดใช้</label>
             </div>
-            {form.match_type !== 'any' && (
-              <input placeholder="คำ/วลี คั่นด้วย , (เช่น สวัสดี, hello, hi)"
+            {!['any', 'welcome'].includes(form.match_type) && (
+              <input placeholder={form.match_type === 'postback' ? 'ค่า postback data ที่จะจับ คั่นด้วย ,' : 'คำ/วลี คั่นด้วย , (เช่น สวัสดี, hello, hi)'}
                      value={form.keywords} onChange={(e) => setForm({ ...form, keywords: e.target.value })} />
             )}
+            {form.match_type === 'welcome' && <p className="muted xs">ตอบข้อความนี้ทันทีที่มีคนกดเพิ่มเพื่อน (ใช้ reply token ของ event follow — ฟรี ไม่กินโควตา)</p>}
             <div className="row spread" style={{ marginTop: 8 }}>
               <b className="sm">ข้อความตอบ ({form.messages.length}/5)</b>
               <div className="row">
