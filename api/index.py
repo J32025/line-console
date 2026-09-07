@@ -458,8 +458,9 @@ async def _handle_slips(img_events: list):
                 if not acc:
                     status, auto_note = "review", f"บัญชีปลายทางไม่ตรงรายการ ({ocr.get('receiver_acc')})"
                 else:
-                    matched = (float(amount or 0) in (float(acc["price"] or 0), float(acc["full_price"] or 0))
-                               or abs(float(amount or 0) - float(acc["price"] or 0)) < 1)
+                    def _near(target):
+                        return target not in (None, "") and abs(float(amount or 0) - float(target)) < 1
+                    matched = _near(acc.get("price")) or _near(acc.get("full_price"))
                     exp_course = exp_course or acc["course"]
                     if matched:
                         status, auto_note = "verified", f"✓ {acc['course']} · {amount} บาท · {acc['bank']}"
@@ -471,7 +472,9 @@ async def _handle_slips(img_events: list):
             status, auto_note = "review", "อ่านสลิปไม่ได้"
 
         slip = {"line_user_id": uid, "message_id": mid, "media_url": media_url, "ocr": ocr,
-                "amount": amount, "ref": ref, "bank": ocr.get("receiver_bank") if ocr else None,
+                # ref ซ้ำ -> เก็บไว้ที่ dup_ref เท่านั้น ไม่ใส่ ref (กันชน unique index -> row หาย)
+                "amount": amount, "ref": None if dup_ref else ref,
+                "bank": ocr.get("receiver_bank") if ocr else None,
                 "slip_date": str(ocr.get("date")) if ocr and ocr.get("date") else None,
                 "status": status, "matched": matched, "auto_note": auto_note,
                 "dup_ref": dup_ref, "expected_course": exp_course}
