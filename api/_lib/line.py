@@ -52,6 +52,15 @@ async def insight_message_delivery(date: str):
 
 
 # ---------- profile / followers ----------
+async def get_message_content(message_id: str):
+    """ดาวน์โหลดไฟล์รูป/วิดีโอที่ user ส่งมา (คืน bytes, content_type)"""
+    async with httpx.AsyncClient(timeout=30) as c:
+        r = await c.get(f"{LINE_DATA_API}/v2/bot/message/{message_id}/content", headers=_auth())
+        if r.status_code != 200:
+            return None, None
+        return r.content, r.headers.get("content-type", "image/jpeg")
+
+
 async def get_profile(user_id: str):
     r = await _req("GET", f"/v2/bot/profile/{user_id}")
     if r.status_code == 200:

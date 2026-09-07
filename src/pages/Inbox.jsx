@@ -130,9 +130,11 @@ export default function Inbox() {
                       <div className="tmsg-sys">{m.text}</div>
                     ) : (
                       <div className="tmsg-wrap">
-                        {m.payload && m.msg_type !== 'text'
-                          ? <MessagePreview msg={m.payload} />
-                          : <div className="tmsg-bubble">{m.text}</div>}
+                        {m.media_url
+                          ? <img className="tmsg-img" src={m.media_url} alt="" onClick={() => window.open(m.media_url, '_blank')} />
+                          : m.payload && m.msg_type !== 'text'
+                            ? <MessagePreview msg={m.payload} />
+                            : <div className="tmsg-bubble">{m.text}</div>}
                         <div className="tmsg-meta">
                           {m.direction === 'out' && (m.by === 'auto' ? '🤖 auto' : m.by === 'system' ? 'system' : 'แอดมิน')}
                           {' · '}{fmtShort(m.created_at)}

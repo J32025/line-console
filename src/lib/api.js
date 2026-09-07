@@ -88,6 +88,11 @@ export const api = {
   addAdmin: (payload) => req('POST', '/admins', payload),
   delAdmin: (uid) => req('DELETE', `/admins/${uid}`),
 
+  slips: (status = '') => req('GET', '/slips' + (status ? `?status=${status}` : '')),
+  updateSlip: (id, payload) => req('POST', `/slips/${id}`, payload),
+  settings: () => req('GET', '/settings'),
+  setSetting: (key, value) => req('POST', '/settings', { key, value }),
+
   health: () => req('GET', '/health?deep=1'),
   backupNow: () => req('POST', '/backup/now'),
   backupList: () => req('GET', '/backup/list'),

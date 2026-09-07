@@ -23,7 +23,7 @@ from _lib.auth import current_admin
 from _lib.config import (LINE_CHANNEL_SECRET, CRON_SECRET, ALERT_USER_IDS,
                          LINE_CHANNEL_ACCESS_TOKEN, LIFF_CHANNEL_ID,
                          SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY,
-                         LINE_LOGIN_CHANNEL_TOKEN, APP_URL)
+                         LINE_LOGIN_CHANNEL_TOKEN, APP_URL, EASYSLIP_TOKEN)
 import httpx
 
 app = FastAPI(title="LINE Console API")
@@ -327,7 +327,107 @@ async def webhook(request: Request):
             await _enroll_automations("follow", list(set(follow_uids)))
         except Exception as e:
             print("automation enroll error:", e)
+
+    # ---- สลิปโอนเงิน: เก็บรูป + ตรวจ + แจ้งแอดมิน ----
+    img_events = [e for e in events if e.get("type") == "message"
+                  and e.get("message", {}).get("type") in ("image", "file")]
+    if img_events:
+        try:
+            await asyncio.wait_for(_handle_slips(img_events), timeout=25)
+        except BaseException as e:
+            print("slip handler error:", repr(e))
     return {"ok": True}
+
+
+async def _get_setting(key: str, default=None):
+    try:
+        rows = await supa.select("app_settings", params={"key": f"eq.{key}", "select": "value", "limit": "1"})
+        return rows[0]["value"] if rows else default
+    except Exception:
+        return default
+
+
+async def _easyslip_verify(image_bytes: bytes):
+    if not EASYSLIP_TOKEN:
+        return None
+    b64 = base64.b64encode(image_bytes).decode()
+    try:
+        async with httpx.AsyncClient(timeout=20) as c:
+            r = await c.post("https://developer.easyslip.com/api/v1/verify",
+                             headers={"Authorization": f"Bearer {EASYSLIP_TOKEN}"},
+                             json={"image": b64})
+        j = r.json()
+        d = j.get("data") or {}
+        return {
+            "amount": (d.get("amount") or {}).get("amount") if isinstance(d.get("amount"), dict) else d.get("amount"),
+            "bank": ((d.get("receiver") or {}).get("bank") or {}).get("short") or ((d.get("receivingBank") or {})),
+            "ref": d.get("transRef") or d.get("ref"),
+            "date": d.get("date") or d.get("transDate"),
+            "sender": ((d.get("sender") or {}).get("account") or {}).get("name", {}),
+            "raw": j,
+        }
+    except Exception as e:
+        print("easyslip error:", e)
+        return None
+
+
+async def _handle_slips(img_events: list):
+    notify_all = bool(await _get_setting("slip_notify_all_images", True))
+
+    for e in img_events:
+        uid = e.get("source", {}).get("userId")
+        mid = e.get("message", {}).get("id")
+        mtype = e.get("message", {}).get("type")
+        if not uid or not mid:
+            continue
+
+        content, ctype = await line.get_message_content(mid)
+        media_url = None
+        if content:
+            ext = {"image/png": "png", "image/jpeg": "jpg"}.get(ctype, "jpg" if mtype == "image" else "bin")
+            path = f"slips/{dt.date.today().isoformat()}/{mid}.{ext}"
+            try:
+                media_url = await supa.storage_upload("media", path, content, ctype or "image/jpeg")
+                await supa.update("messages", {"media_url": media_url},
+                                  {"line_user_id": f"eq.{uid}", "payload->>id": f"eq.{mid}"})
+            except Exception as ex:
+                print("slip upload error:", ex)
+
+        # เป็นสลิปไหม — ดูจาก context: เคยคุยเรื่องชำระเงินใน 24 ชม.ล่าสุด
+        pay_ctx = False
+        try:
+            since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=24)).isoformat()
+            recent = await supa.select("messages", params={
+                "select": "text", "line_user_id": f"eq.{uid}",
+                "created_at": f"gte.{since}", "order": "created_at.desc", "limit": "15"})
+            blob = " ".join((r.get("text") or "") for r in recent)
+            pay_ctx = any(w in blob for w in ("ชำระ", "โอน", "สลิป", "สมัคร", "ค่าติว", "บัญชี", "หลักสูตร"))
+        except Exception:
+            pass
+
+        if not (notify_all or pay_ctx):
+            continue
+
+        ocr = await _easyslip_verify(content) if content else None
+        prof = await line.get_profile(uid)
+        name = (prof or {}).get("displayName") or uid[:10]
+
+        slip = {"line_user_id": uid, "message_id": mid, "media_url": media_url,
+                "ocr": ocr}
+        if ocr:
+            slip["amount"] = ocr.get("amount")
+            slip["bank"] = ocr.get("bank") if isinstance(ocr.get("bank"), str) else None
+            slip["ref"] = ocr.get("ref")
+            slip["slip_date"] = str(ocr.get("date")) if ocr.get("date") else None
+        try:
+            await supa.insert("slips", slip)
+        except Exception as ex:
+            print("slip insert error:", ex)
+
+        detail = f"จาก: {name}\nเปิดดู: {APP_URL}/inbox"
+        if ocr and ocr.get("amount"):
+            detail = f"จาก: {name}\nยอด: {ocr['amount']} บาท" + (f" · {ocr.get('bank')}" if ocr.get("bank") else "") + f"\nเปิดดู: {APP_URL}/inbox"
+        await alert_admin("🧾 มีสลิป/รูปเข้ามา", detail, throttle_key=f"slip_{mid}")
 
 
 async def _enroll_automations(trigger: str, uids: list[str]):
@@ -2239,6 +2339,62 @@ async def msg_narrowcast(req: Request, admin=Depends(current_admin)):
 async def narrowcast_progress(admin=Depends(current_admin), requestId: str = ""):
     r = await line._req("GET", "/v2/bot/message/progress/narrowcast", params={"requestId": requestId})
     return r.json()
+
+
+# ============================================================
+# SLIPS (สลิปโอนเงิน) + SETTINGS
+# ============================================================
+@app.get("/api/slips")
+async def list_slips(admin=Depends(current_admin), status: str = "", limit: int = 100):
+    params = {"select": "*", "order": "created_at.desc", "limit": str(min(limit, 300))}
+    if status:
+        params["status"] = f"eq.{status}"
+    slips = await supa.select("slips", params=params)
+    # แนบชื่อ user
+    uids = list({s["line_user_id"] for s in slips})
+    names = {}
+    if uids:
+        for r in await supa.select("line_users", params={
+            "select": "line_user_id,display_name,picture_url",
+            "line_user_id": f"in.({','.join(uids)})", "limit": "500"}):
+            names[r["line_user_id"]] = r
+    for s in slips:
+        s["user"] = names.get(s["line_user_id"], {})
+    new_count = await supa.count("slips", {"status": "eq.new"})
+    return {"slips": slips, "new_count": new_count}
+
+
+@app.post("/api/slips/{sid}")
+async def update_slip(sid: int, req: Request, admin=Depends(current_admin)):
+    b = await req.json()
+    patch = {k: b[k] for k in ("status", "note", "amount") if k in b}
+    if b.get("status") in ("verified", "rejected"):
+        patch["reviewed_by"] = admin["userId"]
+        patch["reviewed_at"] = NOW()
+    await supa.update("slips", patch, {"id": f"eq.{sid}"})
+    # ตอบ user ถ้าขอ
+    if b.get("replyUser"):
+        rows = await supa.select("slips", params={"id": f"eq.{sid}", "select": "line_user_id", "limit": "1"})
+        if rows:
+            msg = ("✅ ตรวจสอบสลิปเรียบร้อยแล้ว ขอบคุณครับ 🙏"
+                   if b["status"] == "verified" else
+                   "สลิปที่ส่งมายังตรวจสอบไม่ผ่าน รบกวนส่งใหม่หรือติดต่อแอดมินครับ 🙏")
+            await line.push(rows[0]["line_user_id"], [{"type": "text", "text": b.get("replyText") or msg}])
+    return {"ok": True}
+
+
+@app.get("/api/settings")
+async def get_settings(admin=Depends(current_admin)):
+    rows = await supa.select("app_settings", params={"select": "*"})
+    return {"settings": {r["key"]: r["value"] for r in rows}}
+
+
+@app.post("/api/settings")
+async def set_setting(req: Request, admin=Depends(current_admin)):
+    b = await req.json()
+    await supa.upsert("app_settings", {"key": b["key"], "value": b["value"], "updated_at": NOW()},
+                      on_conflict="key")
+    return {"ok": True}
 
 
 @app.get("/api/admins")

@@ -20,6 +20,9 @@ ALERT_USER_IDS = [u.strip() for u in os.environ.get("ALERT_USER_IDS", "").split(
 # LINE Login channel (สำหรับ LIFF) — ใส่ access token ถ้าอยาก sync รายการ LIFF จาก LINE อัตโนมัติ
 LINE_LOGIN_CHANNEL_TOKEN = os.environ.get("LINE_LOGIN_CHANNEL_TOKEN", "").strip()
 
+# EasySlip API token (ตรวจสลิปอัตโนมัติ) — ว่าง = ไม่ตรวจ OCR แค่แจ้งเตือน
+EASYSLIP_TOKEN = os.environ.get("EASYSLIP_TOKEN", "").strip()
+
 # domain ของเว็บนี้ (สำหรับแสดง endpoint แนะนำ) — auto จาก VERCEL_URL
 APP_URL = (os.environ.get("APP_URL")
            or ("https://" + os.environ["VERCEL_PROJECT_PRODUCTION_URL"] if os.environ.get("VERCEL_PROJECT_PRODUCTION_URL") else "")

@@ -12,6 +12,7 @@ export default function Admins({ me }) {
   const [backups, setBackups] = useState([])
   const [fields, setFields] = useState([])
   const [nf, setNf] = useState({ key: '', label: '', type: 'text', options: '' })
+  const [settings, setSettings] = useState({})
   const [busy, setBusy] = useState('')
 
   const load = () => api.admins().then((d) => setRows(d.admins)).catch((e) => t.err(e.message))
@@ -19,6 +20,11 @@ export default function Admins({ me }) {
     api.health().then(setHealth).catch(() => setHealth({ ok: false }))
     api.backupList().then((d) => setBackups(d.backups)).catch(() => {})
     api.fields().then((d) => setFields(d.fields)).catch(() => {})
+    api.settings().then((d) => setSettings(d.settings)).catch(() => {})
+  }
+  const toggleSetting = async (key, val) => {
+    setSettings((s) => ({ ...s, [key]: val }))
+    try { await api.setSetting(key, val) } catch (e) { t.err(e.message) }
   }
   const addField = async () => {
     try {
@@ -107,6 +113,16 @@ export default function Admins({ me }) {
             {!backups.length && <tr><td colSpan={4} className="muted center">ยังไม่มี — กด "สำรองเดี๋ยวนี้"</td></tr>}
           </tbody>
         </table>
+      </section>
+
+      <section className="card">
+        <h3>การแจ้งเตือน</h3>
+        <label className="row">
+          <input type="checkbox" checked={settings.slip_notify_all_images !== false}
+                 onChange={(e) => toggleSetting('slip_notify_all_images', e.target.checked)} />
+          แจ้งแอดมิน (เข้า LINE) ทุกครั้งที่มีรูป/สลิปเข้ามา
+        </label>
+        <p className="muted xs">ถ้าปิด จะแจ้งเฉพาะรูปที่ส่งหลังคุยเรื่องชำระเงิน/สมัคร · ต้องตั้ง ALERT_USER_IDS · ตรวจสลิปอัตโนมัติ (ยอด/ธนาคาร) ต้องตั้ง env EASYSLIP_TOKEN</p>
       </section>
 
       <section className="card">
