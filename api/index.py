@@ -457,6 +457,20 @@ async def _handle_auto_replies(events: list):
             "auto_reply_paused": "eq.true", "limit": "1000"})
         paused = {r["line_user_id"] for r in rows}
 
+    # postback actions (routing table exact/prefix) — เช็คก่อน auto_replies
+    pb_actions = []
+    if any(e["type"] == "postback" for e in repliable):
+        pb_actions = await supa.select("postback_actions", params={
+            "select": "*", "enabled": "eq.true", "order": "match.asc"})
+
+    def _pick_postback(data: str):
+        for pa in pb_actions:
+            if pa["match"] == "prefix" and data.startswith(pa["data"]):
+                return pa
+            if pa["match"] == "exact" and data == pa["data"]:
+                return pa
+        return None
+
     name_cache: dict[str, str] = {}
     async def name_of(uid):
         if not uid:
@@ -473,6 +487,25 @@ async def _handle_auto_replies(events: list):
             uid = e.get("source", {}).get("userId")
             if uid in paused or uid in replied_uids:
                 continue
+
+            # ---- postback action (routing table) มาก่อน ----
+            if e["type"] == "postback":
+                pa = _pick_postback(e.get("postback", {}).get("data", ""))
+                if pa and pa.get("messages"):
+                    msgs = pa["messages"][:5]
+                    if _has_placeholder(msgs):
+                        msgs = _personalize(msgs, await name_of(uid))
+                    code, _ = await line.reply(e["replyToken"], msgs)
+                    if code == 200:
+                        replied_uids.add(uid)
+                        await supa.update("postback_actions",
+                                          {"hits": (pa.get("hits") or 0) + 1, "last_hit_at": NOW()},
+                                          {"id": f"eq.{pa['id']}"})
+                        for m in msgs:
+                            out_msgs.append({"line_user_id": uid, "direction": "out", "by": "postback",
+                                             "msg_type": m.get("type"), "text": m.get("text"), "payload": m})
+                    continue
+
             rule = _pick_rule(e, rules)
             if not rule:
                 continue
@@ -1639,6 +1672,61 @@ async def create_auto_reply(req: Request, admin=Depends(current_admin)):
         return {"ok": True, "id": b["id"]}
     r = await supa.insert("auto_replies", row)
     return {"ok": True, "rule": r[0] if r else None}
+
+
+# ---------- postback actions ----------
+@app.get("/api/postbacks")
+async def list_postbacks(admin=Depends(current_admin)):
+    return {"actions": await supa.select("postback_actions", params={
+        "select": "*", "order": "data"})}
+
+
+@app.post("/api/postbacks")
+async def save_postback(req: Request, admin=Depends(current_admin)):
+    b = await req.json()
+    data = (b.get("data") or "").strip()
+    if not data:
+        raise HTTPException(400, "ต้องระบุ postback data")
+    row = {
+        "data": data, "label": b.get("label"), "enabled": b.get("enabled", True),
+        "match": b.get("match", "exact"),
+        "messages": _normalize_messages(b.get("messages", [])),
+        "note": b.get("note"), "created_by": admin["userId"], "updated_at": NOW(),
+    }
+    if b.get("id"):
+        await supa.update("postback_actions", row, {"id": f"eq.{b['id']}"})
+        return {"ok": True, "id": b["id"]}
+    await supa.upsert("postback_actions", row, on_conflict="data")
+    return {"ok": True}
+
+
+@app.post("/api/postbacks/import")
+async def import_postbacks(req: Request, admin=Depends(current_admin)):
+    """รับ list ของ postback code -> สร้าง stub (ปิดไว้) ถ้ายังไม่มี"""
+    b = await req.json()
+    codes = []
+    for c in b.get("codes", []):
+        c = str(c).strip()
+        if c:
+            codes.append(c)
+    codes = list(dict.fromkeys(codes))
+    if not codes:
+        raise HTTPException(400, "ไม่มี code")
+    existing = {r["data"] for r in await supa.select("postback_actions", params={
+        "select": "data", "data": f"in.({','.join(codes)})", "limit": "1000"})}
+    new = [{"data": c, "label": c, "enabled": False, "match": "exact",
+            "messages": [{"type": "text", "text": f"[ตั้งข้อความตอบสำหรับ {c}]"}],
+            "created_by": admin["userId"]} for c in codes if c not in existing]
+    if new:
+        for i in range(0, len(new), 100):
+            await supa.insert("postback_actions", new[i:i + 100])
+    return {"ok": True, "total": len(codes), "created": len(new), "existing": len(existing)}
+
+
+@app.delete("/api/postbacks/{pid}")
+async def delete_postback(pid: int, admin=Depends(current_admin)):
+    await supa.delete("postback_actions", {"id": f"eq.{pid}"})
+    return {"ok": True}
 
 
 @app.delete("/api/auto-replies/{rid}")

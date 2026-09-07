@@ -97,6 +97,11 @@ export const api = {
   saveAutoReply: (payload) => req('POST', '/auto-replies', payload),
   delAutoReply: (id) => req('DELETE', `/auto-replies/${id}`),
 
+  postbacks: () => req('GET', '/postbacks'),
+  savePostback: (payload) => req('POST', '/postbacks', payload),
+  importPostbacks: (codes) => req('POST', '/postbacks/import', { codes }),
+  delPostback: (id) => req('DELETE', `/postbacks/${id}`),
+
   scheduled: () => req('GET', '/scheduled'),
   schedule: (payload) => req('POST', '/scheduled', payload),
   cancelScheduled: (id) => req('DELETE', `/scheduled/${id}`),

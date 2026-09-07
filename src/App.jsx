@@ -9,6 +9,7 @@ import RichMenus from './pages/RichMenus.jsx'
 import Messaging from './pages/Messaging.jsx'
 import Inbox from './pages/Inbox.jsx'
 import AutoReply from './pages/AutoReply.jsx'
+import Postbacks from './pages/Postbacks.jsx'
 import Automations from './pages/Automations.jsx'
 import Segments from './pages/Segments.jsx'
 import Users from './pages/Users.jsx'
@@ -24,6 +25,7 @@ const NAV = [
   ['/messaging', 'ส่งข้อความ', '✈️'],
   ['/richmenus', 'Rich Menu', '📱'],
   ['/auto-reply', 'ตอบอัตโนมัติ', '🤖'],
+  ['/postbacks', 'Postback', '🔘'],
   ['/automations', 'Automation', '⚡'],
   ['/segments', 'กลุ่มเป้าหมาย', '🎯'],
   ['/users', 'ผู้ใช้', '👥'],
@@ -112,6 +114,7 @@ export default function App() {
               <Route path="/messaging" element={<Messaging />} />
               <Route path="/inbox" element={<Inbox />} />
               <Route path="/auto-reply" element={<AutoReply />} />
+              <Route path="/postbacks" element={<Postbacks />} />
               <Route path="/automations" element={<Automations />} />
               <Route path="/segments" element={<Segments />} />
               <Route path="/users" element={<Users />} />
