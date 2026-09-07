@@ -64,6 +64,10 @@ export const api = {
   linkStats: (code) => req('GET', `/links/${code}/stats`),
   delLink: (code) => req('DELETE', `/links/${code}`),
 
+  automations: () => req('GET', '/automations'),
+  saveAutomation: (payload) => req('POST', '/automations', payload),
+  delAutomation: (id) => req('DELETE', `/automations/${id}`),
+
   validateMsg: (messages) => req('POST', '/message/validate', { messages }),
   push: (payload) => req('POST', '/message/push', payload),
   bulkSend: (payload) => req('POST', '/message/bulk', payload),

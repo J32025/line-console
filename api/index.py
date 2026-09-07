@@ -320,7 +320,41 @@ async def webhook(request: Request):
         await asyncio.wait_for(_handle_auto_replies(events), timeout=12)
     except BaseException as e:  # noqa: BLE001 — webhook ต้องตอบ 200 เสมอ
         print("auto-reply error:", repr(e))
+
+    # ---- automation: trigger=follow ----
+    if follow_uids:
+        try:
+            await _enroll_automations("follow", list(set(follow_uids)))
+        except Exception as e:
+            print("automation enroll error:", e)
     return {"ok": True}
+
+
+async def _enroll_automations(trigger: str, uids: list[str]):
+    autos = await supa.select("automations", params={
+        "select": "id,steps", "enabled": "eq.true", "trigger": f"eq.{trigger}"})
+    if not autos:
+        return
+    rows = []
+    for a in autos:
+        steps = a.get("steps") or []
+        if not steps:
+            continue
+        delay = int(steps[0].get("delayHours", 0)) * 3600 + int(steps[0].get("delayMinutes", 0)) * 60
+        run_at = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=delay)).isoformat()
+        for uid in uids:
+            rows.append({"automation_id": a["id"], "line_user_id": uid, "step_idx": 0,
+                         "run_at": run_at, "status": "pending"})
+    if rows:
+        # on_conflict = ไม่ลง run ซ้ำถ้าคน ๆ นั้นเคยเข้า step 0 ของ automation นี้แล้ว
+        try:
+            await supa.upsert("automation_runs", rows, on_conflict="automation_id,line_user_id,step_idx")
+        except Exception:
+            for r in rows:
+                try:
+                    await supa.insert("automation_runs", r)
+                except Exception:
+                    pass
 
 
 def _match(rule: dict, text: str) -> bool:
@@ -1662,6 +1696,93 @@ async def cron_snapshot_stats(request: Request):
     }, on_conflict="day")
     await supa.log_operation("cron", "stats.snapshot", {"date": date}, followers)
     return {"ok": True, "date": date, "followers": followers.get("followers")}
+
+
+@app.api_route("/api/cron/run-automations", methods=["GET", "POST"])
+async def cron_run_automations(request: Request):
+    _check_cron_key(request)
+    due = await supa.select("automation_runs", params={
+        "select": "*", "status": "eq.pending", "run_at": f"lte.{NOW()}",
+        "order": "run_at.asc", "limit": "200"})
+    if not due:
+        return {"ok": True, "ran": 0}
+    autos = {a["id"]: a for a in await supa.select("automations", params={"select": "*"})}
+    sent = failed = 0
+    for run in due:
+        a = autos.get(run["automation_id"])
+        if not a or not a.get("enabled"):
+            await supa.update("automation_runs", {"status": "skipped"}, {"id": f"eq.{run['id']}"})
+            continue
+        steps = a.get("steps") or []
+        idx = run["step_idx"]
+        if idx >= len(steps):
+            await supa.update("automation_runs", {"status": "done"}, {"id": f"eq.{run['id']}"})
+            continue
+        # ยังตามอยู่ไหม
+        u = await supa.select("line_users", params={
+            "select": "is_following", "line_user_id": f"eq.{run['line_user_id']}", "limit": "1"})
+        if not u or not u[0].get("is_following"):
+            await supa.update("automation_runs", {"status": "skipped"}, {"id": f"eq.{run['id']}"})
+            continue
+        msgs = _normalize_messages(steps[idx].get("messages", []))
+        code, _, _ = await line.push(run["line_user_id"], msgs)
+        ok = code == 200
+        sent += ok
+        failed += (not ok)
+        try:
+            await supa.insert("messages", [{"line_user_id": run["line_user_id"], "direction": "out",
+                                            "by": "automation", "msg_type": m.get("type"),
+                                            "text": m.get("text"), "payload": m} for m in msgs])
+        except Exception:
+            pass
+        await supa.update("automation_runs", {"status": "done" if ok else "failed"}, {"id": f"eq.{run['id']}"})
+        # step ถัดไป
+        if ok and idx + 1 < len(steps):
+            nxt = steps[idx + 1]
+            delay = int(nxt.get("delayHours", 0)) * 3600 + int(nxt.get("delayMinutes", 0)) * 60
+            run_at = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=max(delay, 60))).isoformat()
+            try:
+                await supa.insert("automation_runs", {
+                    "automation_id": a["id"], "line_user_id": run["line_user_id"],
+                    "step_idx": idx + 1, "run_at": run_at, "status": "pending"})
+            except Exception:
+                pass
+        if ok and idx == 0:
+            await supa.update("automations", {"runs": (a.get("runs") or 0) + 1}, {"id": f"eq.{a['id']}"})
+    await supa.log_operation("cron", "automation.run", {"due": len(due)}, {"sent": sent, "failed": failed})
+    return {"ok": True, "ran": len(due), "sent": sent, "failed": failed}
+
+
+@app.get("/api/automations")
+async def list_automations(admin=Depends(current_admin)):
+    return {"automations": await supa.select("automations", params={"select": "*", "order": "id.desc"})}
+
+
+@app.post("/api/automations")
+async def save_automation(req: Request, admin=Depends(current_admin)):
+    b = await req.json()
+    steps = []
+    for s in b.get("steps", []):
+        steps.append({
+            "delayHours": int(s.get("delayHours", 0)),
+            "delayMinutes": int(s.get("delayMinutes", 0)),
+            "messages": _normalize_messages(s.get("messages", [])),
+        })
+    row = {"name": b["name"], "enabled": b.get("enabled", True),
+           "trigger": b.get("trigger", "follow"), "trigger_config": b.get("triggerConfig", {}),
+           "steps": steps, "created_by": admin["userId"]}
+    if b.get("id"):
+        await supa.update("automations", row, {"id": f"eq.{b['id']}"})
+        return {"ok": True, "id": b["id"]}
+    r = await supa.insert("automations", row)
+    return {"ok": True, "automation": r[0] if r else None}
+
+
+@app.delete("/api/automations/{aid}")
+async def del_automation(aid: int, admin=Depends(current_admin)):
+    await supa.delete("automations", {"id": f"eq.{aid}"})
+    await supa.delete("automation_runs", {"automation_id": f"eq.{aid}", "status": "eq.pending"})
+    return {"ok": True}
 
 
 @app.api_route("/api/cron/run-scheduled", methods=["GET", "POST"])
