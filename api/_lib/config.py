@@ -17,5 +17,13 @@ CRON_SECRET = os.environ.get("CRON_SECRET", "").strip()
 # LINE userId ที่จะรับแจ้งเตือน error ของระบบ (คั่นด้วย ,) — ว่าง = ไม่แจ้ง
 ALERT_USER_IDS = [u.strip() for u in os.environ.get("ALERT_USER_IDS", "").split(",") if u.strip()]
 
+# LINE Login channel (สำหรับ LIFF) — ใส่ access token ถ้าอยาก sync รายการ LIFF จาก LINE อัตโนมัติ
+LINE_LOGIN_CHANNEL_TOKEN = os.environ.get("LINE_LOGIN_CHANNEL_TOKEN", "").strip()
+
+# domain ของเว็บนี้ (สำหรับแสดง endpoint แนะนำ) — auto จาก VERCEL_URL
+APP_URL = (os.environ.get("APP_URL")
+           or ("https://" + os.environ["VERCEL_PROJECT_PRODUCTION_URL"] if os.environ.get("VERCEL_PROJECT_PRODUCTION_URL") else "")
+           or "https://line-console-pi.vercel.app")
+
 LINE_API = "https://api.line.me"
 LINE_DATA_API = "https://api-data.line.me"

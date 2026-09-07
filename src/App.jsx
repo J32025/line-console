@@ -13,6 +13,7 @@ import Segments from './pages/Segments.jsx'
 import Users from './pages/Users.jsx'
 import Stats from './pages/Stats.jsx'
 import Events from './pages/Events.jsx'
+import Liff from './pages/Liff.jsx'
 import Admins from './pages/Admins.jsx'
 
 const NAV = [
@@ -25,6 +26,7 @@ const NAV = [
   ['/users', 'ผู้ใช้', '👥'],
   ['/stats', 'สถิติ', '📊'],
   ['/events', 'Events', '📋'],
+  ['/liff', 'LIFF', '🔗'],
   ['/admins', 'ผู้ดูแล', '🔑'],
 ]
 
@@ -110,6 +112,7 @@ export default function App() {
               <Route path="/users" element={<Users />} />
               <Route path="/stats" element={<Stats />} />
               <Route path="/events" element={<Events />} />
+              <Route path="/liff" element={<Liff />} />
               <Route path="/admins" element={<Admins me={state.me} />} />
               <Route path="*" element={<Navigate to="/" />} />
             </Routes>

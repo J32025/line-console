@@ -228,6 +228,10 @@ pre { background: #0e1a2b; color: #c7d0dc; padding: 12px; border-radius: 9px; ov
 .ln-qr { display: flex; gap: 5px; flex-wrap: wrap; }
 .ln-qr-chip { background: #fff; border: 1px solid var(--primary); color: var(--primary); border-radius: 99px; padding: 3px 10px; font-size: .72rem; }
 
+/* ---------- liff ---------- */
+.liff-grid { display: grid; grid-template-columns: 1fr auto; gap: 16px; align-items: start; margin-top: 8px; }
+@media (max-width: 680px) { .liff-grid { grid-template-columns: 1fr; } }
+
 /* ---------- inbox ---------- */
 .inbox { display: grid; grid-template-columns: 300px 1fr; gap: 12px; align-items: start; height: calc(100vh - 130px); }
 .inbox-list { overflow-y: auto; height: 100%; padding: 12px; }

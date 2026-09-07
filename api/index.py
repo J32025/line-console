@@ -22,7 +22,9 @@ from _lib import line, supa
 from _lib.auth import current_admin
 from _lib.config import (LINE_CHANNEL_SECRET, CRON_SECRET, ALERT_USER_IDS,
                          LINE_CHANNEL_ACCESS_TOKEN, LIFF_CHANNEL_ID,
-                         SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+                         SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY,
+                         LINE_LOGIN_CHANNEL_TOKEN, APP_URL)
+import httpx
 
 app = FastAPI(title="LINE Console API")
 app.add_middleware(
@@ -1594,6 +1596,98 @@ async def list_media(admin=Depends(current_admin)):
                         "size": (it.get("metadata") or {}).get("size"),
                         "created": it.get("created_at")})
     return {"items": out}
+
+
+# ============================================================
+# LIFF
+# ============================================================
+def _liff_meta(liff_id: str) -> dict:
+    """ข้อมูลที่คำนวณได้จาก LIFF ID เอง"""
+    channel = liff_id.split("-")[0] if "-" in liff_id else ""
+    return {
+        "liffId": liff_id,
+        "channelId": channel,
+        "permanentLink": f"https://liff.line.me/{liff_id}",
+        "shortLink": f"line://app/{liff_id}",
+        "consoleUrl": f"https://developers.line.biz/console/channel/{channel}/liff" if channel else None,
+    }
+
+
+@app.get("/api/liff")
+async def liff_list(admin=Depends(current_admin)):
+    stored = await supa.select("liff_apps", params={"select": "*", "order": "is_primary.desc,updated_at.desc"})
+    # sync จาก LINE ถ้ามี token
+    line_apps, sync_err = [], None
+    if LINE_LOGIN_CHANNEL_TOKEN:
+        try:
+            async with httpx.AsyncClient(timeout=15) as c:
+                r = await c.get("https://api.line.me/liff/v1/apps",
+                                headers={"Authorization": f"Bearer {LINE_LOGIN_CHANNEL_TOKEN}"})
+            if r.status_code == 200:
+                line_apps = r.json().get("apps", [])
+            else:
+                sync_err = f"{r.status_code}: {r.text[:150]}"
+        except Exception as e:
+            sync_err = str(e)
+
+    stored_ids = {s["liff_id"] for s in stored}
+    merged = []
+    for s in stored:
+        m = {**_liff_meta(s["liff_id"]), **s, "source": "stored"}
+        la = next((a for a in line_apps if a["liffId"] == s["liff_id"]), None)
+        if la:
+            m["line"] = la
+        merged.append(m)
+    for a in line_apps:
+        if a["liffId"] not in stored_ids:
+            merged.append({**_liff_meta(a["liffId"]), "name": a.get("description"),
+                           "line": a, "source": "line"})
+
+    env_liff = os.environ.get("VITE_LIFF_ID") or (LIFF_CHANNEL_ID and "")
+    return {
+        "apps": merged,
+        "env": {
+            "VITE_LIFF_ID": os.environ.get("VITE_LIFF_ID"),
+            "LIFF_CHANNEL_ID": LIFF_CHANNEL_ID,
+            "recommendedEndpoint": APP_URL,
+        },
+        "syncEnabled": bool(LINE_LOGIN_CHANNEL_TOKEN),
+        "syncError": sync_err,
+    }
+
+
+@app.post("/api/liff")
+async def liff_save(req: Request, admin=Depends(current_admin)):
+    b = await req.json()
+    lid = (b.get("liffId") or "").strip()
+    if not re.fullmatch(r"\d{9,12}-[0-9a-zA-Z]{6,12}", lid):
+        raise HTTPException(400, "LIFF ID ผิดรูปแบบ (เช่น 2009830584-koG1QjOD)")
+    row = {
+        "liff_id": lid,
+        "name": b.get("name"),
+        "size": b.get("size"),
+        "endpoint_url": b.get("endpointUrl"),
+        "description": b.get("description"),
+        "scopes": b.get("scopes", []),
+        "bot_prompt": b.get("botPrompt"),
+        "features": b.get("features", {}),
+        "module_mode": bool(b.get("moduleMode")),
+        "is_primary": bool(b.get("isPrimary")),
+        "channel_id": lid.split("-")[0],
+        "note": b.get("note"),
+        "created_by": admin["userId"],
+        "updated_at": NOW(),
+    }
+    if b.get("isPrimary"):
+        await supa.update("liff_apps", {"is_primary": False}, {"is_primary": "eq.true"})
+    await supa.upsert("liff_apps", row, on_conflict="liff_id")
+    return {"ok": True, **_liff_meta(lid)}
+
+
+@app.delete("/api/liff/{liff_id}")
+async def liff_delete(liff_id: str, admin=Depends(current_admin)):
+    await supa.delete("liff_apps", {"liff_id": f"eq.{liff_id}"})
+    return {"ok": True}
 
 
 @app.post("/api/target/resolve")
