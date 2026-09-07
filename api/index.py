@@ -56,6 +56,8 @@ async def webhook(request: Request):
 
     data = json.loads(body or "{}")
     events = data.get("events", [])
+    # ข้าม event ที่ LINE ส่งซ้ำ (redelivery) — เราประมวลผลรอบแรกไปแล้ว
+    events = [e for e in events if not e.get("deliveryContext", {}).get("isRedelivery")]
     rows_ev, user_patches, follow_rows = [], {}, []
     follow_uids, unfollow_uids = [], []
 
@@ -108,8 +110,7 @@ async def webhook(request: Request):
 
     try:
         if rows_ev:
-            # on_conflict webhook_event_id -> กัน redelivery ซ้ำ
-            await supa.upsert("webhook_events", rows_ev, on_conflict="webhook_event_id")
+            await supa.insert("webhook_events", rows_ev)
         if follow_rows:
             await supa.insert("follow_history", follow_rows)
 
