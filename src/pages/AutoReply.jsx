@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../lib/api.js'
-import { Spinner, useToast } from '../lib/ui.jsx'
+import { Spinner, InlineSpinner, useToast } from '../lib/ui.jsx'
 import { blank } from '../lib/messageTypes.js'
 import MessageEditor from '../components/MessageEditor.jsx'
 import MessagePreview from '../components/MessagePreview.jsx'
@@ -150,7 +150,7 @@ export default function AutoReply() {
                 {form.messages.map((m, i) => <MessagePreview key={i} msg={m} />)}
               </div>
             </div>
-            <button className="primary" onClick={save} disabled={busy}>บันทึกกฎ</button>
+            <button className="primary" onClick={save} disabled={busy}>{busy && <InlineSpinner />}บันทึกกฎ</button>
           </div>
         </div>
       )}

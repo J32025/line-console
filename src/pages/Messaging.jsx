@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../lib/api.js'
-import { useToast } from '../lib/ui.jsx'
+import { useToast, InlineSpinner } from '../lib/ui.jsx'
 import { blank } from '../lib/messageTypes.js'
 import { useProgress } from '../lib/progress.jsx'
 import MessageEditor from '../components/MessageEditor.jsx'
@@ -363,7 +363,7 @@ export default function Messaging() {
           <div className="row">
             <button className="sm" onClick={doValidate} disabled={busy}>ตรวจรูปแบบ</button>
             <button className="sm" onClick={sendTest} disabled={busy}>ส่งหาตัวเอง (ทดสอบ)</button>
-            <button className="primary" onClick={send} disabled={busy}>ส่งจริง → {targetLabel}</button>
+            <button className="primary" onClick={send} disabled={busy}>{busy && <InlineSpinner />}ส่งจริง → {targetLabel}</button>
           </div>
 
           <section className="card" style={{ marginTop: 16 }}>

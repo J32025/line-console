@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react'
 import { api } from '../lib/api.js'
-import { useToast } from '../lib/ui.jsx'
+import { useToast, InlineSpinner } from '../lib/ui.jsx'
 
 const SIZES = {
   full: { width: 2500, height: 1686, label: 'เต็ม 2500×1686' },
@@ -181,7 +181,7 @@ export default function RichMenuBuilder({ onDone, onCancel }) {
               ))}
             </div>
 
-            <button className="primary" onClick={save} disabled={busy}>สร้างเมนู</button>
+            <button className="primary" onClick={save} disabled={busy}>{busy && <InlineSpinner />}สร้างเมนู</button>
           </div>
         </div>
       </div>

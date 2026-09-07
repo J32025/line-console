@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../lib/api.js'
-import { Spinner, useToast } from '../lib/ui.jsx'
+import { SkeletonRows, InlineSpinner, useToast } from '../lib/ui.jsx'
 
 export default function Events() {
   const t = useToast()
@@ -43,7 +43,7 @@ export default function Events() {
             <option value="">ทุกชนิด</option>
             {['follow', 'unfollow', 'message', 'postback', 'join', 'leave', 'memberJoined'].map((x) => <option key={x}>{x}</option>)}
           </select>
-          {!events ? <Spinner /> : (
+          {!events ? <SkeletonRows rows={8} cols={5} /> : (
             <div className="table-scroll">
               <table>
                 <thead><tr><th>ชนิด</th><th>ผู้ใช้</th><th>ข้อความ / postback</th><th>reply token</th><th>เวลา</th><th></th></tr></thead>
@@ -85,7 +85,7 @@ export default function Events() {
 
       {tab === 'ops' && (
         <section className="card">
-          {!ops ? <Spinner /> : (
+          {!ops ? <SkeletonRows rows={6} cols={5} /> : (
             <table>
               <thead><tr><th>action</th><th>actor</th><th>สถานะ</th><th>ผล</th><th>เวลา</th></tr></thead>
               <tbody>
@@ -111,7 +111,7 @@ export default function Events() {
             <p className="muted xs mono">{replyTo.line_user_id}</p>
             {replyTo.text && <p className="sm" style={{ background: '#f4f4f4', padding: 8, borderRadius: 6 }}>{replyTo.text}</p>}
             <textarea rows={3} placeholder="พิมพ์คำตอบ…" value={replyText} onChange={(e) => setReplyText(e.target.value)} />
-            <button className="primary" onClick={sendReply} disabled={busy}>ส่ง</button>
+            <button className="primary" onClick={sendReply} disabled={busy}>{busy && <InlineSpinner />}ส่ง</button>
           </div>
         </div>
       )}

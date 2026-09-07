@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts'
 import { api } from '../lib/api.js'
-import { Spinner, Stat, useToast } from '../lib/ui.jsx'
+import { Spinner, SkeletonStats, SkeletonRows, InlineSpinner, Stat, useToast } from '../lib/ui.jsx'
 
 export default function Dashboard() {
   const t = useToast()
@@ -21,7 +21,14 @@ export default function Dashboard() {
   }
 
   if (err) return <p className="err">{err}</p>
-  if (!d) return <Spinner />
+  if (!d) return (
+    <div>
+      <h1>แดชบอร์ด</h1>
+      <SkeletonStats />
+      <div className="card"><SkeletonRows rows={5} cols={2} /></div>
+      <div className="loading-text" style={{ textAlign: 'center' }}><InlineSpinner />กำลังโหลดแดชบอร์ด…</div>
+    </div>
+  )
 
   const q = d.quota?.quota || {}
   const trend = (d.trend || []).map((x) => ({ ...x, day: x.day?.slice(5) }))
@@ -46,10 +53,10 @@ export default function Dashboard() {
         <div className="row wrap">
           <button className="sm" disabled={busy} onClick={() => nav('/messaging')}>ส่งข้อความ</button>
           <button className="sm" disabled={busy} onClick={() => quick('sync richmenu', () => api.syncMenu({ target: 'all' }))}>
-            {busy === 'sync richmenu' ? 'กำลัง sync…' : 'Sync Rich Menu ทั้งหมด'}
+            {busy === 'sync richmenu' && <InlineSpinner />}Sync Rich Menu ทั้งหมด
           </button>
           <button className="sm" disabled={busy} onClick={() => quick('ดึงโปรไฟล์', () => api.refreshProfiles({ target: 'missing', limit: 400 }))}>
-            ดึงโปรไฟล์ที่ค้าง
+            {busy === 'ดึงโปรไฟล์' && <InlineSpinner />}ดึงโปรไฟล์ที่ค้าง
           </button>
           <button className="sm" disabled={busy} onClick={() => nav('/richmenus')}>จัดการ Rich Menu</button>
           <button className="sm" disabled={busy} onClick={() => nav('/segments')}>กลุ่มเป้าหมาย</button>

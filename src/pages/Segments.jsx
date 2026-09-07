@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../lib/api.js'
-import { Spinner, useToast } from '../lib/ui.jsx'
+import { Spinner, InlineSpinner, useToast } from '../lib/ui.jsx'
 
 const EMPTY = { name: '', filter: { following: 'true', tag: '', menu: '', source: '' } }
 
@@ -65,7 +65,7 @@ export default function Segments() {
           <input placeholder="source" value={form.filter.source} onChange={(e) => setF('source', e.target.value)} style={{ width: 120 }} />
         </div>
         <div className="row" style={{ marginTop: 8 }}>
-          <button className="primary" onClick={save} disabled={busy}>บันทึกกลุ่ม</button>
+          <button className="primary" onClick={save} disabled={busy}>{busy && <InlineSpinner />}บันทึกกลุ่ม</button>
           {form.id && <button onClick={() => setForm(EMPTY)}>ยกเลิก</button>}
         </div>
       </section>

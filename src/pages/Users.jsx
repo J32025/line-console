@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../lib/api.js'
-import { useToast } from '../lib/ui.jsx'
+import { useToast, SkeletonCards, InlineSpinner } from '../lib/ui.jsx'
 import { useProgress } from '../lib/progress.jsx'
 import UserDetail from '../components/UserDetail.jsx'
 
@@ -98,7 +98,9 @@ export default function Users() {
           <button className="sm" onClick={() => { setOffset(0); load() }}>ค้นหา</button>
         </div>
 
-        <div className="user-grid">
+        {busy && !rows.length && <SkeletonCards count={12} />}
+
+        <div className="user-grid" hidden={busy && !rows.length}>
           {rows.map((u) => (
             <div key={u.line_user_id} className="user-card" onClick={() => setDetailUid(u.line_user_id)}>
               <img className="user-pic" alt=""
@@ -115,7 +117,7 @@ export default function Users() {
               </div>
             </div>
           ))}
-          {!rows.length && <p className="muted center" style={{ gridColumn: '1/-1' }}>ไม่มีข้อมูล</p>}
+          {!rows.length && !busy && <p className="muted center" style={{ gridColumn: '1/-1' }}>ไม่มีข้อมูล</p>}
         </div>
 
         <div className="row spread">

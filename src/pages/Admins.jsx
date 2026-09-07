@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../lib/api.js'
-import { Spinner, useToast } from '../lib/ui.jsx'
+import { SkeletonRows, InlineSpinner, useToast } from '../lib/ui.jsx'
 
 export default function Admins({ me }) {
   const t = useToast()
@@ -20,7 +20,7 @@ export default function Admins({ me }) {
     } catch (e) { t.err(e.message) }
   }
 
-  if (!rows) return <Spinner />
+  if (!rows) return <SkeletonRows rows={5} cols={4} />
   const canEdit = ['owner', 'admin'].includes(me.role)
 
   return (

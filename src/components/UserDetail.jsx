@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../lib/api.js'
-import { useToast } from '../lib/ui.jsx'
+import { useToast, Spinner, Skeleton, InlineSpinner } from '../lib/ui.jsx'
 
 export default function UserDetail({ uid, onClose, onSaved }) {
   const t = useToast()
@@ -38,7 +38,21 @@ export default function UserDetail({ uid, onClose, onSaved }) {
         </div>
 
         {err && <p className="err">{err}</p>}
-        {!d && !err && <p className="muted">กำลังโหลด…</p>}
+        {!d && !err && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, padding: '12px 0' }}>
+            <div className="row" style={{ gap: 14 }}>
+              <Skeleton w={72} h={72} r={36} />
+              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <Skeleton w="55%" h={16} />
+                <Skeleton w="80%" h={11} />
+              </div>
+            </div>
+            {Array.from({ length: 5 }).map((_, i) => <Skeleton key={i} w="100%" h={12} />)}
+            <div className="loading-text" style={{ textAlign: 'center', marginTop: 4 }}>
+              <InlineSpinner />กำลังโหลดข้อมูลผู้ใช้…
+            </div>
+          </div>
+        )}
 
         {u && (
           <>
@@ -94,7 +108,7 @@ export default function UserDetail({ uid, onClose, onSaved }) {
               <input value={tags} onChange={(e) => setTags(e.target.value)} />
               <label className="sm">Note</label>
               <textarea rows={2} value={note} onChange={(e) => setNote(e.target.value)} />
-              <button className="primary sm" onClick={save} disabled={saving}>บันทึก</button>
+              <button className="primary sm" onClick={save} disabled={saving}>{saving && <InlineSpinner />}บันทึก</button>
             </div>
 
             <h4 className="sm">ประวัติ event ({d.events.length})</h4>
