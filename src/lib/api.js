@@ -71,6 +71,11 @@ export const api = {
   addAdmin: (payload) => req('POST', '/admins', payload),
   delAdmin: (uid) => req('DELETE', `/admins/${uid}`),
 
+  health: () => req('GET', '/health?deep=1'),
+  backupNow: () => req('POST', '/backup/now'),
+  backupList: () => req('GET', '/backup/list'),
+  backupGet: (id) => req('GET', `/backup/${id}`),
+
   autoReplies: () => req('GET', '/auto-replies'),
   saveAutoReply: (payload) => req('POST', '/auto-replies', payload),
   delAutoReply: (id) => req('DELETE', `/auto-replies/${id}`),

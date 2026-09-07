@@ -14,5 +14,8 @@ OPEN_SIGNUP = os.environ.get("OPEN_SIGNUP", "").lower() in ("1", "true", "yes")
 # secret สำหรับ endpoint /api/cron/* (เรียกโดย Supabase pg_cron)
 CRON_SECRET = os.environ.get("CRON_SECRET", "").strip()
 
+# LINE userId ที่จะรับแจ้งเตือน error ของระบบ (คั่นด้วย ,) — ว่าง = ไม่แจ้ง
+ALERT_USER_IDS = [u.strip() for u in os.environ.get("ALERT_USER_IDS", "").split(",") if u.strip()]
+
 LINE_API = "https://api.line.me"
 LINE_DATA_API = "https://api-data.line.me"

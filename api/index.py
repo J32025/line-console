@@ -11,6 +11,7 @@ import json
 import os
 import re
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -19,7 +20,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from _lib import line, supa
 from _lib.auth import current_admin
-from _lib.config import LINE_CHANNEL_SECRET, CRON_SECRET
+from _lib.config import (LINE_CHANNEL_SECRET, CRON_SECRET, ALERT_USER_IDS,
+                         LINE_CHANNEL_ACCESS_TOKEN, LIFF_CHANNEL_ID,
+                         SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 app = FastAPI(title="LINE Console API")
 app.add_middleware(
@@ -30,11 +33,80 @@ NOW = lambda: dt.datetime.now(dt.timezone.utc).isoformat()
 
 
 # ============================================================
+# rate limit (in-memory, ต่อ instance) + alert
+# ============================================================
+_hits: dict[str, list[float]] = {}
+
+
+def _rate_limit(key: str, limit: int, window: float):
+    now = time.time()
+    q = _hits.setdefault(key, [])
+    while q and q[0] < now - window:
+        q.pop(0)
+    if len(q) >= limit:
+        raise HTTPException(429, "เรียกถี่เกินไป ลองใหม่อีกครั้ง")
+    q.append(now)
+
+
+_alert_last: dict[str, float] = {}
+
+
+async def alert_admin(subject: str, detail: str = "", throttle_key: str | None = None):
+    """แจ้ง error เข้า LINE ของแอดมิน (throttle 10 นาที/key)"""
+    if not ALERT_USER_IDS:
+        print("ALERT:", subject, detail)
+        return
+    k = throttle_key or subject
+    if time.time() - _alert_last.get(k, 0) < 600:
+        return
+    _alert_last[k] = time.time()
+    text = f"⚠️ LINE Console\n{subject}"
+    if detail:
+        text += f"\n\n{detail[:400]}"
+    for uid in ALERT_USER_IDS:
+        try:
+            await line.push(uid, [{"type": "text", "text": text}])
+        except Exception:
+            pass
+
+
+# ============================================================
 # health / me
 # ============================================================
 @app.get("/api/health")
-async def health():
-    return {"ok": True, "time": NOW()}
+async def health(deep: int = 0):
+    out = {"ok": True, "time": NOW()}
+    if not deep:
+        return out
+    # deep check
+    checks = {}
+    checks["env"] = {
+        "line_token": bool(LINE_CHANNEL_ACCESS_TOKEN),
+        "line_secret": bool(LINE_CHANNEL_SECRET),
+        "liff_channel_id": bool(LIFF_CHANNEL_ID),
+        "supabase": bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY),
+        "alerts": bool(ALERT_USER_IDS),
+    }
+    try:
+        await supa.count("admins")
+        checks["db"] = "ok"
+    except Exception as e:
+        checks["db"] = f"error: {e}"; out["ok"] = False
+    try:
+        q = await line.message_quota()
+        checks["line_quota"] = q.get("quota", {}).get("quota", q.get("quota"))
+        checks["line_usage"] = q.get("totalUsage")
+    except Exception as e:
+        checks["line_quota"] = f"error: {e}"; out["ok"] = False
+    try:
+        rows = await supa.select("operations", params={
+            "select": "action,created_at", "action": "like.*cron*",
+            "order": "created_at.desc", "limit": "5"})
+        checks["last_cron"] = rows
+    except Exception:
+        pass
+    out["checks"] = checks
+    return out
 
 
 @app.get("/api/me")
@@ -47,12 +119,16 @@ async def me(admin=Depends(current_admin)):
 # ============================================================
 @app.post("/api/webhook")
 async def webhook(request: Request):
+    ip = request.headers.get("x-forwarded-for", "?").split(",")[0].strip()
+    _rate_limit(f"wh:{ip}", limit=120, window=60)  # 120 req/นาที/ip (LINE ยิงเป็น batch อยู่แล้ว)
     body = await request.body()
     sig = request.headers.get("x-line-signature", "")
     if LINE_CHANNEL_SECRET:
         mac = hmac.new(LINE_CHANNEL_SECRET.encode(), body, hashlib.sha256).digest()
         if not hmac.compare_digest(base64.b64encode(mac).decode(), sig):
             raise HTTPException(403, "bad signature")
+    elif sig:
+        pass  # ยังไม่ตั้ง secret
 
     data = json.loads(body or "{}")
     events = data.get("events", [])
@@ -112,7 +188,7 @@ async def webhook(request: Request):
         if rows_ev:
             await supa.insert("webhook_events", rows_ev)
         if follow_rows:
-            await supa.insert("follow_history", follow_rows)
+            await supa.insert("follow_history", follow_rows)  # noqa
 
         # อัปเดต counter + first_followed_at (ต้องอ่านค่าเดิมก่อน)
         touched = set(follow_uids) | set(unfollow_uids)
@@ -135,6 +211,7 @@ async def webhook(request: Request):
             await supa.upsert("line_users", list(user_patches.values()), on_conflict="line_user_id")
     except Exception as e:
         print("webhook store error:", e)
+        await alert_admin("webhook เก็บข้อมูลไม่สำเร็จ", str(e), "wh_store")
 
     # ---- ดึงโปรไฟล์คนที่เพิ่ง follow (จังหวะที่ดีที่สุด) ----
     if follow_uids:
@@ -1171,10 +1248,67 @@ async def delete_auto_reply(rid: int, admin=Depends(current_admin)):
 # CRON: snapshot สถิติรายวัน + รัน scheduled jobs
 # ============================================================
 def _check_cron_key(request: Request):
+    ip = request.headers.get("x-forwarded-for", "?").split(",")[0].strip()
+    _rate_limit(f"cron:{ip}", limit=30, window=60)
     if CRON_SECRET:
         key = request.query_params.get("key") or request.headers.get("x-cron-key", "")
         if key != CRON_SECRET:
             raise HTTPException(403, "bad cron key")
+
+
+BACKUP_TABLES = ("admins", "line_users", "auto_replies", "segments",
+                 "message_templates", "rich_menus", "scheduled_jobs")
+
+
+async def _make_backup():
+    day = dt.date.today().isoformat()
+    dump = {}
+    for tb in BACKUP_TABLES:
+        try:
+            dump[tb] = await supa.select_all(tb, params={"select": "*"})
+        except Exception as e:
+            dump[tb] = {"error": str(e)}
+    size_kb = len(json.dumps(dump)) // 1024
+    await supa.upsert("backups", {"day": day, "tables": dump, "size_kb": size_kb},
+                      on_conflict="day")
+    # เก็บ 21 วันล่าสุด
+    old = await supa.select("backups", params={"select": "id", "order": "day.desc", "limit": "50"})
+    for r in old[21:]:
+        await supa.delete("backups", {"id": f"eq.{r['id']}"})
+    return {"day": day, "size_kb": size_kb, "rows": {k: (len(v) if isinstance(v, list) else 0) for k, v in dump.items()}}
+
+
+@app.api_route("/api/cron/backup", methods=["GET", "POST"])
+async def cron_backup(request: Request):
+    _check_cron_key(request)
+    try:
+        res = await _make_backup()
+        await supa.log_operation("cron", "backup", None, res)
+        return {"ok": True, **res}
+    except Exception as e:
+        await alert_admin("Backup ล้มเหลว", str(e), "backup")
+        raise HTTPException(500, str(e))
+
+
+@app.post("/api/backup/now")
+async def backup_now(admin=Depends(current_admin)):
+    res = await _make_backup()
+    await supa.log_operation(admin["userId"], "backup.manual", None, res)
+    return {"ok": True, **res}
+
+
+@app.get("/api/backup/list")
+async def backup_list(admin=Depends(current_admin)):
+    return {"backups": await supa.select("backups", params={
+        "select": "id,day,size_kb,created_at", "order": "day.desc", "limit": "30"})}
+
+
+@app.get("/api/backup/{bid}")
+async def backup_get(bid: int, admin=Depends(current_admin)):
+    rows = await supa.select("backups", params={"id": f"eq.{bid}", "select": "*", "limit": "1"})
+    if not rows:
+        raise HTTPException(404, "ไม่พบ")
+    return rows[0]
 
 
 @app.api_route("/api/cron/snapshot-stats", methods=["GET", "POST"])
