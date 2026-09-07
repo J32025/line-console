@@ -191,6 +191,14 @@ async def webhook(request: Request):
     events = data.get("events", [])
     # ข้าม event ที่ LINE ส่งซ้ำ (redelivery) — เราประมวลผลรอบแรกไปแล้ว
     events = [e for e in events if not e.get("deliveryContext", {}).get("isRedelivery")]
+
+    # แสดง "กำลังพิมพ์…" ทันทีสำหรับ message/postback (ไม่ block)
+    loading_uids = {e.get("source", {}).get("userId") for e in events
+                    if e.get("type") in ("message", "postback")
+                    and e.get("source", {}).get("type") == "user"
+                    and e.get("source", {}).get("userId")}
+    if loading_uids:
+        await asyncio.gather(*[line.start_loading(u, 20) for u in loading_uids], return_exceptions=True)
     rows_ev, user_patches, follow_rows, in_msgs = [], {}, [], []
     follow_uids, unfollow_uids = [], []
 

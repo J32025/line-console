@@ -157,6 +157,16 @@ async def richmenu_alias_delete(alias_id: str):
 
 
 # ---------- messaging ----------
+async def start_loading(user_id: str, seconds: int = 20):
+    """แสดงจุดกระพริบ (กำลังพิมพ์…) ในแชตของ user"""
+    try:
+        async with httpx.AsyncClient(timeout=8) as c:
+            await c.post(f"{LINE_API}/v2/bot/chat/loading/start", headers=_auth(),
+                         json={"chatId": user_id, "loadingSeconds": max(5, min(seconds, 60))})
+    except Exception:
+        pass
+
+
 async def reply(reply_token: str, messages: list):
     # reply token หมดอายุเร็ว — ไม่ต้อง retry, timeout สั้น
     try:
