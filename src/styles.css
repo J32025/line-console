@@ -313,6 +313,10 @@ pre { background: #0e1a2b; color: #c7d0dc; padding: 12px; border-radius: 9px; ov
 .user-info { min-width: 0; flex: 1; }
 .user-name { font-weight: 600; font-size: .87rem; display: flex; align-items: center; gap: 6px; }
 .user-tags { display: flex; gap: 3px; flex-wrap: wrap; margin-top: 3px; }
+.user-card { position: relative; }
+.user-card.sel { border-color: var(--primary); background: var(--primary-soft); }
+.user-cb { position: absolute; top: 8px; right: 8px; width: 18px; height: 18px; }
+.bulkbar { margin: 10px 0; padding: 8px; background: var(--panel-2); border-radius: 8px; }
 
 .udetail-head { display: flex; gap: 14px; margin: 14px 0; align-items: center; }
 .udetail-pic { width: 72px; height: 72px; border-radius: 50%; object-fit: cover; background: var(--panel-2); }

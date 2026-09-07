@@ -10,12 +10,21 @@ export default function Admins({ me }) {
   const [role, setRole] = useState('admin')
   const [health, setHealth] = useState(null)
   const [backups, setBackups] = useState([])
+  const [fields, setFields] = useState([])
+  const [nf, setNf] = useState({ key: '', label: '', type: 'text', options: '' })
   const [busy, setBusy] = useState('')
 
   const load = () => api.admins().then((d) => setRows(d.admins)).catch((e) => t.err(e.message))
   const loadSys = () => {
     api.health().then(setHealth).catch(() => setHealth({ ok: false }))
     api.backupList().then((d) => setBackups(d.backups)).catch(() => {})
+    api.fields().then((d) => setFields(d.fields)).catch(() => {})
+  }
+  const addField = async () => {
+    try {
+      await api.saveField({ ...nf, options: nf.options.split(',').map((s) => s.trim()).filter(Boolean) })
+      t.ok('เพิ่ม field แล้ว'); setNf({ key: '', label: '', type: 'text', options: '' }); loadSys()
+    } catch (e) { t.err(e.message) }
   }
   useEffect(() => { load(); loadSys() }, [])
 
@@ -98,6 +107,33 @@ export default function Admins({ me }) {
             {!backups.length && <tr><td colSpan={4} className="muted center">ยังไม่มี — กด "สำรองเดี๋ยวนี้"</td></tr>}
           </tbody>
         </table>
+      </section>
+
+      <section className="card">
+        <h3>ฟิลด์ข้อมูลเพิ่มเติมของผู้ใช้ (Custom fields)</h3>
+        <table>
+          <thead><tr><th>key</th><th>ชื่อ</th><th>ชนิด</th><th>ตัวเลือก</th><th></th></tr></thead>
+          <tbody>
+            {fields.map((f) => (
+              <tr key={f.key}>
+                <td className="mono xs">{f.key}</td><td>{f.label}</td><td>{f.type}</td>
+                <td className="muted xs">{(f.options || []).join(', ')}</td>
+                <td><button className="xs danger" onClick={() => confirm('ลบ field?') && api.delField(f.key).then(loadSys)}>ลบ</button></td>
+              </tr>
+            ))}
+            {!fields.length && <tr><td colSpan={5} className="muted center">ยังไม่มี — เช่น คอร์ส, รุ่น, วันหมดอายุ</td></tr>}
+          </tbody>
+        </table>
+        <div className="row wrap" style={{ marginTop: 8 }}>
+          <input placeholder="key (a-z_)" value={nf.key} onChange={(e) => setNf({ ...nf, key: e.target.value })} style={{ width: 110 }} />
+          <input placeholder="ชื่อที่แสดง" value={nf.label} onChange={(e) => setNf({ ...nf, label: e.target.value })} style={{ width: 130 }} />
+          <select value={nf.type} onChange={(e) => setNf({ ...nf, type: e.target.value })}>
+            <option value="text">ข้อความ</option><option value="number">ตัวเลข</option>
+            <option value="date">วันที่</option><option value="select">ตัวเลือก</option>
+          </select>
+          {nf.type === 'select' && <input placeholder="ตัวเลือก คั่น ," value={nf.options} onChange={(e) => setNf({ ...nf, options: e.target.value })} style={{ width: 150 }} />}
+          <button className="primary sm" onClick={addField}>เพิ่ม</button>
+        </div>
       </section>
 
       <section className="card">

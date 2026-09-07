@@ -48,9 +48,21 @@ export const api = {
   users: (qs = {}) => req('GET', '/users?' + new URLSearchParams(qs)),
   userDetail: (uid) => req('GET', `/users/${uid}`),
   importUsers: (payload) => req('POST', '/users/import', payload),
+  importMapped: (payload) => req('POST', '/users/import-mapped', payload),
   refreshProfiles: (payload) => req('POST', '/users/refresh-profile', payload),
   syncFollowers: () => req('POST', '/users/sync-followers'),
   updateUser: (uid, patch) => req('PATCH', `/users/${uid}`, patch),
+  bulkTag: (payload) => req('POST', '/users/bulk-tag', payload),
+  exportUsersUrl: (qs = {}) => `/api/export/users?` + new URLSearchParams(qs),
+
+  fields: () => req('GET', '/fields'),
+  saveField: (payload) => req('POST', '/fields', payload),
+  delField: (key) => req('DELETE', `/fields/${key}`),
+
+  links: () => req('GET', '/links'),
+  createLink: (payload) => req('POST', '/links', payload),
+  linkStats: (code) => req('GET', `/links/${code}/stats`),
+  delLink: (code) => req('DELETE', `/links/${code}`),
 
   validateMsg: (messages) => req('POST', '/message/validate', { messages }),
   push: (payload) => req('POST', '/message/push', payload),

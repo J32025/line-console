@@ -8,19 +8,27 @@ export default function UserDetail({ uid, onClose, onSaved }) {
   const [err, setErr] = useState('')
   const [note, setNote] = useState('')
   const [tags, setTags] = useState('')
+  const [custom, setCustom] = useState({})
+  const [fields, setFields] = useState([])
   const [saving, setSaving] = useState(false)
 
   useEffect(() => {
     setD(null); setErr('')
+    api.fields().then((r) => setFields(r.fields)).catch(() => {})
     api.userDetail(uid)
-      .then((r) => { setD(r); setNote(r.user.note || ''); setTags((r.user.tags || []).join(', ')) })
+      .then((r) => {
+        setD(r); setNote(r.user.note || ''); setTags((r.user.tags || []).join(', '))
+        setCustom(r.user.custom || {})
+      })
       .catch((e) => setErr(e.message))
   }, [uid])
 
   const save = async () => {
     setSaving(true)
     try {
-      await api.updateUser(uid, { note, tags: tags.split(',').map((s) => s.trim()).filter(Boolean) })
+      await api.updateUser(uid, {
+        note, tags: tags.split(',').map((s) => s.trim()).filter(Boolean), custom,
+      })
       t.ok('บันทึกแล้ว'); onSaved?.()
     } catch (e) { t.err(e.message) } finally { setSaving(false) }
   }
@@ -106,6 +114,20 @@ export default function UserDetail({ uid, onClose, onSaved }) {
             <div className="udetail-edit">
               <label className="sm">Tags (คั่นด้วย ,)</label>
               <input value={tags} onChange={(e) => setTags(e.target.value)} />
+              {fields.map((f) => (
+                <div key={f.key}>
+                  <label className="sm">{f.label}</label>
+                  {f.type === 'select' ? (
+                    <select value={custom[f.key] || ''} onChange={(e) => setCustom({ ...custom, [f.key]: e.target.value })}>
+                      <option value="">—</option>
+                      {(f.options || []).map((o) => <option key={o}>{o}</option>)}
+                    </select>
+                  ) : (
+                    <input type={f.type === 'number' ? 'number' : f.type === 'date' ? 'date' : 'text'}
+                           value={custom[f.key] || ''} onChange={(e) => setCustom({ ...custom, [f.key]: e.target.value })} />
+                  )}
+                </div>
+              ))}
               <label className="sm">Note</label>
               <textarea rows={2} value={note} onChange={(e) => setNote(e.target.value)} />
               <button className="primary sm" onClick={save} disabled={saving}>{saving && <InlineSpinner />}บันทึก</button>

@@ -13,6 +13,7 @@ import Segments from './pages/Segments.jsx'
 import Users from './pages/Users.jsx'
 import Stats from './pages/Stats.jsx'
 import Events from './pages/Events.jsx'
+import Links from './pages/Links.jsx'
 import Liff from './pages/Liff.jsx'
 import Admins from './pages/Admins.jsx'
 
@@ -25,9 +26,10 @@ const NAV = [
   ['/segments', 'กลุ่มเป้าหมาย', '🎯'],
   ['/users', 'ผู้ใช้', '👥'],
   ['/stats', 'สถิติ', '📊'],
+  ['/links', 'ลิงก์', '🔗'],
   ['/events', 'Events', '📋'],
-  ['/liff', 'LIFF', '🔗'],
-  ['/admins', 'ผู้ดูแล', '🔑'],
+  ['/liff', 'LIFF', '📱'],
+  ['/admins', 'ผู้ดูแล & ระบบ', '🔑'],
 ]
 
 function BootScreen({ children }) {
@@ -112,6 +114,7 @@ export default function App() {
               <Route path="/users" element={<Users />} />
               <Route path="/stats" element={<Stats />} />
               <Route path="/events" element={<Events />} />
+              <Route path="/links" element={<Links />} />
               <Route path="/liff" element={<Liff />} />
               <Route path="/admins" element={<Admins me={state.me} />} />
               <Route path="*" element={<Navigate to="/" />} />

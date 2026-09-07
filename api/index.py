@@ -75,6 +75,61 @@ async def alert_admin(subject: str, detail: str = "", throttle_key: str | None =
 # ============================================================
 # health / me
 # ============================================================
+@app.api_route("/r/{code}", methods=["GET"])
+async def short_redirect(code: str, request: Request):
+    from fastapi.responses import RedirectResponse
+    rows = await supa.select("short_links", params={"code": f"eq.{code}", "select": "*", "limit": "1"})
+    if not rows:
+        return RedirectResponse(APP_URL, status_code=302)
+    sl = rows[0]
+    try:
+        await supa.insert("link_clicks", {
+            "code": code, "target": sl["target"], "broadcast_id": sl.get("broadcast_id"),
+            "line_user_id": request.query_params.get("u"),
+        })
+        await supa.update("short_links", {"clicks": (sl.get("clicks") or 0) + 1}, {"code": f"eq.{code}"})
+    except Exception:
+        pass
+    return RedirectResponse(sl["target"], status_code=302)
+
+
+@app.get("/api/links")
+async def links_list(admin=Depends(current_admin)):
+    return {"links": await supa.select("short_links", params={
+        "select": "*", "order": "created_at.desc", "limit": "100"})}
+
+
+@app.post("/api/links")
+async def link_create(req: Request, admin=Depends(current_admin)):
+    b = await req.json()
+    target = (b.get("target") or "").strip()
+    if not re.match(r"^https?://", target):
+        raise HTTPException(400, "target ต้องเป็น URL")
+    code = b.get("code") or os.urandom(4).hex()[:7]
+    await supa.upsert("short_links", {
+        "code": code, "target": target, "label": b.get("label"),
+        "broadcast_id": b.get("broadcastId"), "created_by": admin["userId"],
+    }, on_conflict="code")
+    return {"ok": True, "code": code, "shortUrl": f"{APP_URL}/r/{code}"}
+
+
+@app.get("/api/links/{code}/stats")
+async def link_stats(code: str, admin=Depends(current_admin)):
+    clicks = await supa.select("link_clicks", params={
+        "code": f"eq.{code}", "select": "clicked_at,line_user_id", "order": "clicked_at.desc", "limit": "1000"})
+    by_day: dict[str, int] = {}
+    for c in clicks:
+        by_day[c["clicked_at"][:10]] = by_day.get(c["clicked_at"][:10], 0) + 1
+    return {"total": len(clicks), "unique_users": len({c["line_user_id"] for c in clicks if c["line_user_id"]}),
+            "by_day": [{"day": k, "clicks": v} for k, v in sorted(by_day.items())]}
+
+
+@app.delete("/api/links/{code}")
+async def link_delete(code: str, admin=Depends(current_admin)):
+    await supa.delete("short_links", {"code": f"eq.{code}"})
+    return {"ok": True}
+
+
 @app.get("/api/health")
 async def health(deep: int = 0):
     out = {"ok": True, "time": NOW()}
@@ -720,12 +775,37 @@ async def cron_sync_richmenu(request: Request):
 # ============================================================
 # USERS
 # ============================================================
+# ---------- custom field defs ----------
+@app.get("/api/fields")
+async def list_fields(admin=Depends(current_admin)):
+    return {"fields": await supa.select("field_defs", params={"select": "*", "order": "sort,key"})}
+
+
+@app.post("/api/fields")
+async def save_field(req: Request, admin=Depends(current_admin)):
+    b = await req.json()
+    key = re.sub(r"[^a-z0-9_]", "", (b.get("key") or "").lower())
+    if not key:
+        raise HTTPException(400, "key ต้องเป็น a-z 0-9 _")
+    await supa.upsert("field_defs", {
+        "key": key, "label": b.get("label") or key, "type": b.get("type", "text"),
+        "options": b.get("options", []), "sort": int(b.get("sort", 0)),
+    }, on_conflict="key")
+    return {"ok": True, "key": key}
+
+
+@app.delete("/api/fields/{key}")
+async def del_field(key: str, admin=Depends(current_admin)):
+    await supa.delete("field_defs", {"key": f"eq.{key}"})
+    return {"ok": True}
+
+
 @app.get("/api/users")
 async def users(admin=Depends(current_admin), limit: int = 100, offset: int = 0,
-                q: str = "", following: str = "", menu: str = ""):
+                q: str = "", following: str = "", menu: str = "", tag: str = ""):
     params = {
         "select": "line_user_id,display_name,picture_url,is_following,current_rich_menu_id,"
-                  "rich_menu_name,rich_menu_status,source,tags,note,updated_at",
+                  "rich_menu_name,rich_menu_status,source,tags,note,custom,updated_at",
         "order": "updated_at.desc",
         "limit": str(min(limit, 1000)), "offset": str(offset),
     }
@@ -733,12 +813,91 @@ async def users(admin=Depends(current_admin), limit: int = 100, offset: int = 0,
         params["or"] = f"(line_user_id.ilike.*{q}*,display_name.ilike.*{q}*,note.ilike.*{q}*)"
     if following in ("true", "false"):
         params["is_following"] = f"eq.{following}"
-    if menu:
+    if menu == "none":
+        params["current_rich_menu_id"] = "is.null"
+    elif menu:
         params["current_rich_menu_id"] = f"eq.{menu}"
+    if tag:
+        params["tags"] = "cs.{" + tag + "}"
     rows = await supa.select("line_users", params=params, headers={"Prefer": "count=exact"})
     total = await supa.count("line_users", {k: v for k, v in params.items()
-                                            if k in ("is_following", "current_rich_menu_id", "or")})
+                                            if k in ("is_following", "current_rich_menu_id", "or", "tags")})
     return {"users": rows, "total": total, "limit": limit, "offset": offset}
+
+
+@app.post("/api/users/bulk-tag")
+async def users_bulk_tag(req: Request, admin=Depends(current_admin)):
+    """ใส่/ลบ tag หลายคนพร้อมกัน — target: list | filter | segment"""
+    b = await req.json()
+    add = [t.strip() for t in b.get("add", []) if t.strip()]
+    remove = set(t.strip() for t in b.get("remove", []) if t.strip())
+    if b.get("target") == "segment":
+        seg = await supa.select("segments", params={"id": f"eq.{b.get('segmentId')}", "select": "filter", "limit": "1"})
+        uids = await _uids_by_filter(seg[0]["filter"] if seg else {})
+    elif b.get("target") == "filter":
+        uids = await _uids_by_filter(b.get("filter", {}))
+    else:
+        uids = [u.strip() for u in b.get("userIds", []) if u.strip()]
+    if not uids:
+        raise HTTPException(400, "ไม่มีปลายทาง")
+
+    n = 0
+    for i in range(0, len(uids), 400):
+        chunk = uids[i:i + 400]
+        rows = await supa.select("line_users", params={
+            "select": "line_user_id,tags", "line_user_id": f"in.({','.join(chunk)})", "limit": "500"})
+        patch = []
+        for r in rows:
+            cur = set(r.get("tags") or [])
+            new = (cur | set(add)) - remove
+            if new != cur:
+                patch.append({"line_user_id": r["line_user_id"], "tags": sorted(new), "updated_at": NOW()})
+        if patch:
+            await supa.upsert("line_users", patch, on_conflict="line_user_id")
+            n += len(patch)
+    await supa.log_operation(admin["userId"], "users.bulk_tag", {"count": len(uids), "add": add, "remove": list(remove)}, {"changed": n})
+    return {"ok": True, "target": len(uids), "changed": n}
+
+
+@app.get("/api/export/users")
+async def export_users(admin=Depends(current_admin), following: str = "", tag: str = ""):
+    f = {}
+    if following in ("true", "false"):
+        f["following"] = following
+    if tag:
+        f["tags"] = [tag]
+    else:
+        f["following"] = f.get("following", None)
+    params = {"select": "line_user_id,display_name,status_message,language,is_following,"
+                        "current_rich_menu_id,rich_menu_name,rich_menu_status,source,tags,note,"
+                        "custom,follow_count,block_count,first_followed_at,last_message_at,updated_at"}
+    if following in ("true", "false"):
+        params["is_following"] = f"eq.{following}"
+    if tag:
+        params["tags"] = "cs.{" + tag + "}"
+    rows = await supa.select_all("line_users", params=params)
+    fields = await supa.select("field_defs", params={"select": "key,label", "order": "sort"})
+    cols = ["line_user_id", "display_name", "status_message", "language", "is_following",
+            "rich_menu_name", "rich_menu_status", "source", "tags", "note",
+            "follow_count", "block_count", "first_followed_at", "last_message_at", "updated_at"]
+    ck = [f["key"] for f in fields]
+    header = cols + [f"custom.{k}" for k in ck]
+
+    def esc(v):
+        if v is None:
+            return ""
+        if isinstance(v, list):
+            v = "|".join(map(str, v))
+        s = str(v)
+        return f'"{s.replace(chr(34), chr(34) * 2)}"' if any(c in s for c in ',"\n') else s
+
+    lines = [",".join(header)]
+    for r in rows:
+        row = [esc(r.get(c)) for c in cols] + [esc((r.get("custom") or {}).get(k)) for k in ck]
+        lines.append(",".join(row))
+    from fastapi.responses import Response
+    return Response("﻿" + "\r\n".join(lines), media_type="text/csv",
+                    headers={"Content-Disposition": f'attachment; filename="users-{dt.date.today()}.csv"'})
 
 
 @app.post("/api/users/import")
@@ -980,9 +1139,43 @@ async def user_detail(uid: str, admin=Depends(current_admin)):
 async def update_user(uid: str, req: Request, admin=Depends(current_admin)):
     b = await req.json()
     patch = {k: b[k] for k in ("note", "tags") if k in b}
+    if "custom" in b:
+        cur = await supa.select("line_users", params={"select": "custom", "line_user_id": f"eq.{uid}", "limit": "1"})
+        merged = {**((cur[0].get("custom") if cur else {}) or {}), **b["custom"]}
+        patch["custom"] = {k: v for k, v in merged.items() if v not in (None, "")}
     patch["updated_at"] = NOW()
     await supa.update("line_users", patch, {"line_user_id": f"eq.{uid}"})
     return {"ok": True}
+
+
+@app.post("/api/users/import-mapped")
+async def users_import_mapped(req: Request, admin=Depends(current_admin)):
+    """นำเข้าจาก CSV ที่ map คอลัมน์แล้ว
+    rows: [{userId, displayName?, tags?, note?, custom: {...}}]  """
+    b = await req.json()
+    rows = b.get("rows", [])
+    ts = NOW()
+    valid, patch = 0, []
+    for r in rows:
+        uid = str(r.get("userId", "")).strip()
+        if not re.fullmatch(r"U[0-9a-f]{32}", uid):
+            continue
+        valid += 1
+        row = {"line_user_id": uid, "source": "import", "updated_at": ts}
+        if r.get("displayName"):
+            row["display_name"] = _clean_str(r["displayName"])
+        if r.get("note"):
+            row["note"] = r["note"]
+        if r.get("tags"):
+            row["tags"] = r["tags"] if isinstance(r["tags"], list) else [t.strip() for t in str(r["tags"]).replace("|", ",").split(",") if t.strip()]
+        if r.get("custom"):
+            row["custom"] = {k: v for k, v in r["custom"].items() if v not in (None, "")}
+        patch.append(row)
+    for i in range(0, len(patch), 400):
+        await supa.upsert("line_users", patch[i:i + 400], on_conflict="line_user_id")
+    await supa.log_operation(admin["userId"], "users.import_mapped",
+                             {"submitted": len(rows)}, {"valid": valid})
+    return {"ok": True, "submitted": len(rows), "valid": valid}
 
 
 # ============================================================
