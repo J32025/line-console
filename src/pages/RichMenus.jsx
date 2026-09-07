@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react'
 import { api } from '../lib/api.js'
 import { Spinner, useToast } from '../lib/ui.jsx'
+import { useProgress } from '../lib/progress.jsx'
 import RichMenuBuilder from '../components/RichMenuBuilder.jsx'
 
 export default function RichMenus() {
   const t = useToast()
+  const prog = useProgress()
   const [data, setData] = useState(null)
   const [usage, setUsage] = useState({})
   const [building, setBuilding] = useState(false)
@@ -31,25 +33,46 @@ export default function RichMenus() {
 
   const run = async (mode) => {
     if (mode === 'link' && !sel) return t.err('เลือก rich menu ก่อน')
-    const payload = { mode, target, richMenuId: sel, setDefault }
-    if (target === 'list') payload.userIds = parseIds()
-    const label = target === 'all' ? 'ผู้ใช้ทุกคน' : target === 'none' ? 'คนที่ยังไม่มีเมนู' :
-      target === 'list' ? `${parseIds().length} คนในลิสต์` : `tag`
+    const label = { all: 'ผู้ใช้ทุกคน', none: 'คนที่ยังไม่มีเมนู', list: `${parseIds().length} คนในลิสต์` }[target] || target
     if (!confirm(`${mode === 'link' ? 'ผูก' : 'ถอด'} rich menu กับ ${label}?`)) return
     setBusy(true)
+    const task = prog.start(mode === 'link' ? 'กำลังผูก Rich Menu' : 'กำลังถอด Rich Menu', 0)
     try {
-      const r = await api.assignMenu(payload)
-      t.ok(`เสร็จ: สำเร็จ ${r.ok} / ล้มเหลว ${r.fail} (จาก ${r.total})`)
+      const { userIds: uids, count } = await api.resolveTarget(
+        target === 'list' ? { target: 'list', userIds: parseIds() } : { target })
+      if (!count) throw new Error('ไม่มีปลายทาง')
+      task.setTotal(count)
+      if (mode === 'link' && setDefault) await api.setDefaultMenu(sel)
+      const CHUNK = 1500
+      let ok = 0, fail = 0
+      for (let i = 0; i < uids.length; i += CHUNK) {
+        const r = await api.assignMenu({
+          mode, richMenuId: sel, target: 'list', userIds: uids.slice(i, i + CHUNK),
+        })
+        ok += r.ok; fail += r.fail
+        task.set(Math.min(i + CHUNK, count), `สำเร็จ ${ok.toLocaleString()} / ล้มเหลว ${fail}`)
+      }
+      t.ok(`เสร็จ: สำเร็จ ${ok.toLocaleString()} / ล้มเหลว ${fail} (จาก ${count.toLocaleString()})`)
       load()
-    } catch (e) { t.err(e.message) } finally { setBusy(false) }
+    } catch (e) { t.err(e.message) } finally { task.done(); setBusy(false) }
   }
 
   const sync = async () => {
     setBusy(true)
+    const task = prog.start('กำลัง Sync สถานะ Rich Menu ของผู้ใช้', 0)
     try {
-      const r = await api.syncMenu({ target: 'all' })
-      t.ok(`sync: assigned ${r.assigned} / none ${r.none} / error ${r.error}`)
-    } catch (e) { t.err(e.message) } finally { setBusy(false) }
+      const { userIds: uids, count } = await api.resolveTarget({ target: 'all' })
+      task.setTotal(count)
+      const CHUNK = 1500
+      let a = 0, n = 0, e = 0
+      for (let i = 0; i < uids.length; i += CHUNK) {
+        const r = await api.syncMenu({ target: 'list', userIds: uids.slice(i, i + CHUNK) })
+        a += r.assigned; n += r.none; e += r.error || 0
+        task.set(Math.min(i + CHUNK, count), `มีเมนู ${a.toLocaleString()} / ไม่มี ${n.toLocaleString()}`)
+      }
+      t.ok(`sync เสร็จ: มีเมนู ${a.toLocaleString()} / ไม่มี ${n.toLocaleString()} / error ${e}`)
+      load()
+    } catch (err) { t.err(err.message) } finally { task.done(); setBusy(false) }
   }
 
   return (

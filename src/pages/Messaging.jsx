@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { api } from '../lib/api.js'
 import { useToast } from '../lib/ui.jsx'
 import { blank } from '../lib/messageTypes.js'
+import { useProgress } from '../lib/progress.jsx'
 import MessageEditor from '../components/MessageEditor.jsx'
 import MessagePreview from '../components/MessagePreview.jsx'
 import TemplateGallery from '../components/TemplateGallery.jsx'
@@ -10,6 +11,7 @@ const DRAFT_KEY = 'lc_msg_draft'
 
 export default function Messaging() {
   const t = useToast()
+  const prog = useProgress()
   const [messages, setMessages] = useState(() => {
     try { const d = JSON.parse(localStorage.getItem(DRAFT_KEY)); if (d?.length) return d } catch {}
     return [blank('text')]
@@ -92,7 +94,7 @@ export default function Messaging() {
   const rmMsg = (i) => setMessages((a) => a.filter((_, j) => j !== i))
 
   const toIds = to.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean)
-  const validIds = toIds.filter((u) => /^U[0-9a-f]{32}$/.test(u))
+  const validIds = [...new Set(toIds.filter((u) => /^U[0-9a-f]{32}$/.test(u)))]
   const seg = segments.find((s) => String(s.id) === String(segId))
   const targetLabel = {
     broadcast: 'ทุกคนที่ติดตาม',
@@ -127,6 +129,24 @@ export default function Messaging() {
     catch (e) { t.err(e.message) } finally { setBusy(false) }
   }
 
+  // resolve target -> chunk -> bulk send พร้อม % จริง
+  const sendToUids = async (kind) => {
+    const payload = kind === 'segment' ? { target: 'segment', segmentId: segId } : { target: 'db', tag, menu }
+    const { userIds, count } = await api.resolveTarget(payload)
+    if (!count) throw new Error('ไม่มีปลายทาง')
+    const CHUNK = 2500
+    let sent = 0, failed = 0
+    const task = prog.start('กำลังส่งข้อความ', count)
+    try {
+      for (let i = 0; i < userIds.length; i += CHUNK) {
+        const pr = await api.bulkSend({ userIds: userIds.slice(i, i + CHUNK), messages })
+        sent += pr.sent; failed += pr.failed
+        task.set(Math.min(i + CHUNK, count), `ส่งสำเร็จ ${sent.toLocaleString()}`)
+      }
+    } finally { task.done() }
+    return { sent, failed, target: count }
+  }
+
   const send = async () => {
     if (!confirm(`ส่ง ${messages.length} ข้อความ หา ${targetLabel}?`)) return
     setBusy(true)
@@ -135,12 +155,25 @@ export default function Messaging() {
       setBulkResult(null)
       if (mode === 'broadcast') r = await api.broadcast({ messages })
       else if (mode === 'push') {
-        r = await api.bulkSend({ userIds: toIds, messages, notificationDisabled: notiOff })
-        setBulkResult(r)
+        // แบ่ง 2500/รอบ (5 batch) แสดง % จริง
+        const CHUNK = 2500
+        const agg = { total: validIds.length, sent: 0, failed: 0, batches: 0, ok_batches: 0, errors: [], duplicate: toIds.filter((u) => /^U[0-9a-f]{32}$/.test(u)).length - validIds.length, invalid: [], invalid_count: toIds.filter((u) => !/^U[0-9a-f]{32}$/.test(u)).length }
+        const task = prog.start('กำลังส่งข้อความ', validIds.length)
+        try {
+          for (let i = 0; i < validIds.length; i += CHUNK) {
+            const part = validIds.slice(i, i + CHUNK)
+            const pr = await api.bulkSend({ userIds: part, messages, notificationDisabled: notiOff })
+            agg.sent += pr.sent; agg.failed += pr.failed
+            agg.batches += pr.batches; agg.ok_batches += pr.ok_batches
+            agg.errors.push(...(pr.errors || []))
+            task.set(Math.min(i + CHUNK, validIds.length), `ส่งสำเร็จ ${agg.sent.toLocaleString()}`)
+          }
+        } finally { task.done() }
+        r = agg; setBulkResult(agg)
       }
-      else if (mode === 'segment') r = await api.multicastDb({ segmentId: segId, messages })
+      else if (mode === 'segment') r = await sendToUids('segment')
       else if (mode === 'narrowcast') r = await api.narrowcast({ demographic: buildDemographic(), messages })
-      else r = await api.multicastDb({ tag, menu, messages })
+      else r = await sendToUids('db')
       t.ok('ส่งแล้ว ' + (r.sent != null ? `(${r.sent.toLocaleString()} คน)` : r.requestId ? `req ${r.requestId.slice(0, 8)}` : ''))
       if (mode === 'narrowcast' && r.requestId) {
         setNcProgress({ requestId: r.requestId, phase: 'waiting' })

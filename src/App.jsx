@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react'
-import { NavLink, Route, Routes, Navigate } from 'react-router-dom'
+import { NavLink, Route, Routes, Navigate, useLocation } from 'react-router-dom'
 import { initAuth, logout } from './lib/auth.js'
 import { api } from './lib/api.js'
-import { ToastProvider, Spinner } from './lib/ui.jsx'
+import { ToastProvider } from './lib/ui.jsx'
+import { ProgressProvider, TopLoader } from './lib/progress.jsx'
 import Dashboard from './pages/Dashboard.jsx'
 import RichMenus from './pages/RichMenus.jsx'
 import Messaging from './pages/Messaging.jsx'
@@ -14,19 +15,30 @@ import Events from './pages/Events.jsx'
 import Admins from './pages/Admins.jsx'
 
 const NAV = [
-  ['/', 'แดชบอร์ด'],
-  ['/richmenus', 'Rich Menu'],
-  ['/messaging', 'ส่งข้อความ'],
-  ['/auto-reply', 'ตอบอัตโนมัติ'],
-  ['/segments', 'กลุ่มเป้าหมาย'],
-  ['/users', 'ผู้ใช้'],
-  ['/stats', 'สถิติ'],
-  ['/events', 'Events'],
-  ['/admins', 'ผู้ดูแล'],
+  ['/', 'แดชบอร์ด', '🏠'],
+  ['/richmenus', 'Rich Menu', '📱'],
+  ['/messaging', 'ส่งข้อความ', '✈️'],
+  ['/auto-reply', 'ตอบอัตโนมัติ', '🤖'],
+  ['/segments', 'กลุ่มเป้าหมาย', '🎯'],
+  ['/users', 'ผู้ใช้', '👥'],
+  ['/stats', 'สถิติ', '📊'],
+  ['/events', 'Events', '📋'],
+  ['/admins', 'ผู้ดูแล', '🔑'],
 ]
+
+function BootScreen({ children }) {
+  return (
+    <div className="boot">
+      <div className="boot-logo">LINE Console</div>
+      {children}
+    </div>
+  )
+}
 
 export default function App() {
   const [state, setState] = useState({ loading: true })
+  const [drawer, setDrawer] = useState(false)
+  const loc = useLocation()
 
   useEffect(() => {
     initAuth()
@@ -35,52 +47,81 @@ export default function App() {
       .catch((e) => setState({ loading: false, error: e.message }))
   }, [])
 
-  if (state.loading) return <div className="center">กำลังเข้าสู่ระบบด้วย LINE…</div>
+  useEffect(() => { setDrawer(false) }, [loc.pathname])
+
+  if (state.loading)
+    return <BootScreen><div className="boot-bar"><div /></div><p className="muted sm">กำลังเข้าสู่ระบบด้วย LINE…</p></BootScreen>
   if (state.error)
     return (
-      <div className="center">
+      <BootScreen>
         <strong>เข้าใช้งานไม่ได้</strong>
-        <p className="muted">{state.error}</p>
+        <p className="muted sm">{state.error}</p>
         <button onClick={logout}>ออกจากระบบ</button>
-      </div>
+      </BootScreen>
     )
 
+  const current = NAV.find(([to]) => to === loc.pathname) || NAV[0]
+
   return (
-    <ToastProvider>
-      <div className="layout">
-        <aside>
-          <div className="brand">LINE Console</div>
-          <nav>
-            {NAV.map(([to, label]) => (
-              <NavLink key={to} to={to} end={to === '/'}>
-                {label}
-              </NavLink>
-            ))}
-          </nav>
-          <div className="me">
-            {state.me.picture && <img src={state.me.picture} alt="" />}
-            <div>
-              <div className="sm">{state.me.name}</div>
-              <div className="muted xs">{state.me.role}</div>
+    <ProgressProvider>
+      <ToastProvider>
+        <TopLoader />
+
+        {/* mobile topbar */}
+        <header className="mtop">
+          <button className="mtop-btn" onClick={() => setDrawer(true)} aria-label="เมนู">☰</button>
+          <span className="mtop-title">{current[2]} {current[1]}</span>
+          {state.me.picture && <img className="mtop-ava" src={state.me.picture} alt="" />}
+        </header>
+
+        <div className="layout">
+          {/* drawer overlay (mobile) */}
+          {drawer && <div className="drawer-scrim" onClick={() => setDrawer(false)} />}
+
+          <aside className={drawer ? 'open' : ''}>
+            <div className="brand">LINE Console</div>
+            <nav>
+              {NAV.map(([to, label, icon]) => (
+                <NavLink key={to} to={to} end={to === '/'}>
+                  <span className="nav-ico">{icon}</span>{label}
+                </NavLink>
+              ))}
+            </nav>
+            <div className="me">
+              {state.me.picture && <img src={state.me.picture} alt="" />}
+              <div className="me-info">
+                <div className="sm ellipsis">{state.me.name}</div>
+                <div className="muted xs">{state.me.role}</div>
+              </div>
+              <button className="xs" onClick={logout}>ออก</button>
             </div>
-            <button className="xs" onClick={logout}>ออก</button>
-          </div>
-        </aside>
-        <main>
-          <Routes>
-            <Route path="/" element={<Dashboard />} />
-            <Route path="/richmenus" element={<RichMenus />} />
-            <Route path="/messaging" element={<Messaging />} />
-            <Route path="/auto-reply" element={<AutoReply />} />
-            <Route path="/segments" element={<Segments />} />
-            <Route path="/users" element={<Users />} />
-            <Route path="/stats" element={<Stats />} />
-            <Route path="/events" element={<Events />} />
-            <Route path="/admins" element={<Admins me={state.me} />} />
-            <Route path="*" element={<Navigate to="/" />} />
-          </Routes>
-        </main>
-      </div>
-    </ToastProvider>
+          </aside>
+
+          <main>
+            <Routes>
+              <Route path="/" element={<Dashboard />} />
+              <Route path="/richmenus" element={<RichMenus />} />
+              <Route path="/messaging" element={<Messaging />} />
+              <Route path="/auto-reply" element={<AutoReply />} />
+              <Route path="/segments" element={<Segments />} />
+              <Route path="/users" element={<Users />} />
+              <Route path="/stats" element={<Stats />} />
+              <Route path="/events" element={<Events />} />
+              <Route path="/admins" element={<Admins me={state.me} />} />
+              <Route path="*" element={<Navigate to="/" />} />
+            </Routes>
+          </main>
+        </div>
+
+        {/* bottom nav (mobile) */}
+        <nav className="bnav">
+          {NAV.slice(0, 5).map(([to, label, icon]) => (
+            <NavLink key={to} to={to} end={to === '/'}>
+              <span>{icon}</span><small>{label}</small>
+            </NavLink>
+          ))}
+        </nav>
+      </ToastProvider>
+    </ProgressProvider>
   )
 }

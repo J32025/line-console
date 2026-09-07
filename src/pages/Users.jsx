@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react'
 import { api } from '../lib/api.js'
 import { useToast } from '../lib/ui.jsx'
+import { useProgress } from '../lib/progress.jsx'
 import UserDetail from '../components/UserDetail.jsx'
 
 export default function Users() {
   const t = useToast()
+  const prog = useProgress()
   const [rows, setRows] = useState([])
   const [total, setTotal] = useState(0)
   const [q, setQ] = useState('')
@@ -14,7 +16,6 @@ export default function Users() {
   const [importText, setImportText] = useState('')
   const [importTag, setImportTag] = useState('')
   const [detailUid, setDetailUid] = useState(null)
-  const [progress, setProgress] = useState(null)
   const limit = 60
 
   const load = () => {
@@ -37,22 +38,24 @@ export default function Users() {
     } catch (e) { t.err(e.message) } finally { setBusy(false) }
   }
 
-  // ดึงโปรไฟล์ทั้งหมด — วนจนกว่า remaining = 0
+  // ดึงโปรไฟล์ทั้งหมด — วนจนกว่า remaining = 0 (แสดง % จริง)
   const fetchAllProfiles = async () => {
     setBusy(true)
-    let done = 0, unfollow = 0
+    const task = prog.start('กำลังดึงโปรไฟล์ + รูป', 0)
+    let done = 0, unfollow = 0, total = 0
     try {
-      for (let i = 0; i < 60; i++) {
+      for (let i = 0; i < 80; i++) {
         const r = await api.refreshProfiles({ target: 'missing', limit: 400 })
-        done += r.profiles_fetched
-        unfollow += r.not_following
-        setProgress({ done, unfollow, remaining: r.remaining })
+        done += r.profiles_fetched; unfollow += r.not_following
+        if (total === 0) total = r.processed + r.remaining
+        task.setTotal(total)
+        task.set(done + unfollow, `ดึงได้ ${done.toLocaleString()} · ไม่ติดตาม ${unfollow}`)
         if (r.remaining === 0 || r.processed === 0) break
       }
-      t.ok(`ดึงโปรไฟล์เสร็จ: ${done} คน (ไม่ติดตาม ${unfollow})`)
+      t.ok(`ดึงโปรไฟล์เสร็จ: ${done.toLocaleString()} คน (ไม่ติดตาม ${unfollow})`)
       load()
     } catch (e) { t.err(e.message) }
-    finally { setBusy(false); setTimeout(() => setProgress(null), 4000) }
+    finally { task.done(); setBusy(false) }
   }
 
   const syncFollowers = async () => {
@@ -71,11 +74,6 @@ export default function Users() {
         <div className="row wrap">
           <button className="primary" disabled={busy} onClick={fetchAllProfiles}>ดึงโปรไฟล์ + รูปทั้งหมด</button>
           <button disabled={busy} onClick={syncFollowers}>Sync followers (Verified OA)</button>
-          {progress && (
-            <span className="muted sm">
-              ดึงแล้ว {progress.done.toLocaleString()} · ไม่ติดตาม {progress.unfollow} · เหลือ ~{progress.remaining.toLocaleString()}
-            </span>
-          )}
         </div>
         <details style={{ marginTop: 10 }}>
           <summary className="sm" style={{ cursor: 'pointer' }}>+ นำเข้า userId</summary>

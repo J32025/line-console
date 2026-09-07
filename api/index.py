@@ -1291,6 +1291,27 @@ async def _uids_by_filter(f: dict) -> list[str]:
     return [r["line_user_id"] for r in rows]
 
 
+@app.post("/api/target/resolve")
+async def resolve_target(req: Request, admin=Depends(current_admin)):
+    """คืน userId list ตาม target (all/none/tag/segment/filter) — ให้ frontend เอาไป chunk + แสดง %"""
+    b = await req.json()
+    tg = b.get("target", "all")
+    if tg == "segment":
+        seg = await supa.select("segments", params={"id": f"eq.{b.get('segmentId')}", "select": "filter", "limit": "1"})
+        uids = await _uids_by_filter(seg[0]["filter"] if seg else {})
+    elif tg == "filter":
+        uids = await _uids_by_filter(b.get("filter", {}))
+    elif tg == "none":
+        uids = await _uids_by_filter({"noMenu": True})
+    elif tg == "tag":
+        uids = await _uids_by_filter({"tag": b.get("tag", "")})
+    elif tg == "list":
+        uids = [u.strip() for u in b.get("userIds", []) if u.strip()]
+    else:
+        uids = await _uids_by_filter({})
+    return {"count": len(uids), "userIds": uids}
+
+
 @app.get("/api/segments")
 async def list_segments(admin=Depends(current_admin)):
     return {"segments": await supa.select("segments", params={"select": "*", "order": "updated_at.desc"})}

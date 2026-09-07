@@ -1,19 +1,29 @@
 import { getIdToken } from './auth.js'
 
+// --- network activity hook (สำหรับ top loading bar) ---
+const netListeners = new Set()
+export function onNetActivity(fn) { netListeners.add(fn); return () => netListeners.delete(fn) }
+const emitNet = (d) => netListeners.forEach((fn) => fn(d))
+
 async function req(method, path, body) {
-  const res = await fetch(`/api${path}`, {
-    method,
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${getIdToken() || ''}`,
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  })
-  const text = await res.text()
-  let data
-  try { data = text ? JSON.parse(text) : {} } catch { data = { detail: text } }
-  if (!res.ok) throw new Error(data.detail || data.message || `HTTP ${res.status}`)
-  return data
+  emitNet(1)
+  try {
+    const res = await fetch(`/api${path}`, {
+      method,
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${getIdToken() || ''}`,
+      },
+      body: body ? JSON.stringify(body) : undefined,
+    })
+    const text = await res.text()
+    let data
+    try { data = text ? JSON.parse(text) : {} } catch { data = { detail: text } }
+    if (!res.ok) throw new Error(data.detail || data.message || `HTTP ${res.status}`)
+    return data
+  } finally {
+    emitNet(-1)
+  }
 }
 
 export const api = {
@@ -75,4 +85,5 @@ export const api = {
   delSegment: (id) => req('DELETE', `/segments/${id}`),
 
   narrowcast: (payload) => req('POST', '/message/narrowcast', payload),
+  resolveTarget: (payload) => req('POST', '/target/resolve', payload),
 }

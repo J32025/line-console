@@ -23,7 +23,12 @@ export function ToastProvider({ children }) {
 }
 
 export function Spinner({ label = 'กำลังโหลด…' }) {
-  return <div className="center muted">{label}</div>
+  return (
+    <div className="center muted">
+      <span className="spinner" />
+      <span className="sm">{label}</span>
+    </div>
+  )
 }
 
 export function Stat({ label, value, sub }) {
