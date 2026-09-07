@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { blank, TYPE_LABELS, STICKERS, detectKind } from '../lib/messageTypes.js'
 import { FLEX_TEMPLATES } from '../lib/flexTemplates.js'
 import QuickReplyEditor from './QuickReplyEditor.jsx'
+import MediaInput from './MediaInput.jsx'
 
 const TYPES = ['text', 'sticker', 'image', 'video', 'audio', 'location', 'buttons', 'confirm', 'carousel', 'flex', 'raw']
 const QR_OK = ['text', 'sticker', 'image', 'video', 'audio', 'location']
@@ -88,17 +89,21 @@ export default function MessageEditor({ msg, onChange, onRemove, index }) {
 
       {!raw && (kind === 'image' || kind === 'video') && (
         <>
-          <input placeholder="originalContentUrl (https, ≤ ~10-200MB)" value={msg.originalContentUrl}
-                 onChange={(e) => set({ originalContentUrl: e.target.value })} />
-          <input placeholder="previewImageUrl (รูปตัวอย่าง https)" value={msg.previewImageUrl}
-                 onChange={(e) => set({ previewImageUrl: e.target.value })} />
+          <label className="xs muted">ไฟล์{kind === 'video' ? 'วิดีโอ (.mp4)' : 'รูป'}</label>
+          <MediaInput value={msg.originalContentUrl} accept={kind === 'video' ? 'video/mp4' : 'image/*'}
+                      preview={kind === 'image'}
+                      onChange={(v) => set({ originalContentUrl: v, ...(kind === 'image' && !msg.previewImageUrl ? { previewImageUrl: v } : {}) })} />
+          <label className="xs muted">รูปตัวอย่าง (preview)</label>
+          <MediaInput value={msg.previewImageUrl} accept="image/*"
+                      onChange={(v) => set({ previewImageUrl: v })} />
         </>
       )}
 
       {!raw && kind === 'audio' && (
         <>
-          <input placeholder="originalContentUrl (.m4a https)" value={msg.originalContentUrl}
-                 onChange={(e) => set({ originalContentUrl: e.target.value })} />
+          <label className="xs muted">ไฟล์เสียง (.m4a)</label>
+          <MediaInput value={msg.originalContentUrl} accept="audio/*" preview={false}
+                      onChange={(v) => set({ originalContentUrl: v })} />
           <input type="number" placeholder="duration (ms)" value={msg.duration}
                  onChange={(e) => set({ duration: +e.target.value })} />
         </>
@@ -121,8 +126,8 @@ export default function MessageEditor({ msg, onChange, onRemove, index }) {
                  onChange={(e) => set({ altText: e.target.value })} />
           {kind === 'buttons' && (
             <>
-              <input placeholder="thumbnailImageUrl (https, ไม่บังคับ)" value={msg.template.thumbnailImageUrl}
-                     onChange={(e) => setTpl({ thumbnailImageUrl: e.target.value })} />
+              <MediaInput value={msg.template.thumbnailImageUrl}
+                          onChange={(v) => setTpl({ thumbnailImageUrl: v })} placeholder="รูปหัวการ์ด (ไม่บังคับ)" />
               <input placeholder="title" value={msg.template.title}
                      onChange={(e) => setTpl({ title: e.target.value })} />
               <input placeholder="text" value={msg.template.text}
@@ -195,7 +200,7 @@ function CarouselEditor({ columns, onChange }) {
           <div className="row spread"><b className="sm">การ์ด {i + 1}</b>
             {columns.length > 1 && <button className="xs" onClick={() => onChange(columns.filter((_, j) => j !== i))}>ลบการ์ด</button>}
           </div>
-          <input placeholder="thumbnailImageUrl" value={c.thumbnailImageUrl || ''} onChange={(e) => upd(i, { thumbnailImageUrl: e.target.value })} />
+          <MediaInput value={c.thumbnailImageUrl} onChange={(v) => upd(i, { thumbnailImageUrl: v })} placeholder="รูปการ์ด" />
           <input placeholder="title" value={c.title || ''} onChange={(e) => upd(i, { title: e.target.value })} />
           <input placeholder="text" value={c.text || ''} onChange={(e) => upd(i, { text: e.target.value })} />
           <ActionsEditor actions={c.actions} max={3} onChange={(actions) => upd(i, { actions })} />

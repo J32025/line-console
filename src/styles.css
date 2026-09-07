@@ -228,6 +228,10 @@ pre { background: #0e1a2b; color: #c7d0dc; padding: 12px; border-radius: 9px; ov
 .ln-qr { display: flex; gap: 5px; flex-wrap: wrap; }
 .ln-qr-chip { background: #fff; border: 1px solid var(--primary); color: var(--primary); border-radius: 99px; padding: 3px 10px; font-size: .72rem; }
 
+.media-input { margin: 6px 0; }
+.media-input input { min-height: 36px; }
+.media-thumb { display: block; margin-top: 6px; max-width: 180px; max-height: 120px; border-radius: 8px; border: 1px solid var(--border); object-fit: cover; }
+
 .qr-editor { margin-top: 6px; padding: 8px; background: #eef6ff; border-radius: 8px; display: flex; flex-direction: column; gap: 5px; }
 .qr-row input { margin: 0; flex: 1; min-width: 90px; }
 .nc-form { margin-top: 8px; padding: 10px; background: var(--panel-2); border-radius: 8px; }

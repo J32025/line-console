@@ -1425,6 +1425,46 @@ async def _uids_by_filter(f: dict) -> list[str]:
     return [r["line_user_id"] for r in rows]
 
 
+_EXT = {"image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp",
+        "video/mp4": "mp4", "audio/mp4": "m4a", "audio/x-m4a": "m4a"}
+
+
+@app.post("/api/upload")
+async def upload_media(req: Request, admin=Depends(current_admin)):
+    """รับ base64 (dataURL) -> เก็บ Supabase Storage -> คืน public URL"""
+    b = await req.json()
+    data = b.get("dataUrl") or b.get("base64") or ""
+    ctype = "image/png"
+    if data.startswith("data:"):
+        head, data = data.split(",", 1)
+        ctype = head[5:].split(";")[0] or ctype
+    if ctype not in _EXT:
+        raise HTTPException(400, f"ไม่รองรับไฟล์ชนิด {ctype}")
+    raw = base64.b64decode(data)
+    if len(raw) > 10 * 1024 * 1024:
+        raise HTTPException(400, "ไฟล์ใหญ่เกิน 10MB")
+    name = f"{dt.date.today().isoformat()}/{int(time.time()*1000)}-{os.urandom(3).hex()}.{_EXT[ctype]}"
+    url = await supa.storage_upload("media", name, raw, ctype)
+    await supa.log_operation(admin["userId"], "upload", {"type": ctype, "kb": len(raw) // 1024}, {"url": url})
+    return {"ok": True, "url": url, "path": name, "size": len(raw)}
+
+
+@app.get("/api/media")
+async def list_media(admin=Depends(current_admin)):
+    try:
+        items = await supa.storage_list("media")
+    except Exception:
+        return {"items": []}
+    base = f"{SUPABASE_URL}/storage/v1/object/public/media/"
+    out = []
+    for it in items:
+        if it.get("name") and not it["name"].endswith("/"):
+            out.append({"name": it["name"], "url": base + it["name"],
+                        "size": (it.get("metadata") or {}).get("size"),
+                        "created": it.get("created_at")})
+    return {"items": out}
+
+
 @app.post("/api/target/resolve")
 async def resolve_target(req: Request, admin=Depends(current_admin)):
     """คืน userId list ตาม target (all/none/tag/segment/filter) — ให้ frontend เอาไป chunk + แสดง %"""

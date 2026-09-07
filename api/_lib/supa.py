@@ -104,6 +104,43 @@ async def delete(table: str, params: dict) -> None:
         r.raise_for_status()
 
 
+async def storage_upload(bucket: str, path: str, content: bytes, content_type: str) -> str:
+    """อัปโหลดไฟล์ขึ้น Supabase Storage คืน public URL"""
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        raise RuntimeError("ยังไม่ได้ตั้ง SUPABASE_URL / SERVICE_ROLE_KEY")
+    async with httpx.AsyncClient(timeout=60) as c:
+        r = await c.post(
+            f"{SUPABASE_URL}/storage/v1/object/{bucket}/{path}",
+            headers={
+                "apikey": SUPABASE_SERVICE_ROLE_KEY,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+                "Content-Type": content_type,
+                "x-upsert": "true",
+            },
+            content=content,
+        )
+        r.raise_for_status()
+    return f"{SUPABASE_URL}/storage/v1/object/public/{bucket}/{path}"
+
+
+async def storage_list(bucket: str, prefix: str = "") -> list:
+    async with httpx.AsyncClient(timeout=30) as c:
+        r = await c.post(
+            f"{SUPABASE_URL}/storage/v1/object/list/{bucket}",
+            headers=_headers(),
+            json={"prefix": prefix, "limit": 100, "sortBy": {"column": "created_at", "order": "desc"}},
+        )
+        r.raise_for_status()
+        return r.json()
+
+
+async def storage_delete(bucket: str, path: str):
+    async with httpx.AsyncClient(timeout=30) as c:
+        r = await c.request("DELETE", f"{SUPABASE_URL}/storage/v1/object/{bucket}/{path}",
+                            headers=_headers())
+        r.raise_for_status()
+
+
 async def log_operation(actor: str | None, action: str, params=None, result=None, status="ok"):
     try:
         await insert("operations", {
