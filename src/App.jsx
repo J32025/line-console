@@ -7,6 +7,7 @@ import { ProgressProvider, TopLoader } from './lib/progress.jsx'
 import Dashboard from './pages/Dashboard.jsx'
 import RichMenus from './pages/RichMenus.jsx'
 import Messaging from './pages/Messaging.jsx'
+import Inbox from './pages/Inbox.jsx'
 import AutoReply from './pages/AutoReply.jsx'
 import Segments from './pages/Segments.jsx'
 import Users from './pages/Users.jsx'
@@ -16,8 +17,9 @@ import Admins from './pages/Admins.jsx'
 
 const NAV = [
   ['/', 'แดชบอร์ด', '🏠'],
-  ['/richmenus', 'Rich Menu', '📱'],
+  ['/inbox', 'กล่องข้อความ', '💬'],
   ['/messaging', 'ส่งข้อความ', '✈️'],
+  ['/richmenus', 'Rich Menu', '📱'],
   ['/auto-reply', 'ตอบอัตโนมัติ', '🤖'],
   ['/segments', 'กลุ่มเป้าหมาย', '🎯'],
   ['/users', 'ผู้ใช้', '👥'],
@@ -102,6 +104,7 @@ export default function App() {
               <Route path="/" element={<Dashboard />} />
               <Route path="/richmenus" element={<RichMenus />} />
               <Route path="/messaging" element={<Messaging />} />
+              <Route path="/inbox" element={<Inbox />} />
               <Route path="/auto-reply" element={<AutoReply />} />
               <Route path="/segments" element={<Segments />} />
               <Route path="/users" element={<Users />} />

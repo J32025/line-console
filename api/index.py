@@ -134,7 +134,7 @@ async def webhook(request: Request):
     events = data.get("events", [])
     # ข้าม event ที่ LINE ส่งซ้ำ (redelivery) — เราประมวลผลรอบแรกไปแล้ว
     events = [e for e in events if not e.get("deliveryContext", {}).get("isRedelivery")]
-    rows_ev, user_patches, follow_rows = [], {}, []
+    rows_ev, user_patches, follow_rows, in_msgs = [], {}, [], []
     follow_uids, unfollow_uids = [], []
 
     for ev in events:
@@ -184,11 +184,36 @@ async def webhook(request: Request):
                 "last_event_at": event_ts, "source": "webhook", "updated_at": NOW(),
             })
 
+        # ---- inbox: บันทึกข้อความเข้า ----
+        if et == "message":
+            mt = msg.get("type")
+            preview = msg.get("text") or {"image": "[รูปภาพ]", "video": "[วิดีโอ]", "audio": "[เสียง]",
+                                          "file": f"[ไฟล์] {msg.get('fileName', '')}", "location": "[ตำแหน่ง]",
+                                          "sticker": "[สติกเกอร์]"}.get(mt, f"[{mt}]")
+            in_msgs.append({"line_user_id": uid, "direction": "in", "by": "user",
+                            "msg_type": mt, "text": msg.get("text"), "payload": msg,
+                            "created_at": event_ts})
+            up = user_patches.get(uid, {"line_user_id": uid, "updated_at": NOW()})
+            up["last_message_at"] = event_ts
+            up["last_message_text"] = preview[:200]
+            up["unread"] = None  # จะ increment ทีหลัง
+            user_patches[uid] = up
+
     try:
         if rows_ev:
             await supa.insert("webhook_events", rows_ev)
+        if in_msgs:
+            await supa.insert("messages", in_msgs)
         if follow_rows:
             await supa.insert("follow_history", follow_rows)  # noqa
+
+        # increment unread สำหรับคนที่ทักเข้ามา
+        for uid in {m["line_user_id"] for m in in_msgs}:
+            ex = await supa.select("line_users", params={
+                "select": "unread", "line_user_id": f"eq.{uid}", "limit": "1"})
+            cur_un = (ex[0].get("unread") if ex else 0) or 0
+            n = sum(1 for m in in_msgs if m["line_user_id"] == uid)
+            user_patches[uid]["unread"] = cur_un + n
 
         # อัปเดต counter + first_followed_at (ต้องอ่านค่าเดิมก่อน)
         touched = set(follow_uids) | set(unfollow_uids)
@@ -332,6 +357,15 @@ async def _handle_auto_replies(events: list):
     if not rules:
         return
 
+    # หา user ที่ปิด auto-reply ไว้ (แอดมินกำลังคุยเอง)
+    uids = {e.get("source", {}).get("userId") for e in repliable if e.get("source", {}).get("userId")}
+    paused = set()
+    if uids:
+        rows = await supa.select("line_users", params={
+            "select": "line_user_id,auto_reply_paused", "line_user_id": f"in.({','.join(uids)})",
+            "auto_reply_paused": "eq.true", "limit": "1000"})
+        paused = {r["line_user_id"] for r in rows}
+
     name_cache: dict[str, str] = {}
     async def name_of(uid):
         if not uid:
@@ -341,16 +375,27 @@ async def _handle_auto_replies(events: list):
             name_cache[uid] = (p or {}).get("displayName") or "เพื่อน"
         return name_cache[uid]
 
+    out_msgs = []
     for e in repliable:
         try:
+            uid = e.get("source", {}).get("userId")
+            if uid in paused:
+                continue
             rule = _pick_rule(e, rules)
             if not rule:
                 continue
-            uid = e.get("source", {}).get("userId")
             nm = await name_of(uid) if _has_placeholder(rule["messages"]) else None
-            await _reply_rule(e["replyToken"], rule, nm)
+            if await _reply_rule(e["replyToken"], rule, nm):
+                for m in rule["messages"][:5]:
+                    out_msgs.append({"line_user_id": uid, "direction": "out", "by": "auto",
+                                     "msg_type": m.get("type"), "text": m.get("text"), "payload": m})
         except Exception as ex:
             print("auto-reply one error:", repr(ex))
+    if out_msgs:
+        try:
+            await supa.insert("messages", out_msgs)
+        except Exception:
+            pass
 
 
 # ============================================================
@@ -814,6 +859,92 @@ async def sync_followers(admin=Depends(current_admin)):
         await supa.upsert("line_users", rows[i:i + 500], on_conflict="line_user_id")
     await supa.log_operation(admin["userId"], "users.sync_followers", None, {"count": len(rows)})
     return {"followers": len(rows), "pages": pages}
+
+
+# ============================================================
+# INBOX (แชต + human takeover)
+# ============================================================
+@app.get("/api/inbox")
+async def inbox_list(admin=Depends(current_admin), limit: int = 40, offset: int = 0,
+                     filter: str = "all"):
+    params = {
+        "select": "line_user_id,display_name,picture_url,last_message_at,last_message_text,"
+                  "unread,auto_reply_paused,assigned_to,is_following",
+        "order": "last_message_at.desc.nullslast",
+        "limit": str(min(limit, 100)), "offset": str(offset),
+        "last_message_at": "not.is.null",
+    }
+    if filter == "unread":
+        params["unread"] = "gt.0"
+    elif filter == "mine":
+        params["assigned_to"] = f"eq.{admin['userId']}"
+    elif filter == "paused":
+        params["auto_reply_paused"] = "eq.true"
+    rows = await supa.select("line_users", params=params)
+    total_unread = await supa.count("line_users", {"unread": "gt.0"})
+    return {"conversations": rows, "total_unread": total_unread}
+
+
+@app.get("/api/inbox/{uid}")
+async def inbox_thread(uid: str, admin=Depends(current_admin), before: str = "", limit: int = 50):
+    urows = await supa.select("line_users", params={
+        "select": "line_user_id,display_name,picture_url,status_message,is_following,"
+                  "auto_reply_paused,assigned_to,current_rich_menu_id,rich_menu_name,tags,note,unread",
+        "line_user_id": f"eq.{uid}", "limit": "1"})
+    if not urows:
+        raise HTTPException(404, "ไม่พบผู้ใช้")
+    params = {"select": "*", "line_user_id": f"eq.{uid}",
+              "order": "created_at.desc", "limit": str(min(limit, 100))}
+    if before:
+        params["created_at"] = f"lt.{before}"
+    msgs = await supa.select("messages", params=params)
+    msgs.reverse()
+    return {"user": urows[0], "messages": msgs}
+
+
+@app.post("/api/inbox/{uid}/read")
+async def inbox_read(uid: str, admin=Depends(current_admin)):
+    await supa.update("line_users", {"unread": 0}, {"line_user_id": f"eq.{uid}"})
+    return {"ok": True}
+
+
+@app.post("/api/inbox/{uid}/pause")
+async def inbox_pause(uid: str, req: Request, admin=Depends(current_admin)):
+    b = await req.json()
+    paused = bool(b.get("paused", True))
+    await supa.update("line_users", {
+        "auto_reply_paused": paused,
+        "assigned_to": admin["userId"] if paused else None,
+    }, {"line_user_id": f"eq.{uid}"})
+    await supa.insert("messages", {
+        "line_user_id": uid, "direction": "out", "by": "system", "msg_type": "note",
+        "text": f"— {'ปิด' if paused else 'เปิด'}ตอบอัตโนมัติ โดย {admin['name'] or admin['userId'][:8]} —",
+    })
+    return {"ok": True, "paused": paused}
+
+
+@app.post("/api/inbox/{uid}/assign")
+async def inbox_assign(uid: str, req: Request, admin=Depends(current_admin)):
+    b = await req.json()
+    await supa.update("line_users", {"assigned_to": b.get("to") or None}, {"line_user_id": f"eq.{uid}"})
+    return {"ok": True}
+
+
+@app.post("/api/inbox/{uid}/send")
+async def inbox_send(uid: str, req: Request, admin=Depends(current_admin)):
+    b = await req.json()
+    msgs = _normalize_messages(b.get("messages", []))
+    code, txt, rid = await line.push(uid, msgs)
+    if code != 200:
+        raise HTTPException(400, txt)
+    rows = [{"line_user_id": uid, "direction": "out", "by": admin["userId"],
+             "msg_type": m.get("type"), "text": m.get("text"), "payload": m} for m in msgs]
+    await supa.insert("messages", rows)
+    await supa.update("line_users", {
+        "unread": 0, "last_message_at": NOW(),
+        "last_message_text": (msgs[-1].get("text") or f"[{msgs[-1].get('type')}]")[:200],
+    }, {"line_user_id": f"eq.{uid}"})
+    return {"ok": True, "requestId": rid}
 
 
 @app.get("/api/users/{uid}")

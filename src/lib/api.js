@@ -91,4 +91,10 @@ export const api = {
 
   narrowcast: (payload) => req('POST', '/message/narrowcast', payload),
   resolveTarget: (payload) => req('POST', '/target/resolve', payload),
+
+  inbox: (qs = {}) => req('GET', '/inbox?' + new URLSearchParams(qs)),
+  thread: (uid, qs = {}) => req('GET', `/inbox/${uid}?` + new URLSearchParams(qs)),
+  threadRead: (uid) => req('POST', `/inbox/${uid}/read`),
+  threadPause: (uid, paused) => req('POST', `/inbox/${uid}/pause`, { paused }),
+  threadSend: (uid, messages) => req('POST', `/inbox/${uid}/send`, { messages }),
 }
