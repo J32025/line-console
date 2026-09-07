@@ -179,8 +179,34 @@ def _match(rule: dict, text: str) -> bool:
     return any(k in t for k in kws)  # contains / postback
 
 
-async def _reply_rule(reply_token: str, rule: dict):
-    code, _ = await line.reply(reply_token, rule["messages"][:5])
+_PLACEHOLDERS = ("{name}", "{displayName}", "{{name}}", "{{displayName}}", "{ชื่อ}")
+
+
+def _has_placeholder(messages: list) -> bool:
+    return any(isinstance(m, dict) and m.get("type") == "text"
+              and any(p in (m.get("text") or "") for p in _PLACEHOLDERS)
+              for m in messages)
+
+
+def _personalize(messages: list, name: str) -> list:
+    name = name or "เพื่อน"
+    out = []
+    for m in messages:
+        m2 = dict(m) if isinstance(m, dict) else m
+        if isinstance(m2, dict) and m2.get("type") == "text" and m2.get("text"):
+            txt = m2["text"]
+            for p in _PLACEHOLDERS:
+                txt = txt.replace(p, name)
+            m2["text"] = txt
+        out.append(m2)
+    return out
+
+
+async def _reply_rule(reply_token: str, rule: dict, name: str | None = None):
+    msgs = rule["messages"][:5]
+    if name is not None and _has_placeholder(msgs):
+        msgs = _personalize(msgs, name)
+    code, _ = await line.reply(reply_token, msgs)
     if code == 200:
         await supa.update("auto_replies",
                           {"hits": (rule.get("hits") or 0) + 1, "last_hit_at": NOW()},
@@ -189,7 +215,6 @@ async def _reply_rule(reply_token: str, rule: dict):
 
 
 async def _handle_auto_replies(events: list):
-    # event ที่ตอบกลับได้ (มี replyToken)
     repliable = [e for e in events if e.get("replyToken") and e.get("type") in
                  ("message", "follow", "postback")]
     if not repliable:
@@ -200,20 +225,35 @@ async def _handle_auto_replies(events: list):
     if not rules:
         return
     welcome = [r for r in rules if r.get("match_type") == "welcome"]
+
+    # cache profile ต่อ userId (ดึงชื่อไปแทน {name})
+    name_cache: dict[str, str] = {}
+    async def name_of(uid):
+        if not uid:
+            return None
+        if uid not in name_cache:
+            p = await line.get_profile(uid)
+            name_cache[uid] = (p or {}).get("displayName") or "เพื่อน"
+        return name_cache[uid]
+
     for e in repliable:
         et = e["type"]
+        uid = e.get("source", {}).get("userId")
         if et == "follow" and welcome:
-            await _reply_rule(e["replyToken"], welcome[0])
+            await _reply_rule(e["replyToken"], welcome[0],
+                              await name_of(uid) if _has_placeholder(welcome[0]["messages"]) else None)
         elif et == "message" and e.get("message", {}).get("type") == "text":
             text = e["message"]["text"]
             rule = next((r for r in rules if r.get("match_type") not in ("welcome",) and _match(r, text)), None)
             if rule:
-                await _reply_rule(e["replyToken"], rule)
+                nm = await name_of(uid) if _has_placeholder(rule["messages"]) else None
+                await _reply_rule(e["replyToken"], rule, nm)
         elif et == "postback":
             data = e.get("postback", {}).get("data", "")
             rule = next((r for r in rules if r.get("match_type") == "postback" and _match(r, data)), None)
             if rule:
-                await _reply_rule(e["replyToken"], rule)
+                nm = await name_of(uid) if _has_placeholder(rule["messages"]) else None
+                await _reply_rule(e["replyToken"], rule, nm)
 
 
 # ============================================================

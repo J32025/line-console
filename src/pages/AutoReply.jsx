@@ -101,7 +101,8 @@ export default function AutoReply() {
               <input placeholder={form.match_type === 'postback' ? 'ค่า postback data ที่จะจับ คั่นด้วย ,' : 'คำ/วลี คั่นด้วย , (เช่น สวัสดี, hello, hi)'}
                      value={form.keywords} onChange={(e) => setForm({ ...form, keywords: e.target.value })} />
             )}
-            {form.match_type === 'welcome' && <p className="muted xs">ตอบข้อความนี้ทันทีที่มีคนกดเพิ่มเพื่อน (ใช้ reply token ของ event follow — ฟรี ไม่กินโควตา)</p>}
+            {form.match_type === 'welcome' && <p className="muted xs">ตอบทันทีที่มีคนกดเพิ่มเพื่อน (reply token — ฟรี)</p>}
+            <p className="muted xs">💡 ใส่ <code>{'{name}'}</code> ในข้อความ = แทนที่ด้วยชื่อ LINE ของผู้ใช้อัตโนมัติ</p>
             <div className="row spread" style={{ marginTop: 8 }}>
               <b className="sm">ข้อความตอบ ({form.messages.length}/5)</b>
               <div className="row">
