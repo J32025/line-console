@@ -32,7 +32,7 @@ ENFORCE_EXCLUDE_MENUS = [m.strip() for m in os.environ.get("ENFORCE_EXCLUDE_MENU
 # (ตัวเลือก) Gemini AI ตอบคำถามอิสระ — เฉพาะ user ที่ current rich menu ตรงชื่อนี้
 # เว้นว่าง GEMINI_API_KEY = ปิดฟีเจอร์นี้ทั้งหมด (ไม่กระทบ auto-reply/automation เดิม)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash").strip()
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash").strip()
 GEMINI_TRIGGER_MENU_NAME = os.environ.get("GEMINI_TRIGGER_MENU_NAME", "แล้วพบกัน").strip()
 
 # domain ของเว็บนี้ (สำหรับแสดง endpoint แนะนำ) — auto จาก VERCEL_URL
