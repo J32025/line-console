@@ -25,7 +25,8 @@ from _lib.config import (LINE_CHANNEL_SECRET, CRON_SECRET, ALERT_USER_IDS,
                          SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY,
                          LINE_LOGIN_CHANNEL_TOKEN, APP_URL, EASYSLIP_TOKEN,
                          ENFORCE_RICHMENU_ID, ENFORCE_EXCLUDE_MENUS,
-                         GEMINI_API_KEY, GEMINI_MODEL, GEMINI_TRIGGER_MENU_NAME)
+                         GEMINI_API_KEY, GEMINI_MODEL, GEMINI_TRIGGER_MENU_NAME,
+                         SLIP_SUCCESS_RICHMENU_ID)
 import httpx
 
 app = FastAPI(title="LINE Console API")
@@ -542,6 +543,21 @@ async def _handle_slips(img_events: list):
             await supa.insert("slips", slip)
         except Exception as ex:
             print("slip insert error:", ex)
+
+        # ---- ส่งสลิปแล้ว -> เปลี่ยน rich menu ของ user คนนี้อัตโนมัติ (ถ้าตั้งค่าไว้) ----
+        if SLIP_SUCCESS_RICHMENU_ID:
+            try:
+                old_map = await _fetch_current_menu_map([uid])
+                ok_link, _code = await line.user_richmenu_link(uid, SLIP_SUCCESS_RICHMENU_ID)
+                if ok_link:
+                    ts_link = NOW()
+                    new_row = {"line_user_id": uid, "current_rich_menu_id": SLIP_SUCCESS_RICHMENU_ID,
+                               "rich_menu_status": "assigned", "rich_menu_checked_at": ts_link,
+                               "updated_at": ts_link}
+                    await supa.upsert("line_users", [new_row], on_conflict="line_user_id")
+                    await _log_richmenu_diffs(old_map, [new_row], "slip", "system")
+            except Exception as ex:
+                print("slip richmenu link error:", ex)
 
         # ตอบ user ตามผลตรวจอัตโนมัติ
         if status == "verified":

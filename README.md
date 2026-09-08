@@ -99,7 +99,8 @@ line-console/
 ├─ supabase/migrations/
 │  ├─ 0001_init.sql
 │  ├─ 0002_slips_postbacks_settings.sql
-│  └─ 0003_richmenu_history.sql   ตาราง richmenu_history (ประวัติเปลี่ยนเมนู)
+│  ├─ 0003_richmenu_history.sql   ตาราง richmenu_history (ประวัติเปลี่ยนเมนู)
+│  └─ 0004_gemini_richmenu_settings.sql   gemini_enabled/gemini_temperature ต่อเมนู
 ├─ src/
 │  ├─ App.jsx             layout + router + login gate
 │  ├─ lib/{auth,api,ui}
@@ -126,6 +127,12 @@ line-console/
    ```
 
 > **หมายเหตุเรื่อง 114 คนที่เมนูหลุดกลับไปเป็น "สมัครติว"** (พบตอนตรวจระบบ) — ตรวจโค้ดใน `api/index.py` (webhook/postback handler) และ `richmenu-webapp/gas/Code.gs` แล้ว **ไม่พบ logic อัตโนมัติใดที่สั่งผูกเมนูนี้** (Code.gs เป็น read-only เช็คสถานะอย่างเดียว, ฝั่ง index.py การผูกเมนูเกิดจาก action ของแอดมินผ่าน `/api/richmenu/assign` เท่านั้น) แปลว่าการเปลี่ยนกลับน่าจะมาจาก (ก) มีคนกดผูกเมนูนี้เองผ่านหน้าเว็บ/สคริปต์อื่นในช่วงเวลานั้น หรือ (ข) มี automation ภายนอกระบบนี้ (เช่น Google Form/Zapier/Make ที่ผูกกับฟอร์มสมัครติว) — แนะนำเช็ค log ในหน้า "ปฏิบัติการล่าสุด" (`/`) หรือตาราง `operations`/`richmenu_history` (หลังใช้งานสักพัก) เพื่อดูว่าเกิดจาก actor ไหน ถ้ายืนยันว่าอยากให้ทุกคนเป็นเมนู register เสมอ ให้เปิด `/api/cron/enforce-richmenu` ตามข้อ 4
+
+## สลิปโอนเงิน — เปลี่ยน Rich Menu อัตโนมัติหลังส่ง
+
+พอระบบจัดว่ารูป/ไฟล์ที่ user ส่งมาเป็น "สลิปโอนเงิน" (ดูจาก context การคุยเรื่องชำระเงินใน 24 ชม.ล่าสุด หรือเปิด `slip_notify_all_images` ไว้) — ไม่ว่าผลตรวจอัตโนมัติจะเป็น verified/review/rejected ก็ตาม — ระบบจะ **link rich menu ของ user คนนั้นเป็น `SLIP_SUCCESS_RICHMENU_ID` ทันที** (default = เมนู "แล้วพบกัน", `richmenu-aa532223aad4fcd9d9878b219ad37714`) พร้อมบันทึกลง `richmenu_history` (source = `slip`)
+
+ตั้งเป็นเมนูอื่นได้ผ่าน env var `SLIP_SUCCESS_RICHMENU_ID` (Vercel env vars) — เว้นว่าง = ปิดฟีเจอร์นี้ ไม่เปลี่ยนเมนูอัตโนมัติ
 
 ## Gemini AI ตอบคำถามอิสระ (เปิด/ปิด + ปรับความเข้มข้นได้ต่อเมนู)
 

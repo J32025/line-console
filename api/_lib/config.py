@@ -23,6 +23,11 @@ LINE_LOGIN_CHANNEL_TOKEN = os.environ.get("LINE_LOGIN_CHANNEL_TOKEN", "").strip(
 # EasySlip API token (ตรวจสลิปอัตโนมัติ) — ว่าง = ไม่ตรวจ OCR แค่แจ้งเตือน
 EASYSLIP_TOKEN = os.environ.get("EASYSLIP_TOKEN", "").strip()
 
+# พอ user ส่งสลิป (รูป/ไฟล์ที่ถูกจัดว่าเป็นสลิปโอนเงิน) ให้เปลี่ยน rich menu ของ user คนนั้นเป็นเมนูนี้อัตโนมัติ
+# เว้นว่าง = ปิด (ไม่เปลี่ยนเมนูอัตโนมัติหลังส่งสลิป)
+SLIP_SUCCESS_RICHMENU_ID = os.environ.get(
+    "SLIP_SUCCESS_RICHMENU_ID", "richmenu-aa532223aad4fcd9d9878b219ad37714").strip()
+
 # (ตัวเลือก) เปิดใช้ cron enforce-richmenu: บังคับ user ที่เมนูหลุด/ไม่ตรง ให้กลับไปเป็นเมนูนี้
 # เว้นว่าง = ปิดใช้งาน endpoint นี้ (ไม่ทำอะไร)
 ENFORCE_RICHMENU_ID = os.environ.get("ENFORCE_RICHMENU_ID", "").strip()
