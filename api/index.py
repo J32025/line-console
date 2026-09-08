@@ -147,7 +147,9 @@ async def link_delete(code: str, admin=Depends(current_admin)):
 
 @app.get("/api/health")
 async def health(deep: int = 0, test_gemini: int = 0, test_uid: str = ""):
-    out = {"ok": True, "time": NOW()}
+    out = {"ok": True, "time": NOW(),
+           "commit": (os.environ.get("VERCEL_GIT_COMMIT_SHA") or "?")[:7],
+           "deployed_at": os.environ.get("VERCEL_DEPLOYMENT_ID", "?")}
     if not deep:
         return out
     # deep check
