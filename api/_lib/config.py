@@ -29,6 +29,12 @@ ENFORCE_RICHMENU_ID = os.environ.get("ENFORCE_RICHMENU_ID", "").strip()
 # richMenuId ที่ยกเว้นไม่ถูกบังคับ (คั่นด้วย ,) เช่นเมนูแคมเปญที่ตั้งใจให้ user อยู่ต่อ
 ENFORCE_EXCLUDE_MENUS = [m.strip() for m in os.environ.get("ENFORCE_EXCLUDE_MENUS", "").split(",") if m.strip()]
 
+# (ตัวเลือก) Gemini AI ตอบคำถามอิสระ — เฉพาะ user ที่ current rich menu ตรงชื่อนี้
+# เว้นว่าง GEMINI_API_KEY = ปิดฟีเจอร์นี้ทั้งหมด (ไม่กระทบ auto-reply/automation เดิม)
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash").strip()
+GEMINI_TRIGGER_MENU_NAME = os.environ.get("GEMINI_TRIGGER_MENU_NAME", "แล้วพบกัน").strip()
+
 # domain ของเว็บนี้ (สำหรับแสดง endpoint แนะนำ) — auto จาก VERCEL_URL
 APP_URL = (os.environ.get("APP_URL")
            or ("https://" + os.environ["VERCEL_PROJECT_PRODUCTION_URL"] if os.environ.get("VERCEL_PROJECT_PRODUCTION_URL") else "")

@@ -24,7 +24,8 @@ from _lib.config import (LINE_CHANNEL_SECRET, CRON_SECRET, ALERT_USER_IDS,
                          LINE_CHANNEL_ACCESS_TOKEN, LIFF_CHANNEL_ID,
                          SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY,
                          LINE_LOGIN_CHANNEL_TOKEN, APP_URL, EASYSLIP_TOKEN,
-                         ENFORCE_RICHMENU_ID, ENFORCE_EXCLUDE_MENUS)
+                         ENFORCE_RICHMENU_ID, ENFORCE_EXCLUDE_MENUS,
+                         GEMINI_API_KEY, GEMINI_MODEL, GEMINI_TRIGGER_MENU_NAME)
 import httpx
 
 app = FastAPI(title="LINE Console API")
@@ -49,6 +50,18 @@ def _rate_limit(key: str, limit: int, window: float):
     if len(q) >= limit:
         raise HTTPException(429, "เรียกถี่เกินไป ลองใหม่อีกครั้ง")
     q.append(now)
+
+
+def _rate_ok(key: str, limit: int, window: float) -> bool:
+    """เหมือน _rate_limit แต่คืน False แทนการ raise — ใช้ในลูปที่ไม่อยากให้ 1 คนล้มทั้ง batch"""
+    now = time.time()
+    q = _hits.setdefault(key, [])
+    while q and q[0] < now - window:
+        q.pop(0)
+    if len(q) >= limit:
+        return False
+    q.append(now)
+    return True
 
 
 _alert_last: dict[str, float] = {}
@@ -324,9 +337,18 @@ async def webhook(request: Request):
         except Exception as e:
             print("follow profile fetch error:", e)
 
-    # ---- auto-reply (ห้าม block webhook เกิน 12 วิ, ห้าม 500) ----
+    # ---- Gemini: ตอบคำถามอิสระ เฉพาะ user ที่ current rich menu ตรงชื่อ GEMINI_TRIGGER_MENU_NAME ----
+    gemini_handled_uids: set = set()
     try:
-        await asyncio.wait_for(_handle_auto_replies(events), timeout=12)
+        gemini_handled_uids = await asyncio.wait_for(_handle_gemini_replies(events), timeout=15)
+    except BaseException as e:  # noqa: BLE001 — webhook ต้องตอบ 200 เสมอ
+        print("gemini reply error:", repr(e))
+
+    # ---- auto-reply (ห้าม block webhook เกิน 12 วิ, ห้าม 500) ----
+    # ข้าม event ของ user ที่ Gemini ตอบไปแล้ว กันตอบซ้ำ 2 ระบบ
+    try:
+        remaining = [e for e in events if e.get("source", {}).get("userId") not in gemini_handled_uids]
+        await asyncio.wait_for(_handle_auto_replies(remaining), timeout=12)
     except BaseException as e:  # noqa: BLE001 — webhook ต้องตอบ 200 เสมอ
         print("auto-reply error:", repr(e))
 
@@ -599,6 +621,89 @@ def _pick_rule(event: dict, rules: list):
         if mtype in MSG_TYPE_TRIGGERS:
             return next((r for r in rules if r["trigger"] == mtype), None)
     return None
+
+
+async def _gemini_answer(question: str) -> str | None:
+    """เรียก Gemini API ตอบคำถามอิสระ — คืน None ถ้า error/ไม่ได้ตั้ง key (เงียบไว้ ไม่ตอบอะไร)"""
+    if not GEMINI_API_KEY or not question.strip():
+        return None
+    url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+           f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}")
+    body = {
+        "contents": [{"role": "user", "parts": [{"text": question[:2000]}]}],
+        "systemInstruction": {"parts": [{
+            "text": "คุณเป็นผู้ช่วยตอบคำถามทั่วไปให้สมาชิกทางไลน์ ตอบเป็นภาษาไทย "
+                    "กระชับ สุภาพ เป็นกันเอง ไม่เกิน 3-4 ประโยค ถ้าไม่ทราบคำตอบให้บอกตรง ๆ ว่าไม่ทราบ"
+        }]},
+        "generationConfig": {"maxOutputTokens": 500},
+    }
+    try:
+        async with httpx.AsyncClient(timeout=20) as c:
+            r = await c.post(url, json=body)
+        j = r.json()
+        if r.status_code != 200:
+            print("gemini http error:", r.status_code, str(j)[:300])
+            return None
+        cand = (j.get("candidates") or [{}])[0]
+        parts = (cand.get("content") or {}).get("parts") or []
+        text = "".join(p.get("text", "") for p in parts).strip()
+        return text or None
+    except Exception as e:
+        print("gemini error:", e)
+        return None
+
+
+async def _handle_gemini_replies(events: list) -> set:
+    """ตอบคำถามอิสระด้วย Gemini เฉพาะ user ที่ current rich menu (เช็คสด) ตรงชื่อ
+    GEMINI_TRIGGER_MENU_NAME — ปิดอยู่ถ้าไม่ได้ตั้ง GEMINI_API_KEY (no-op ปลอดภัย)"""
+    if not GEMINI_API_KEY or not GEMINI_TRIGGER_MENU_NAME:
+        return set()
+    text_events = [e for e in events if e.get("type") == "message"
+                   and e.get("message", {}).get("type") == "text"
+                   and e.get("replyToken") and e.get("source", {}).get("userId")]
+    if not text_events:
+        return set()
+
+    try:
+        menus = await supa.select("rich_menus", params={
+            "select": "rich_menu_id", "name": f"eq.{GEMINI_TRIGGER_MENU_NAME}"})
+        target_ids = {m["rich_menu_id"] for m in menus}
+    except Exception as e:
+        print("gemini: read rich_menus error:", e)
+        target_ids = set()
+    if not target_ids:
+        return set()
+
+    handled: set = set()
+    out_msgs = []
+    for e in text_events:
+        uid = e["source"]["userId"]
+        if uid in handled:
+            continue
+        if not _rate_ok(f"gemini:{uid}", limit=6, window=60):  # กันสแปม/ต้นทุนบานปลาย
+            continue
+        try:
+            rid = await line.user_richmenu_get(uid)
+        except Exception:
+            rid = None
+        if rid not in target_ids:
+            continue
+        question = e["message"].get("text") or ""
+        answer = await _gemini_answer(question)
+        if not answer:
+            continue  # Gemini ตอบไม่ได้/error -> เงียบไว้ก่อน ไม่ตอบอะไร (ตามที่ตกลง)
+        code, _ = await line.reply(e["replyToken"], [{"type": "text", "text": answer[:4900]}])
+        if code == 200:
+            handled.add(uid)
+            out_msgs.append({"line_user_id": uid, "direction": "out", "by": "gemini",
+                             "msg_type": "text", "text": answer,
+                             "payload": {"question": question, "model": GEMINI_MODEL}})
+    if out_msgs:
+        try:
+            await supa.insert("messages", out_msgs)
+        except Exception:
+            pass
+    return handled
 
 
 async def _handle_auto_replies(events: list):

@@ -17,6 +17,7 @@
 | **ผู้ใช้ / Webhook** | รับ webhook (follow/unfollow/message/postback) → เก็บลง DB, import userId, ดึงโปรไฟล์, sync followers (Verified OA), ค้นหา/แท็ก/โน้ต |
 | **สถิติ** | insight ผู้ติดตาม/ข้อความ/demographic, โควตา + consumption, snapshot รายวัน + กราฟ 30 วัน |
 | **ระบบ** | audit log ทุก action, จัดการผู้ดูแล (owner/admin/viewer) |
+| **Gemini AI ตอบอัตโนมัติ** | ตอบคำถามอิสระด้วย Gemini เฉพาะ user กลุ่มที่ current rich menu ตรงชื่อที่กำหนด (default "แล้วพบกัน") — ปิดโดย default จนกว่าจะตั้ง `GEMINI_API_KEY` |
 
 ---
 
@@ -59,6 +60,9 @@ npm install
 | `CRON_SECRET` | สุ่มมายาว ๆ — กัน `/api/cron/*` โดนเรียกจากคนนอก (ตั้งใน Vercel Cron Job ด้วยจะได้ auth อัตโนมัติ) |
 | `ENFORCE_RICHMENU_ID` | *(ตัวเลือก)* เปิด auto re-assign เมนูที่หลุด กลับเป็นเมนูนี้ — เว้นว่าง = ปิด |
 | `ENFORCE_EXCLUDE_MENUS` | *(ตัวเลือก)* richMenuId ที่ยกเว้นไม่บังคับ คั่นด้วย `,` |
+| `GEMINI_API_KEY` | *(ตัวเลือก)* เปิดฟีเจอร์ Gemini ตอบคำถามอิสระ — สมัครฟรีที่ [aistudio.google.com/apikey](https://aistudio.google.com/apikey), เว้นว่าง = ปิด |
+| `GEMINI_MODEL` | *(ตัวเลือก)* default `gemini-2.5-flash` |
+| `GEMINI_TRIGGER_MENU_NAME` | *(ตัวเลือก)* ชื่อ rich menu ที่จะให้ Gemini ตอบแทน auto-reply ปกติ — default `แล้วพบกัน` |
 
 Vercel จะ build frontend (Vite) + deploy `api/index.py` เป็น Python function อัตโนมัติ
 (`vercel.json` จัด rewrite `/api/*` → FastAPI, ที่เหลือ → SPA)
@@ -122,6 +126,24 @@ line-console/
    ```
 
 > **หมายเหตุเรื่อง 114 คนที่เมนูหลุดกลับไปเป็น "สมัครติว"** (พบตอนตรวจระบบ) — ตรวจโค้ดใน `api/index.py` (webhook/postback handler) และ `richmenu-webapp/gas/Code.gs` แล้ว **ไม่พบ logic อัตโนมัติใดที่สั่งผูกเมนูนี้** (Code.gs เป็น read-only เช็คสถานะอย่างเดียว, ฝั่ง index.py การผูกเมนูเกิดจาก action ของแอดมินผ่าน `/api/richmenu/assign` เท่านั้น) แปลว่าการเปลี่ยนกลับน่าจะมาจาก (ก) มีคนกดผูกเมนูนี้เองผ่านหน้าเว็บ/สคริปต์อื่นในช่วงเวลานั้น หรือ (ข) มี automation ภายนอกระบบนี้ (เช่น Google Form/Zapier/Make ที่ผูกกับฟอร์มสมัครติว) — แนะนำเช็ค log ในหน้า "ปฏิบัติการล่าสุด" (`/`) หรือตาราง `operations`/`richmenu_history` (หลังใช้งานสักพัก) เพื่อดูว่าเกิดจาก actor ไหน ถ้ายืนยันว่าอยากให้ทุกคนเป็นเมนู register เสมอ ให้เปิด `/api/cron/enforce-richmenu` ตามข้อ 4
+
+## Gemini AI ตอบคำถามอิสระ (เฉพาะกลุ่มเมนู)
+
+**ทำอะไร** — เมื่อ user ทักข้อความ (text) เข้ามา ถ้า current rich menu **สด ๆ ตอนนั้น** (เช็คผ่าน LINE API ทุกครั้ง ไม่ใช้ค่า cache ใน DB) ตรงกับชื่อเมนูใน `GEMINI_TRIGGER_MENU_NAME` (default **"แล้วพบกัน"**) ระบบจะส่งคำถามไปให้ Gemini ตอบแบบอิสระ (ไม่มีข้อมูล/context เฉพาะ ตอบทั่วไปเป็นภาษาไทย) แล้วตอบกลับผ่าน LINE — **ทำงานแทน auto-reply/postback ปกติสำหรับ user กลุ่มนี้เท่านั้น** user กลุ่มอื่นไม่ถูกกระทบ ยังใช้ auto-reply/automation เดิมตามปกติ
+
+**ปิดโดย default** — ถ้าไม่ตั้ง `GEMINI_API_KEY` endpoint นี้จะไม่ทำงานเลย (no-op) ไม่กระทบอะไรกับระบบเดิม
+
+**วิธีเปิดใช้:**
+1. สมัคร API key ฟรีที่ [aistudio.google.com/apikey](https://aistudio.google.com/apikey) (ล็อกอินด้วย Google account)
+2. ตั้ง `GEMINI_API_KEY` ใน Vercel env vars → redeploy
+3. (ตัวเลือก) เปลี่ยน `GEMINI_TRIGGER_MENU_NAME` ถ้าอยากใช้เมนูอื่น หรือ `GEMINI_MODEL` ถ้าอยากใช้รุ่นอื่น (เช่น `gemini-2.5-pro` แม่นกว่าแต่ช้า/แพงกว่า)
+
+**ข้อจำกัด/ที่ควรรู้:**
+- จำกัด **6 คำถาม/นาที/คน** กันสแปม/ต้นทุนบานปลาย (แก้ได้ในโค้ด `_handle_gemini_replies`)
+- ถ้า Gemini ตอบไม่ได้/error/timeout → **เงียบไว้ ไม่ตอบอะไรเลย** (ตามที่ตกลงกันไว้ ไม่มี fallback message)
+- ตอบแบบ "อิสระทั่วไป" ล้วน ๆ ไม่มีข้อมูลคอร์ส/ราคา/ตารางเรียนใด ๆ — ถ้าอยากให้ตอบแม่นขึ้นโดยอิงข้อมูลจริง ต้องเพิ่ม context ใน system prompt ที่ `_gemini_answer()` ทีหลัง
+- Google AI Studio free tier มี rate limit ของตัวเอง (เปลี่ยนแปลงได้ตามนโยบาย Google) ถ้าใช้เยอะควรดู [ai.google.dev/pricing](https://ai.google.dev/pricing) ประกอบ
+- แชทที่ Gemini ตอบจะถูกบันทึกลงตาราง `messages` (by = `gemini`) เหมือนข้อความอื่น ดูย้อนหลังได้ในหน้า "กล่องข้อความ"
 
 ## หมายเหตุ
 
