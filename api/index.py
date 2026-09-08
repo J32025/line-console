@@ -660,7 +660,7 @@ def _pick_rule(event: dict, rules: list):
     return None
 
 
-async def _gemini_answer(question: str) -> str | None:
+async def _gemini_answer(question: str, temperature: float = 0.7) -> str | None:
     """เรียก Gemini API ตอบคำถามอิสระ — คืน None ถ้า error/ไม่ได้ตั้ง key (เงียบไว้ ไม่ตอบอะไร)"""
     if not GEMINI_API_KEY or not question.strip():
         return None
@@ -672,7 +672,10 @@ async def _gemini_answer(question: str) -> str | None:
             "text": "คุณเป็นผู้ช่วยตอบคำถามทั่วไปให้สมาชิกทางไลน์ ตอบเป็นภาษาไทย "
                     "กระชับ สุภาพ เป็นกันเอง ไม่เกิน 3-4 ประโยค ถ้าไม่ทราบคำตอบให้บอกตรง ๆ ว่าไม่ทราบ"
         }]},
-        "generationConfig": {"maxOutputTokens": 500},
+        "generationConfig": {
+            "maxOutputTokens": 500,
+            "temperature": max(0.0, min(2.0, temperature if temperature is not None else 0.7)),
+        },
     }
     try:
         async with httpx.AsyncClient(timeout=20) as c:
@@ -691,9 +694,9 @@ async def _gemini_answer(question: str) -> str | None:
 
 
 async def _handle_gemini_replies(events: list) -> set:
-    """ตอบคำถามอิสระด้วย Gemini เฉพาะ user ที่ current rich menu (เช็คสด) ตรงชื่อ
-    GEMINI_TRIGGER_MENU_NAME — ปิดอยู่ถ้าไม่ได้ตั้ง GEMINI_API_KEY (no-op ปลอดภัย)"""
-    if not GEMINI_API_KEY or not GEMINI_TRIGGER_MENU_NAME:
+    """ตอบคำถามอิสระด้วย Gemini เฉพาะ user ที่ current rich menu (เช็คสด) เป็นเมนูที่เปิด
+    gemini_enabled ไว้ (ตั้งได้ต่อเมนูจากหน้าเว็บ) — ปิดอยู่ถ้าไม่ได้ตั้ง GEMINI_API_KEY (no-op ปลอดภัย)"""
+    if not GEMINI_API_KEY:
         return set()
     text_events = [e for e in events if e.get("type") == "message"
                    and e.get("message", {}).get("type") == "text"
@@ -701,14 +704,30 @@ async def _handle_gemini_replies(events: list) -> set:
     if not text_events:
         return set()
 
+    # menu_temp: {rich_menu_id: temperature} เฉพาะเมนูที่เปิด gemini_enabled ไว้
+    menu_temp: dict[str, float] = {}
     try:
         menus = await supa.select("rich_menus", params={
-            "select": "rich_menu_id", "name": f"eq.{GEMINI_TRIGGER_MENU_NAME}"})
-        target_ids = {m["rich_menu_id"] for m in menus}
+            "select": "rich_menu_id,gemini_temperature", "gemini_enabled": "eq.true"})
+        for m in menus:
+            try:
+                menu_temp[m["rich_menu_id"]] = float(m.get("gemini_temperature") or 0.7)
+            except (TypeError, ValueError):
+                menu_temp[m["rich_menu_id"]] = 0.7
     except Exception as e:
         print("gemini: read rich_menus error:", e)
-        target_ids = set()
-    if not target_ids:
+
+    # backward-compat: เมนูที่ชื่อตรง GEMINI_TRIGGER_MENU_NAME (ตั้งค่าเก่าแบบ env var) ก็ยังนับด้วย
+    if GEMINI_TRIGGER_MENU_NAME:
+        try:
+            legacy = await supa.select("rich_menus", params={
+                "select": "rich_menu_id", "name": f"eq.{GEMINI_TRIGGER_MENU_NAME}"})
+            for m in legacy:
+                menu_temp.setdefault(m["rich_menu_id"], 0.7)
+        except Exception:
+            pass
+
+    if not menu_temp:
         return set()
 
     handled: set = set()
@@ -723,10 +742,10 @@ async def _handle_gemini_replies(events: list) -> set:
             rid = await line.user_richmenu_get(uid)
         except Exception:
             rid = None
-        if rid not in target_ids:
+        if rid not in menu_temp:
             continue
         question = e["message"].get("text") or ""
-        answer = await _gemini_answer(question)
+        answer = await _gemini_answer(question, menu_temp[rid])
         if not answer:
             continue  # Gemini ตอบไม่ได้/error -> เงียบไว้ก่อน ไม่ตอบอะไร (ตามที่ตกลง)
         code, _ = await line.reply(e["replyToken"], [{"type": "text", "text": answer[:4900]}])
@@ -734,7 +753,8 @@ async def _handle_gemini_replies(events: list) -> set:
             handled.add(uid)
             out_msgs.append({"line_user_id": uid, "direction": "out", "by": "gemini",
                              "msg_type": "text", "text": answer,
-                             "payload": {"question": question, "model": GEMINI_MODEL}})
+                             "payload": {"question": question, "model": GEMINI_MODEL,
+                                         "temperature": menu_temp[rid]}})
     if out_msgs:
         try:
             await supa.insert("messages", out_msgs)
@@ -888,7 +908,40 @@ async def richmenus(admin=Depends(current_admin)):
         } for m in menus], on_conflict="rich_menu_id")
     except Exception:
         pass
+    # แนบค่า gemini_enabled/gemini_temperature ของแต่ละเมนู (ตั้งจากหน้าเว็บ) เข้าไปในผลลัพธ์
+    try:
+        gsettings = await supa.select("rich_menus", params={
+            "select": "rich_menu_id,gemini_enabled,gemini_temperature"})
+        gmap = {g["rich_menu_id"]: g for g in gsettings}
+    except Exception:
+        gmap = {}
+    for m in menus:
+        g = gmap.get(m["richMenuId"]) or {}
+        m["geminiEnabled"] = bool(g.get("gemini_enabled"))
+        try:
+            m["geminiTemperature"] = float(g.get("gemini_temperature") or 0.7)
+        except (TypeError, ValueError):
+            m["geminiTemperature"] = 0.7
     return {"menus": menus, "defaultRichMenuId": default_id, "aliases": aliases}
+
+
+@app.post("/api/richmenu/{rid}/gemini")
+async def set_menu_gemini(rid: str, req: Request, admin=Depends(current_admin)):
+    """เปิด/ปิด Gemini + ตั้งความเข้มข้นของคำตอบ (temperature) แยกตามเมนู"""
+    b = await req.json()
+    enabled = bool(b.get("enabled"))
+    try:
+        temperature = float(b.get("temperature", 0.7))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "temperature ต้องเป็นตัวเลข")
+    temperature = max(0.0, min(2.0, temperature))
+    await supa.update("rich_menus",
+                       {"gemini_enabled": enabled, "gemini_temperature": temperature},
+                       params={"rich_menu_id": f"eq.{rid}"})
+    await supa.log_operation(admin["userId"], "richmenu.gemini_settings",
+                             {"richMenuId": rid, "enabled": enabled, "temperature": temperature},
+                             {"ok": True})
+    return {"ok": True, "richMenuId": rid, "enabled": enabled, "temperature": temperature}
 
 
 @app.get("/api/richmenu/usage")

@@ -16,6 +16,8 @@ export default function RichMenus() {
   const [target, setTarget] = useState('all')
   const [userIds, setUserIds] = useState('')
   const [setDefault, setSetDefault] = useState(true)
+  const [geminiModal, setGeminiModal] = useState(null) // { rid, name, enabled, temperature }
+  const [geminiBusy, setGeminiBusy] = useState(false)
 
   const load = () => {
     api.richmenus().then(setData).catch((e) => t.err(e.message))
@@ -76,6 +78,19 @@ export default function RichMenus() {
     } catch (err) { t.err(err.message) } finally { task.done(); setBusy(false) }
   }
 
+  const saveGemini = async () => {
+    if (!geminiModal) return
+    setGeminiBusy(true)
+    try {
+      await api.setMenuGemini(geminiModal.rid, {
+        enabled: geminiModal.enabled, temperature: geminiModal.temperature,
+      })
+      t.ok('บันทึกการตั้งค่า Gemini แล้ว')
+      setGeminiModal(null)
+      load()
+    } catch (e) { t.err(e.message) } finally { setGeminiBusy(false) }
+  }
+
   return (
     <div>
       <h1>Rich Menu</h1>
@@ -103,6 +118,15 @@ export default function RichMenus() {
                 <td className="row">
                   <button className="xs" onClick={() => api.setDefaultMenu(m.richMenuId).then(() => { t.ok('ตั้ง default'); load() }).catch((e) => t.err(e.message))}>
                     ตั้ง default
+                  </button>
+                  <button className={`xs ${m.geminiEnabled ? 'primary' : ''}`}
+                          title="ตั้งค่า Gemini AI สำหรับเมนูนี้"
+                          onClick={() => setGeminiModal({
+                            rid: m.richMenuId, name: m.name,
+                            enabled: !!m.geminiEnabled,
+                            temperature: typeof m.geminiTemperature === 'number' ? m.geminiTemperature : 0.7,
+                          })}>
+                    🤖 Gemini{m.geminiEnabled ? ' ✓' : ''}
                   </button>
                   <button className="xs danger" onClick={() => confirm('ลบเมนูนี้?') && api.deleteMenu(m.richMenuId).then(() => { t.ok('ลบแล้ว'); load() }).catch((e) => t.err(e.message))}>
                     ลบ
@@ -163,6 +187,63 @@ export default function RichMenus() {
       </section>
 
       {building && <RichMenuBuilder onCancel={() => setBuilding(false)} onDone={() => { setBuilding(false); load() }} />}
+
+      {geminiModal && (
+        <div className="modal-bg" onClick={() => setGeminiModal(null)}>
+          <div className="modal" style={{ maxWidth: 480 }} onClick={(e) => e.stopPropagation()}>
+            <div className="row spread">
+              <h3>🤖 ตั้งค่า Gemini — {geminiModal.name}</h3>
+              <button className="xs" onClick={() => setGeminiModal(null)}>✕</button>
+            </div>
+
+            <label>
+              <input type="checkbox" checked={geminiModal.enabled}
+                     onChange={(e) => setGeminiModal({ ...geminiModal, enabled: e.target.checked })} />
+              {' '}เปิดให้ Gemini ตอบข้อความอัตโนมัติ เมื่อ user ที่ถือเมนูนี้ทักเข้ามา
+            </label>
+
+            <div style={{ marginTop: 14, opacity: geminiModal.enabled ? 1 : 0.5 }}>
+              <label className="sm">ความเข้มข้นของคำตอบ (ความคิดสร้างสรรค์)</label>
+              <div className="row" style={{ alignItems: 'center', gap: 10 }}>
+                <input type="range" min={0} max={2} step={0.1} style={{ flex: 1 }}
+                       disabled={!geminiModal.enabled}
+                       value={geminiModal.temperature}
+                       onChange={(e) => setGeminiModal({ ...geminiModal, temperature: parseFloat(e.target.value) })} />
+                <b className="mono" style={{ minWidth: 36, textAlign: 'right' }}>{geminiModal.temperature.toFixed(1)}</b>
+              </div>
+              <div className="row spread muted xs" style={{ marginTop: 2 }}>
+                <span>0.0 นิ่ง/แม่นยำ</span>
+                <span>1.0 ปานกลาง</span>
+                <span>2.0 สร้างสรรค์มาก</span>
+              </div>
+              <div className="row wrap" style={{ marginTop: 8 }}>
+                {[
+                  { v: 0.2, label: 'นิ่งมาก' },
+                  { v: 0.7, label: 'ปานกลาง (แนะนำ)' },
+                  { v: 1.3, label: 'สร้างสรรค์' },
+                ].map((p) => (
+                  <button key={p.v} type="button" className="xs"
+                          disabled={!geminiModal.enabled}
+                          onClick={() => setGeminiModal({ ...geminiModal, temperature: p.v })}>
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <p className="muted xs" style={{ marginTop: 12 }}>
+              ค่ายิ่งสูง คำตอบจะยิ่งหลากหลาย/มีสไตล์มากขึ้น แต่มีโอกาสหลุดประเด็นมากขึ้นด้วย — ค่ายิ่งต่ำ คำตอบจะนิ่งและตรงไปตรงมามากขึ้น
+            </p>
+
+            <div className="row spread" style={{ marginTop: 12 }}>
+              <button onClick={() => setGeminiModal(null)}>ยกเลิก</button>
+              <button className="primary" disabled={geminiBusy} onClick={saveGemini}>
+                {geminiBusy ? 'กำลังบันทึก…' : 'บันทึก'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

@@ -45,6 +45,7 @@ export const api = {
   assignMenu: (payload) => req('POST', '/richmenu/assign', payload),
   syncMenu: (payload) => req('POST', '/richmenu/sync', payload),
   richmenuHistory: (qs = {}) => req('GET', '/richmenu/history?' + new URLSearchParams(qs)),
+  setMenuGemini: (rid, payload) => req('POST', `/richmenu/${rid}/gemini`, payload),
 
   users: (qs = {}) => req('GET', '/users?' + new URLSearchParams(qs)),
   userDetail: (uid) => req('GET', `/users/${uid}`),

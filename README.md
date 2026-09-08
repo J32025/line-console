@@ -127,23 +127,33 @@ line-console/
 
 > **หมายเหตุเรื่อง 114 คนที่เมนูหลุดกลับไปเป็น "สมัครติว"** (พบตอนตรวจระบบ) — ตรวจโค้ดใน `api/index.py` (webhook/postback handler) และ `richmenu-webapp/gas/Code.gs` แล้ว **ไม่พบ logic อัตโนมัติใดที่สั่งผูกเมนูนี้** (Code.gs เป็น read-only เช็คสถานะอย่างเดียว, ฝั่ง index.py การผูกเมนูเกิดจาก action ของแอดมินผ่าน `/api/richmenu/assign` เท่านั้น) แปลว่าการเปลี่ยนกลับน่าจะมาจาก (ก) มีคนกดผูกเมนูนี้เองผ่านหน้าเว็บ/สคริปต์อื่นในช่วงเวลานั้น หรือ (ข) มี automation ภายนอกระบบนี้ (เช่น Google Form/Zapier/Make ที่ผูกกับฟอร์มสมัครติว) — แนะนำเช็ค log ในหน้า "ปฏิบัติการล่าสุด" (`/`) หรือตาราง `operations`/`richmenu_history` (หลังใช้งานสักพัก) เพื่อดูว่าเกิดจาก actor ไหน ถ้ายืนยันว่าอยากให้ทุกคนเป็นเมนู register เสมอ ให้เปิด `/api/cron/enforce-richmenu` ตามข้อ 4
 
-## Gemini AI ตอบคำถามอิสระ (เฉพาะกลุ่มเมนู)
+## Gemini AI ตอบคำถามอิสระ (เปิด/ปิด + ปรับความเข้มข้นได้ต่อเมนู)
 
-**ทำอะไร** — เมื่อ user ทักข้อความ (text) เข้ามา ถ้า current rich menu **สด ๆ ตอนนั้น** (เช็คผ่าน LINE API ทุกครั้ง ไม่ใช้ค่า cache ใน DB) ตรงกับชื่อเมนูใน `GEMINI_TRIGGER_MENU_NAME` (default **"แล้วพบกัน"**) ระบบจะส่งคำถามไปให้ Gemini ตอบแบบอิสระ (ไม่มีข้อมูล/context เฉพาะ ตอบทั่วไปเป็นภาษาไทย) แล้วตอบกลับผ่าน LINE — **ทำงานแทน auto-reply/postback ปกติสำหรับ user กลุ่มนี้เท่านั้น** user กลุ่มอื่นไม่ถูกกระทบ ยังใช้ auto-reply/automation เดิมตามปกติ
+**ทำอะไร** — เมื่อ user ทักข้อความ (text) เข้ามา ถ้า current rich menu **สด ๆ ตอนนั้น** (เช็คผ่าน LINE API ทุกครั้ง ไม่ใช้ค่า cache ใน DB) เป็นเมนูที่**เปิด Gemini ไว้** ระบบจะส่งคำถามไปให้ Gemini ตอบแบบอิสระ (ไม่มีข้อมูล/context เฉพาะ ตอบทั่วไปเป็นภาษาไทย) แล้วตอบกลับผ่าน LINE — **ทำงานแทน auto-reply/postback ปกติสำหรับ user กลุ่มนี้เท่านั้น** user กลุ่มอื่นไม่ถูกกระทบ ยังใช้ auto-reply/automation เดิมตามปกติ
 
 **ปิดโดย default** — ถ้าไม่ตั้ง `GEMINI_API_KEY` endpoint นี้จะไม่ทำงานเลย (no-op) ไม่กระทบอะไรกับระบบเดิม
 
-**วิธีเปิดใช้:**
+**เปิด/ปิด + ปรับความเข้มข้น ต่อเมนู ได้จากหน้าเว็บ** — ไปที่หน้า **Rich Menu** → กดปุ่ม **🤖 Gemini** ที่แถวของเมนูนั้น จะมี modal ให้:
+- ติ๊กเปิด/ปิด Gemini สำหรับเมนูนั้นโดยเฉพาะ (ตั้งได้หลายเมนูพร้อมกัน ไม่จำกัดแค่เมนูเดียว)
+- ปรับ **"ความเข้มข้นของคำตอบ"** (= `temperature` ของโมเดล) ด้วย slider 0.0–2.0 — ยิ่งสูงคำตอบยิ่งหลากหลาย/สร้างสรรค์แต่เสี่ยงหลุดประเด็นมากขึ้น ยิ่งต่ำคำตอบยิ่งนิ่ง/ตรงไปตรงมา (ค่าแนะนำ 0.7)
+
+ค่าที่ตั้งเก็บอยู่ในตาราง `rich_menus` (คอลัมน์ `gemini_enabled`, `gemini_temperature`) — ต้องรัน migration `0004_gemini_richmenu_settings.sql` ใน Supabase ก่อนถึงจะใช้ปุ่มนี้ได้
+
+**วิธีเปิดใช้ครั้งแรก:**
 1. สมัคร API key ฟรีที่ [aistudio.google.com/apikey](https://aistudio.google.com/apikey) (ล็อกอินด้วย Google account)
 2. ตั้ง `GEMINI_API_KEY` ใน Vercel env vars → redeploy
-3. (ตัวเลือก) เปลี่ยน `GEMINI_TRIGGER_MENU_NAME` ถ้าอยากใช้เมนูอื่น หรือ `GEMINI_MODEL` ถ้าอยากใช้รุ่นอื่น (เช่น `gemini-2.5-pro` แม่นกว่าแต่ช้า/แพงกว่า)
+3. รัน migration `0004_gemini_richmenu_settings.sql` ใน Supabase SQL Editor
+4. ไปหน้า Rich Menu → กด 🤖 Gemini ที่เมนูที่ต้องการ → ติ๊กเปิด → เลือกความเข้มข้น → บันทึก
+5. (ตัวเลือก) `GEMINI_MODEL` ปรับรุ่นโมเดลได้ผ่าน env var (default `gemini-3.6-flash` — ตัว `gemini-2.5-flash` เดิมถูก Google ยกเลิกไปแล้ว)
+
+ยังรองรับค่าตั้งค่าแบบเก่า (`GEMINI_TRIGGER_MENU_NAME` env var, default "แล้วพบกัน") ไว้เป็น fallback ด้วย เผื่อยังไม่ได้ตั้งอะไรผ่านหน้าเว็บ — ใช้ temperature 0.7 คงที่
 
 **ข้อจำกัด/ที่ควรรู้:**
 - จำกัด **6 คำถาม/นาที/คน** กันสแปม/ต้นทุนบานปลาย (แก้ได้ในโค้ด `_handle_gemini_replies`)
 - ถ้า Gemini ตอบไม่ได้/error/timeout → **เงียบไว้ ไม่ตอบอะไรเลย** (ตามที่ตกลงกันไว้ ไม่มี fallback message)
 - ตอบแบบ "อิสระทั่วไป" ล้วน ๆ ไม่มีข้อมูลคอร์ส/ราคา/ตารางเรียนใด ๆ — ถ้าอยากให้ตอบแม่นขึ้นโดยอิงข้อมูลจริง ต้องเพิ่ม context ใน system prompt ที่ `_gemini_answer()` ทีหลัง
 - Google AI Studio free tier มี rate limit ของตัวเอง (เปลี่ยนแปลงได้ตามนโยบาย Google) ถ้าใช้เยอะควรดู [ai.google.dev/pricing](https://ai.google.dev/pricing) ประกอบ
-- แชทที่ Gemini ตอบจะถูกบันทึกลงตาราง `messages` (by = `gemini`) เหมือนข้อความอื่น ดูย้อนหลังได้ในหน้า "กล่องข้อความ"
+- แชทที่ Gemini ตอบจะถูกบันทึกลงตาราง `messages` (by = `gemini`, `payload.temperature` = ค่าที่ใช้ตอนนั้น) เหมือนข้อความอื่น ดูย้อนหลังได้ในหน้า "กล่องข้อความ"
 
 ## หมายเหตุ
 
