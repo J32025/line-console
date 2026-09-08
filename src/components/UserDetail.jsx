@@ -85,6 +85,11 @@ export default function UserDetail({ uid, onClose, onSaved }) {
                 <tr><th>ภาษา</th><td>{prof?.language || u.language || '–'}</td></tr>
                 <tr><th>Rich Menu (DB)</th><td>{u.rich_menu_name || u.rich_menu_status || '–'}</td></tr>
                 <tr><th>Rich Menu (สด)</th><td className="mono xs">{live.richMenuId || (live.error ? `err: ${live.error}` : '– ไม่มี')}</td></tr>
+                <tr><th></th><td>
+                  <a className="sm" href={`/richmenus/history?userId=${u.line_user_id}`} target="_blank" rel="noreferrer">
+                    ดูประวัติการเปลี่ยน Rich Menu ↗
+                  </a>
+                </td></tr>
                 <tr><th>ที่มา</th><td>{u.source}</td></tr>
                 <tr><th>follow / block</th><td>{u.follow_count ?? 0} ครั้ง / บล็อก {u.block_count ?? 0} ครั้ง</td></tr>
                 <tr><th>เพิ่มเพื่อนครั้งแรก</th><td className="muted sm">{fmt(u.first_followed_at)}</td></tr>

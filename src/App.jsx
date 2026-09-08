@@ -6,6 +6,7 @@ import { ToastProvider } from './lib/ui.jsx'
 import { ProgressProvider, TopLoader } from './lib/progress.jsx'
 import Dashboard from './pages/Dashboard.jsx'
 import RichMenus from './pages/RichMenus.jsx'
+import RichMenuHistory from './pages/RichMenuHistory.jsx'
 import Messaging from './pages/Messaging.jsx'
 import Inbox from './pages/Inbox.jsx'
 import Slips from './pages/Slips.jsx'
@@ -26,6 +27,7 @@ const NAV = [
   ['/slips', 'สลิปโอนเงิน', '🧾'],
   ['/messaging', 'ส่งข้อความ', '✈️'],
   ['/richmenus', 'Rich Menu', '📱'],
+  ['/richmenus/history', 'ประวัติ Rich Menu', '🕓'],
   ['/auto-reply', 'ตอบอัตโนมัติ', '🤖'],
   ['/postbacks', 'Postback', '🔘'],
   ['/automations', 'Automation', '⚡'],
@@ -94,7 +96,7 @@ export default function App() {
             <div className="brand">LINE Console</div>
             <nav>
               {NAV.map(([to, label, icon]) => (
-                <NavLink key={to} to={to} end={to === '/'}>
+                <NavLink key={to} to={to} end={to === '/' || to === '/richmenus'}>
                   <span className="nav-ico">{icon}</span>{label}
                 </NavLink>
               ))}
@@ -113,6 +115,7 @@ export default function App() {
             <Routes>
               <Route path="/" element={<Dashboard />} />
               <Route path="/richmenus" element={<RichMenus />} />
+              <Route path="/richmenus/history" element={<RichMenuHistory />} />
               <Route path="/messaging" element={<Messaging />} />
               <Route path="/inbox" element={<Inbox />} />
               <Route path="/slips" element={<Slips />} />
@@ -134,7 +137,7 @@ export default function App() {
         {/* bottom nav (mobile) */}
         <nav className="bnav">
           {NAV.slice(0, 5).map(([to, label, icon]) => (
-            <NavLink key={to} to={to} end={to === '/'}>
+            <NavLink key={to} to={to} end={to === '/' || to === '/richmenus'}>
               <span>{icon}</span><small>{label}</small>
             </NavLink>
           ))}

@@ -23,6 +23,12 @@ LINE_LOGIN_CHANNEL_TOKEN = os.environ.get("LINE_LOGIN_CHANNEL_TOKEN", "").strip(
 # EasySlip API token (ตรวจสลิปอัตโนมัติ) — ว่าง = ไม่ตรวจ OCR แค่แจ้งเตือน
 EASYSLIP_TOKEN = os.environ.get("EASYSLIP_TOKEN", "").strip()
 
+# (ตัวเลือก) เปิดใช้ cron enforce-richmenu: บังคับ user ที่เมนูหลุด/ไม่ตรง ให้กลับไปเป็นเมนูนี้
+# เว้นว่าง = ปิดใช้งาน endpoint นี้ (ไม่ทำอะไร)
+ENFORCE_RICHMENU_ID = os.environ.get("ENFORCE_RICHMENU_ID", "").strip()
+# richMenuId ที่ยกเว้นไม่ถูกบังคับ (คั่นด้วย ,) เช่นเมนูแคมเปญที่ตั้งใจให้ user อยู่ต่อ
+ENFORCE_EXCLUDE_MENUS = [m.strip() for m in os.environ.get("ENFORCE_EXCLUDE_MENUS", "").split(",") if m.strip()]
+
 # domain ของเว็บนี้ (สำหรับแสดง endpoint แนะนำ) — auto จาก VERCEL_URL
 APP_URL = (os.environ.get("APP_URL")
            or ("https://" + os.environ["VERCEL_PROJECT_PRODUCTION_URL"] if os.environ.get("VERCEL_PROJECT_PRODUCTION_URL") else "")

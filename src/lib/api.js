@@ -44,6 +44,7 @@ export const api = {
   deleteMenu: (rid) => req('DELETE', `/richmenu/${rid}`),
   assignMenu: (payload) => req('POST', '/richmenu/assign', payload),
   syncMenu: (payload) => req('POST', '/richmenu/sync', payload),
+  richmenuHistory: (qs = {}) => req('GET', '/richmenu/history?' + new URLSearchParams(qs)),
 
   users: (qs = {}) => req('GET', '/users?' + new URLSearchParams(qs)),
   userDetail: (uid) => req('GET', `/users/${uid}`),

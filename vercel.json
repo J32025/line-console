@@ -10,5 +10,8 @@
     { "source": "/api/(.*)", "destination": "/api/index" },
     { "source": "/r/(.*)", "destination": "/api/index" },
     { "source": "/(.*)", "destination": "/index.html" }
+  ],
+  "crons": [
+    { "path": "/api/cron/sync-richmenu?limit=1000", "schedule": "0 3 * * *" }
   ]
 }

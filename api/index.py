@@ -23,7 +23,8 @@ from _lib.auth import current_admin
 from _lib.config import (LINE_CHANNEL_SECRET, CRON_SECRET, ALERT_USER_IDS,
                          LINE_CHANNEL_ACCESS_TOKEN, LIFF_CHANNEL_ID,
                          SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY,
-                         LINE_LOGIN_CHANNEL_TOKEN, APP_URL, EASYSLIP_TOKEN)
+                         LINE_LOGIN_CHANNEL_TOKEN, APP_URL, EASYSLIP_TOKEN,
+                         ENFORCE_RICHMENU_ID, ENFORCE_EXCLUDE_MENUS)
 import httpx
 
 app = FastAPI(title="LINE Console API")
@@ -860,6 +861,53 @@ async def delete_alias(alias_id: str, admin=Depends(current_admin)):
     return {"ok": await line.richmenu_alias_delete(alias_id)}
 
 
+def _cron_authorized(request: Request) -> bool:
+    """รองรับทั้ง ?key=, header x-cron-key และ Authorization: Bearer <CRON_SECRET>
+    (Vercel Cron จะแนบ Authorization: Bearer <CRON_SECRET> ให้อัตโนมัติถ้าตั้ง env CRON_SECRET ไว้)"""
+    if not CRON_SECRET:
+        return True
+    key = request.query_params.get("key") or request.headers.get("x-cron-key", "")
+    auth = request.headers.get("authorization", "")
+    return key == CRON_SECRET or auth == f"Bearer {CRON_SECRET}"
+
+
+async def _fetch_current_menu_map(uids: list[str]) -> dict:
+    """ดึงค่าปัจจุบันใน DB ของ uids ก่อนเขียนทับ ใช้เทียบหา diff สำหรับ richmenu_history"""
+    out: dict = {}
+    for i in range(0, len(uids), 200):
+        chunk = uids[i:i + 200]
+        rows = await supa.select("line_users", params={
+            "select": "line_user_id,current_rich_menu_id,rich_menu_status",
+            "line_user_id": f"in.({','.join(chunk)})",
+        })
+        for r in rows:
+            out[r["line_user_id"]] = r
+    return out
+
+
+async def _log_richmenu_diffs(old_map: dict, new_rows: list[dict], source: str, actor: str | None):
+    """เทียบ old vs new แล้วบันทึกเฉพาะแถวที่เปลี่ยนจริงลง richmenu_history"""
+    history_rows = []
+    for row in new_rows:
+        uid = row["line_user_id"]
+        old = old_map.get(uid, {})
+        old_rid, old_status = old.get("current_rich_menu_id"), old.get("rich_menu_status")
+        new_rid, new_status = row.get("current_rich_menu_id"), row.get("rich_menu_status")
+        if old_rid != new_rid or old_status != new_status:
+            history_rows.append({
+                "line_user_id": uid, "old_rich_menu_id": old_rid, "new_rich_menu_id": new_rid,
+                "old_status": old_status, "new_status": new_status,
+                "source": source, "actor": actor,
+            })
+    if history_rows:
+        try:
+            for i in range(0, len(history_rows), 500):
+                await supa.insert("richmenu_history", history_rows[i:i + 500])
+        except Exception as e:
+            print("richmenu_history insert error:", e)
+    return len(history_rows)
+
+
 @app.post("/api/richmenu/assign")
 async def assign(req: Request, admin=Depends(current_admin)):
     """bulk assign: mode = 'link' (default/link/unlink) + target = 'all'|'none'|'list'|'tag'"""
@@ -912,6 +960,7 @@ async def assign(req: Request, admin=Depends(current_admin)):
                     results["errors"].append({"userId": uid, "code": code})
             return uid, ok
 
+    old_map = await _fetch_current_menu_map(uids)
     done = await asyncio.gather(*[one(u) for u in uids])
 
     # อัปเดต DB
@@ -927,15 +976,18 @@ async def assign(req: Request, admin=Depends(current_admin)):
     except Exception as e:
         results["db_error"] = str(e)
 
+    await _log_richmenu_diffs(old_map, patch_rows, mode, admin["userId"])
+
     await supa.log_operation(admin["userId"], f"richmenu.{mode}",
                              {"richMenuId": rid, "target": target, "count": len(uids)}, results,
                              "ok" if results["fail"] == 0 else "partial")
     return {"total": len(uids), **results}
 
 
-async def _sync_richmenu_for(uids: list[str]) -> dict:
+async def _sync_richmenu_for(uids: list[str], source: str = "sync", actor: str | None = None) -> dict:
     if not uids:
         return {"total": 0, "assigned": 0, "none": 0, "error": 0}
+    old_map = await _fetch_current_menu_map(uids)
     menus = {m["richMenuId"]: m.get("name") for m in await line.richmenu_list()}
     sem = asyncio.Semaphore(10)
     summary = {"assigned": 0, "none": 0, "error": 0}
@@ -961,6 +1013,7 @@ async def _sync_richmenu_for(uids: list[str]) -> dict:
             await supa.upsert("line_users", patch[i:i + 500], on_conflict="line_user_id")
     except Exception as e:
         summary["db_error"] = str(e)
+    summary["history_logged"] = await _log_richmenu_diffs(old_map, patch, source, actor)
     return {"total": len(uids), **summary}
 
 
@@ -977,7 +1030,7 @@ async def richmenu_sync(req: Request, admin=Depends(current_admin)):
         uids = [r["line_user_id"] for r in rows]
     if not uids:
         raise HTTPException(400, "ไม่มี user ให้ sync")
-    summary = await _sync_richmenu_for(uids)
+    summary = await _sync_richmenu_for(uids, source="sync", actor=admin["userId"])
     await supa.log_operation(admin["userId"], "richmenu.sync", {"count": len(uids)}, summary)
     return summary
 
@@ -986,10 +1039,8 @@ async def richmenu_sync(req: Request, admin=Depends(current_admin)):
 async def cron_sync_richmenu(request: Request):
     """เรียกโดย scheduler (Supabase pg_cron) — auth ด้วย ?key=CRON_SECRET
     sync แบบ rolling: เอา user ที่ถูกเช็คนานสุดก่อน batch ละ ?limit (default 1500)"""
-    if CRON_SECRET:
-        key = request.query_params.get("key") or request.headers.get("x-cron-key", "")
-        if key != CRON_SECRET:
-            raise HTTPException(403, "bad cron key")
+    if not _cron_authorized(request):
+        raise HTTPException(403, "bad cron key")
     try:
         limit = min(int(request.query_params.get("limit", "1000")), 1000)  # 1 หน้า PostgREST, พอดี < 60s
     except ValueError:
@@ -1001,9 +1052,83 @@ async def cron_sync_richmenu(request: Request):
         "limit": str(limit),
     })
     uids = [r["line_user_id"] for r in rows]
-    summary = await _sync_richmenu_for(uids)
+    summary = await _sync_richmenu_for(uids, source="cron", actor="cron")
     await supa.log_operation("cron", "richmenu.sync.cron", {"limit": limit}, summary)
     return {"ok": True, **summary}
+
+
+@app.get("/api/richmenu/history")
+async def richmenu_history(request: Request, admin=Depends(current_admin)):
+    """ประวัติการเปลี่ยน rich menu — ?userId= กรองรายคน, ?limit=&offset= pagination"""
+    uid = (request.query_params.get("userId") or "").strip()
+    try:
+        limit = min(int(request.query_params.get("limit", "100")), 500)
+        offset = max(int(request.query_params.get("offset", "0")), 0)
+    except ValueError:
+        limit, offset = 100, 0
+    params = {"select": "*", "order": "created_at.desc", "limit": str(limit), "offset": str(offset)}
+    count_params = {}
+    if uid:
+        params["line_user_id"] = f"eq.{uid}"
+        count_params["line_user_id"] = f"eq.{uid}"
+    rows = await supa.select("richmenu_history", params=params)
+    total = await supa.count("richmenu_history", count_params)
+    return {"items": rows, "total": total, "limit": limit, "offset": offset}
+
+
+@app.api_route("/api/cron/enforce-richmenu", methods=["GET", "POST"])
+async def cron_enforce_richmenu(request: Request):
+    """(ปิดโดย default) บังคับ user ที่ current_rich_menu_id ไม่ตรงเป้าหมายให้ผูกกลับเป็น ENFORCE_RICHMENU_ID
+    ยกเว้น user ที่อยู่ในเมนูที่ระบุใน ENFORCE_EXCLUDE_MENUS (เช่นเมนูแคมเปญที่ตั้งใจให้อยู่ต่อ)
+    เปิดใช้งานโดยตั้ง env ENFORCE_RICHMENU_ID — ถ้าไม่ตั้ง endpoint นี้จะไม่ทำอะไรเลย (no-op ปลอดภัย)"""
+    if not _cron_authorized(request):
+        raise HTTPException(403, "bad cron key")
+    if not ENFORCE_RICHMENU_ID:
+        return {"ok": True, "skipped": "ENFORCE_RICHMENU_ID ไม่ได้ตั้งค่า — enforce ปิดอยู่"}
+    try:
+        limit = min(int(request.query_params.get("limit", "500")), 1000)
+    except ValueError:
+        limit = 500
+
+    rows = await supa.select("line_users", params={
+        "select": "line_user_id,current_rich_menu_id", "is_following": "eq.true",
+        "current_rich_menu_id": f"not.eq.{ENFORCE_RICHMENU_ID}",
+        "order": "rich_menu_checked_at.asc.nullsfirst",
+        "limit": str(limit),
+    })
+    uids = [r["line_user_id"] for r in rows
+            if (r.get("current_rich_menu_id") or "") not in ENFORCE_EXCLUDE_MENUS]
+    if not uids:
+        return {"ok": True, "total": 0, "assigned": 0, "fail": 0}
+
+    old_map = await _fetch_current_menu_map(uids)
+    sem = asyncio.Semaphore(8)
+    results = {"ok": 0, "fail": 0}
+
+    async def one(uid):
+        async with sem:
+            ok, code = await line.user_richmenu_link(uid, ENFORCE_RICHMENU_ID)
+            results["ok" if ok else "fail"] += 1
+            return uid, ok
+
+    done = await asyncio.gather(*[one(u) for u in uids])
+    ts = NOW()
+    patch = [{
+        "line_user_id": u,
+        "current_rich_menu_id": ENFORCE_RICHMENU_ID if ok else old_map.get(u, {}).get("current_rich_menu_id"),
+        "rich_menu_status": "assigned" if ok else old_map.get(u, {}).get("rich_menu_status"),
+        "rich_menu_checked_at": ts, "updated_at": ts,
+    } for u, ok in done]
+    try:
+        await supa.upsert("line_users", patch, on_conflict="line_user_id")
+    except Exception as e:
+        results["db_error"] = str(e)
+
+    await _log_richmenu_diffs(old_map, patch, "enforce", "cron")
+    await supa.log_operation("cron", "richmenu.enforce.cron",
+                             {"richMenuId": ENFORCE_RICHMENU_ID, "limit": limit}, results,
+                             "ok" if results["fail"] == 0 else "partial")
+    return {"ok": True, "total": len(uids), "assigned": results["ok"], "fail": results["fail"]}
 
 
 # ============================================================
