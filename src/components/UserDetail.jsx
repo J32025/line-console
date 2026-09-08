@@ -11,17 +11,34 @@ export default function UserDetail({ uid, onClose, onSaved }) {
   const [custom, setCustom] = useState({})
   const [fields, setFields] = useState([])
   const [saving, setSaving] = useState(false)
+  const [menus, setMenus] = useState([])
+  const [selMenu, setSelMenu] = useState('')
+  const [menuBusy, setMenuBusy] = useState(false)
+
+  const loadDetail = () => api.userDetail(uid)
+    .then((r) => {
+      setD(r); setNote(r.user.note || ''); setTags((r.user.tags || []).join(', '))
+      setCustom(r.user.custom || {})
+    })
+    .catch((e) => setErr(e.message))
 
   useEffect(() => {
     setD(null); setErr('')
     api.fields().then((r) => setFields(r.fields)).catch(() => {})
-    api.userDetail(uid)
-      .then((r) => {
-        setD(r); setNote(r.user.note || ''); setTags((r.user.tags || []).join(', '))
-        setCustom(r.user.custom || {})
-      })
-      .catch((e) => setErr(e.message))
+    api.richmenus().then((r) => setMenus(r.menus || [])).catch(() => {})
+    loadDetail()
   }, [uid])
+
+  const assignMenuToUser = async (mode) => {
+    if (mode === 'link' && !selMenu) return t.err('เลือก rich menu ก่อน')
+    setMenuBusy(true)
+    try {
+      await api.assignMenu({ mode, richMenuId: selMenu, target: 'list', userIds: [uid] })
+      t.ok(mode === 'link' ? 'ผูกเมนูแล้ว' : 'ถอดเมนูแล้ว')
+      await loadDetail()
+      onSaved?.()
+    } catch (e) { t.err(e.message) } finally { setMenuBusy(false) }
+  }
 
   const save = async () => {
     setSaving(true)
@@ -85,6 +102,20 @@ export default function UserDetail({ uid, onClose, onSaved }) {
                 <tr><th>ภาษา</th><td>{prof?.language || u.language || '–'}</td></tr>
                 <tr><th>Rich Menu (DB)</th><td>{u.rich_menu_name || u.rich_menu_status || '–'}</td></tr>
                 <tr><th>Rich Menu (สด)</th><td className="mono xs">{live.richMenuId || (live.error ? `err: ${live.error}` : '– ไม่มี')}</td></tr>
+                <tr><th>เปลี่ยนเมนู</th><td>
+                  <div className="row wrap" style={{ gap: 6 }}>
+                    <select value={selMenu} onChange={(e) => setSelMenu(e.target.value)} disabled={menuBusy}>
+                      <option value="">— เลือก rich menu —</option>
+                      {menus.map((m) => (
+                        <option key={m.richMenuId} value={m.richMenuId}>{m.name}</option>
+                      ))}
+                    </select>
+                    <button className="xs primary" disabled={menuBusy || !selMenu} onClick={() => assignMenuToUser('link')}>
+                      {menuBusy && <InlineSpinner />}ผูกเมนูนี้
+                    </button>
+                    <button className="xs" disabled={menuBusy} onClick={() => assignMenuToUser('unlink')}>ถอดเมนู</button>
+                  </div>
+                </td></tr>
                 <tr><th></th><td>
                   <a className="sm" href={`/richmenus/history?userId=${u.line_user_id}`} target="_blank" rel="noreferrer">
                     ดูประวัติการเปลี่ยน Rich Menu ↗
