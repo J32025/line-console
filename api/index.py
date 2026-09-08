@@ -483,7 +483,7 @@ async def _gemini_classify_slip(image_bytes: bytes, mime: str) -> dict | None:
         "generationConfig": {"responseMimeType": "application/json", "temperature": 0.1, "maxOutputTokens": 400},
     }
     try:
-        async with httpx.AsyncClient(timeout=25) as c:
+        async with httpx.AsyncClient(timeout=8) as c:
             r = await c.post(url, json=body)
         j = r.json()
         if r.status_code != 200:
@@ -531,6 +531,7 @@ async def _handle_slips(img_events: list):
 
         # เป็นสลิปไหม — ดูจาก context: เคยคุยเรื่องชำระเงินใน 24 ชม.ล่าสุด (heuristic แบบเดิม)
         pay_ctx = False
+        blob = ""
         try:
             since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=24)).isoformat()
             recent = await supa.select("messages", params={
@@ -541,13 +542,16 @@ async def _handle_slips(img_events: list):
         except Exception:
             blob = ""
 
-        # ให้ Gemini (vision) ช่วยดูรูปจริง ๆ ว่าน่าจะเป็นสลิปไหม — ไม่ต้องพึ่งแค่เดาจากคำในแชท
-        # (เปิดใช้อัตโนมัติถ้าตั้ง GEMINI_API_KEY ไว้แล้ว ไม่ต้องตั้งอะไรเพิ่ม)
-        gclass = await _gemini_classify_slip(content, ctype) if content else None
-        gemini_thinks_slip = bool(gclass and gclass.get("is_slip") and (gclass.get("confidence") or 0) >= 0.55)
+        # ---- gate: รูปนี้เป็น "สลิป" ไหม ----
+        # คุยเรื่องเงินใน 24 ชม. (pay_ctx) เชื่อได้เลย; ถ้าไม่มี -> ถาม Gemini (timeout 8s)
+        gclass = None
+        is_slip = pay_ctx
+        if content and not pay_ctx:
+            gclass = await _gemini_classify_slip(content, ctype)
+            is_slip = bool(gclass and gclass.get("is_slip") and (gclass.get("confidence") or 0) >= 0.55)
 
-        if not (notify_all or pay_ctx or gemini_thinks_slip):
-            continue
+        if not (is_slip or notify_all):
+            continue  # ไม่ใช่สลิป + ไม่ได้ตั้งให้แจ้งทุกรูป -> ข้าม (ไม่สร้าง row)
 
         # ---- เดาหลักสูตรจากบทสนทนา ----
         exp_course = None
@@ -556,65 +560,19 @@ async def _handle_slips(img_events: list):
                 exp_course = c
                 break
 
-        ocr = await _easyslip_verify(content) if content else None
-        if not ocr and gclass and gclass.get("is_slip"):
-            # ไม่มี EasySlip ตั้งไว้ (หรืออ่านไม่ได้) แต่ Gemini เดาว่าเป็นสลิป -> ใช้ผลจาก Gemini แทน
-            # (best-effort เท่านั้น ไม่ auto-verify ให้ผ่าน ต้องรอแอดมินเช็ค)
-            ocr = {"verified": False, "amount": gclass.get("amount"),
-                   "receiver_acc": gclass.get("receiver_account"), "receiver_bank": gclass.get("bank"),
-                   "ref": gclass.get("ref"), "date": gclass.get("date"),
-                   "source": "gemini", "confidence": gclass.get("confidence")}
-        prof = await line.get_profile(uid)
-        name = (prof or {}).get("displayName") or uid[:10]
-
-        status, matched, auto_note, dup_ref = "new", None, None, None
-        amount = ocr.get("amount") if ocr else None
-        ref = ocr.get("ref") if ocr else None
-
-        if ocr and ocr.get("verified"):
-            accounts = await supa.select("payment_accounts", params={"select": "*", "active": "eq.true"})
-            racc = _digits(ocr.get("receiver_acc"))
-            acc = next((a for a in accounts if racc and (_digits(a["account_no"])[-4:] == racc[-4:])), None)
-            # ตรวจซ้ำ
-            if ref:
-                exist = await supa.select("slips", params={"ref": f"eq.{ref}", "select": "line_user_id,id", "limit": "1"})
-                if exist:
-                    status, dup_ref = "rejected", ref
-                    auto_note = "สลิปนี้เคยส่งมาแล้ว (ref ซ้ำ)"
-            if status != "rejected":
-                if not acc:
-                    status, auto_note = "review", f"บัญชีปลายทางไม่ตรงรายการ ({ocr.get('receiver_acc')})"
-                else:
-                    def _near(target):
-                        return target not in (None, "") and abs(float(amount or 0) - float(target)) < 1
-                    matched = _near(acc.get("price")) or _near(acc.get("full_price"))
-                    exp_course = exp_course or acc["course"]
-                    if matched:
-                        status, auto_note = "verified", f"✓ {acc['course']} · {amount} บาท · {acc['bank']}"
-                    else:
-                        status, auto_note = "review", f"ยอดไม่ตรง: โอน {amount} / ราคา {acc['price']} ({acc['course']})"
-        elif ocr and not ocr.get("verified") and ocr.get("source") == "gemini":
-            conf_pct = round((ocr.get("confidence") or 0) * 100)
-            status, auto_note = "review", f"🤖 Gemini เดาว่าอาจเป็นสลิป (มั่นใจ {conf_pct}%) — ยังไม่ตรวจยอด/ธนาคารจริง รบกวนแอดมินเช็คเอง"
-        elif ocr and not ocr.get("verified"):
-            status, auto_note = "review", f"ตรวจสลิปไม่ผ่าน: {ocr.get('error')}"
-        elif EASYSLIP_TOKEN:
-            status, auto_note = "review", "อ่านสลิปไม่ได้"
-
-        slip = {"line_user_id": uid, "message_id": mid, "media_url": media_url, "ocr": ocr,
-                # ref ซ้ำ -> เก็บไว้ที่ dup_ref เท่านั้น ไม่ใส่ ref (กันชน unique index -> row หาย)
-                "amount": amount, "ref": None if dup_ref else ref,
-                "bank": ocr.get("receiver_bank") if ocr else None,
-                "slip_date": str(ocr.get("date")) if ocr and ocr.get("date") else None,
-                "status": status, "matched": matched, "auto_note": auto_note,
-                "dup_ref": dup_ref, "expected_course": exp_course}
+        # ============ ทำสิ่งที่สำคัญต่อเวลาก่อน (ก่อนอ่านสลิปที่ช้า) ============
+        # 1) สร้าง slip row ทันที (status=new) จะได้ไม่หายถ้า handler ถูกตัดกลางคัน
+        slip_id = None
         try:
-            await supa.insert("slips", slip)
+            slip_row = await supa.insert("slips", {
+                "line_user_id": uid, "message_id": mid, "media_url": media_url,
+                "status": "new", "expected_course": exp_course})
+            slip_id = (slip_row[0]["id"] if slip_row else None)
         except Exception as ex:
-            print("slip insert error:", ex)
+            print("slip pre-insert error:", ex)
 
-        # ---- ส่งสลิปแล้ว -> เปลี่ยน rich menu ของ user คนนี้อัตโนมัติ (ถ้าตั้งค่าไว้) ----
-        if SLIP_SUCCESS_RICHMENU_ID:
+        # 2) สลับ rich menu ทันที — เฉพาะเมื่อมั่นใจว่าเป็นสลิป (notify_all อย่างเดียวไม่สลับ)
+        if is_slip and SLIP_SUCCESS_RICHMENU_ID:
             try:
                 old_map = await _fetch_current_menu_map([uid])
                 ok_link, _code = await line.user_richmenu_link(uid, SLIP_SUCCESS_RICHMENU_ID)
@@ -628,6 +586,68 @@ async def _handle_slips(img_events: list):
             except Exception as ex:
                 print("slip richmenu link error:", ex)
 
+        # ============ ตอนนี้ค่อยอ่านสลิป (ช้า) แล้ว update row ============
+        ocr = await _easyslip_verify(content) if content else None
+        if not ocr:
+            # ยังไม่มีผล -> ใช้ Gemini อ่าน (ถ้ายังไม่ได้เรียกใน gate)
+            if gclass is None and content:
+                gclass = await _gemini_classify_slip(content, ctype)
+            if gclass and gclass.get("is_slip"):
+                ocr = {"verified": False, "amount": gclass.get("amount"),
+                       "receiver_acc": gclass.get("receiver_account"), "receiver_bank": gclass.get("bank"),
+                       "ref": gclass.get("ref"), "date": gclass.get("date"),
+                       "source": "gemini", "confidence": gclass.get("confidence")}
+
+        status, matched, auto_note, dup_ref = "new", None, None, None
+        amount = ocr.get("amount") if ocr else None
+        ref = ocr.get("ref") if ocr else None
+
+        # ---- ตรวจ ref ซ้ำ (ทุก source ไม่ใช่แค่ EasySlip) ----
+        if ref:
+            exist = await supa.select("slips", params={
+                "ref": f"eq.{ref}", "id": f"neq.{slip_id or 0}",
+                "select": "id", "limit": "1"})
+            if exist:
+                status, dup_ref = "rejected", ref
+                auto_note = "สลิปนี้เคยส่งมาแล้ว (ref ซ้ำ)"
+
+        if status != "rejected" and ocr and ocr.get("verified"):
+            accounts = await supa.select("payment_accounts", params={"select": "*", "active": "eq.true"})
+            racc = _digits(ocr.get("receiver_acc"))
+            acc = next((a for a in accounts if racc and (_digits(a["account_no"])[-4:] == racc[-4:])), None)
+            if not acc:
+                status, auto_note = "review", f"บัญชีปลายทางไม่ตรงรายการ ({ocr.get('receiver_acc')})"
+            else:
+                def _near(target):
+                    return target not in (None, "") and abs(float(amount or 0) - float(target)) < 1
+                matched = _near(acc.get("price")) or _near(acc.get("full_price"))
+                exp_course = exp_course or acc["course"]
+                if matched:
+                    status, auto_note = "verified", f"✓ {acc['course']} · {amount} บาท · {acc['bank']}"
+                else:
+                    status, auto_note = "review", f"ยอดไม่ตรง: โอน {amount} / ราคา {acc['price']} ({acc['course']})"
+        elif status != "rejected" and ocr and ocr.get("source") == "gemini":
+            conf_pct = round((ocr.get("confidence") or 0) * 100)
+            status, auto_note = "review", f"🤖 Gemini เดาว่าอาจเป็นสลิป (มั่นใจ {conf_pct}%) — ยังไม่ตรวจยอด/ธนาคารจริง รบกวนแอดมินเช็คเอง"
+        elif status != "rejected" and ocr and not ocr.get("verified"):
+            status, auto_note = "review", f"ตรวจสลิปไม่ผ่าน: {ocr.get('error')}"
+        elif status != "rejected" and EASYSLIP_TOKEN:
+            status, auto_note = "review", "อ่านสลิปไม่ได้"
+
+        # 3) update slip row ด้วยผลที่อ่านได้
+        patch = {"ocr": ocr, "amount": amount, "ref": None if dup_ref else ref,
+                 "bank": ocr.get("receiver_bank") if ocr else None,
+                 "slip_date": str(ocr.get("date")) if ocr and ocr.get("date") else None,
+                 "status": status, "matched": matched, "auto_note": auto_note,
+                 "dup_ref": dup_ref, "expected_course": exp_course}
+        try:
+            if slip_id:
+                await supa.update("slips", patch, {"id": f"eq.{slip_id}"})
+            else:
+                await supa.insert("slips", {**patch, "line_user_id": uid, "message_id": mid, "media_url": media_url})
+        except Exception as ex:
+            print("slip update error:", ex)
+
         # ตอบ user ตามผลตรวจอัตโนมัติ
         if status == "verified":
             await line.push(uid, [{"type": "text", "text": f"✅ ตรวจสอบสลิปเรียบร้อยแล้ว\nยอด {amount} บาท · หลักสูตร {exp_course}\nขอบคุณครับ 🙏"}])
@@ -635,6 +655,8 @@ async def _handle_slips(img_events: list):
             await line.push(uid, [{"type": "text", "text": "สลิปนี้เคยส่งเข้ามาแล้วครับ หากต้องการสอบถามเพิ่มเติมพิมพ์ 'ติดต่อแอดมิน'"}])
 
         # แจ้งแอดมิน
+        prof = await line.get_profile(uid)
+        name = (prof or {}).get("displayName") or uid[:10]
         emoji = {"verified": "✅", "rejected": "⛔", "review": "⚠️"}.get(status, "🧾")
         detail = f"จาก: {name}\n" + (auto_note + "\n" if auto_note else "") + f"เปิดดู: {APP_URL}/slips"
         await alert_admin(f"{emoji} สลิป: {status}", detail, throttle_key=f"slip_{mid}")
