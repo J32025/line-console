@@ -145,7 +145,7 @@ async def link_delete(code: str, admin=Depends(current_admin)):
 
 
 @app.get("/api/health")
-async def health(deep: int = 0):
+async def health(deep: int = 0, test_gemini: int = 0, test_uid: str = ""):
     out = {"ok": True, "time": NOW()}
     if not deep:
         return out
@@ -189,6 +189,30 @@ async def health(deep: int = 0):
         checks["gemini"]["all_menu_names_in_cache"] = [r["name"] for r in all_names]
     except Exception as e:
         checks["gemini"]["error"] = str(e)
+
+    if test_uid:
+        try:
+            rid = await line.user_richmenu_get(test_uid)
+            checks["gemini"]["test_uid"] = test_uid
+            checks["gemini"]["test_uid_live_rich_menu_id"] = rid
+            checks["gemini"]["test_uid_matches_trigger"] = rid in set(checks["gemini"].get("matching_menu_ids") or [])
+        except Exception as e:
+            checks["gemini"]["test_uid_error"] = str(e)
+
+    if test_gemini:
+        try:
+            g_url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+                     f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}")
+            async with httpx.AsyncClient(timeout=20) as c:
+                gr = await c.post(g_url, json={
+                    "contents": [{"role": "user", "parts": [{"text": "สวัสดี ทดสอบระบบ"}]}],
+                    "generationConfig": {"maxOutputTokens": 200},
+                })
+            checks["gemini"]["live_test_status"] = gr.status_code
+            checks["gemini"]["live_test_body"] = gr.text[:1000]
+        except Exception as e:
+            checks["gemini"]["live_test_error"] = str(e)
+
     out["checks"] = checks
     return out
 
