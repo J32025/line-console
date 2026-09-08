@@ -176,6 +176,19 @@ async def health(deep: int = 0):
         checks["last_cron"] = rows
     except Exception:
         pass
+    checks["gemini"] = {
+        "api_key_set": bool(GEMINI_API_KEY),
+        "model": GEMINI_MODEL,
+        "trigger_menu_name": GEMINI_TRIGGER_MENU_NAME,
+    }
+    try:
+        rows = await supa.select("rich_menus", params={
+            "select": "rich_menu_id,name", "name": f"eq.{GEMINI_TRIGGER_MENU_NAME}"})
+        checks["gemini"]["matching_menu_ids"] = [r["rich_menu_id"] for r in rows]
+        all_names = await supa.select("rich_menus", params={"select": "name"})
+        checks["gemini"]["all_menu_names_in_cache"] = [r["name"] for r in all_names]
+    except Exception as e:
+        checks["gemini"]["error"] = str(e)
     out["checks"] = checks
     return out
 
