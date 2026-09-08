@@ -453,6 +453,58 @@ async def _easyslip_verify(image_bytes: bytes):
         return None
 
 
+async def _gemini_classify_slip(image_bytes: bytes, mime: str) -> dict | None:
+    """ใช้ Gemini (vision) เดาว่ารูปนี้เป็นสลิปโอนเงิน/หลักฐานชำระเงินไหม + อ่านข้อมูลคร่าว ๆ
+    (ยอด/ธนาคาร/เลขบัญชี/ref/วันที่) — เป็นแค่ตัวช่วยกรอง+อ่านเบื้องต้น ไม่ใช่การยืนยันที่เชื่อถือได้
+    100% (ไม่มี fraud-check เหมือน EasySlip) คืน None ถ้าปิดฟีเจอร์ (ไม่ตั้ง GEMINI_API_KEY) หรือ error"""
+    if not GEMINI_API_KEY or not image_bytes:
+        return None
+    b64 = base64.b64encode(image_bytes).decode()
+    url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+           f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}")
+    prompt = (
+        "ดูรูปนี้แล้วบอกว่าเป็น \"สลิปโอนเงิน/หลักฐานการชำระเงิน\" (สลิปธนาคาร, mobile banking, "
+        "พร้อมเพย์ ใบเสร็จโอนเงิน ฯลฯ) หรือไม่ ตอบเป็น JSON เท่านั้น ห้ามมีข้อความอื่นนอก JSON "
+        "ตามโครงสร้างนี้เป๊ะ ๆ:\n"
+        '{"is_slip": true หรือ false, "confidence": ตัวเลข 0 ถึง 1 (ความมั่นใจในคำตอบ is_slip), '
+        '"amount": จำนวนเงิน (ตัวเลขล้วน) หรือ null, "bank": ชื่อธนาคาร หรือ null, '
+        '"receiver_account": เลขบัญชี/พร้อมเพย์ปลายทางที่อ่านได้ หรือ null, '
+        '"ref": เลขที่อ้างอิงธุรกรรม หรือ null, "date": วันที่ทำรายการ รูปแบบ YYYY-MM-DD หรือ null}\n'
+        "ถ้าไม่ใช่สลิป (เช่น รูปคน, สติกเกอร์, สกรีนช็อตแชท, การ์ตูน) ให้ is_slip=false และ field อื่น "
+        "เป็น null ทั้งหมด"
+    )
+    body = {
+        "contents": [{"role": "user", "parts": [
+            {"text": prompt},
+            {"inlineData": {"mimeType": mime or "image/jpeg", "data": b64}},
+        ]}],
+        "generationConfig": {"responseMimeType": "application/json", "temperature": 0.1, "maxOutputTokens": 400},
+    }
+    try:
+        async with httpx.AsyncClient(timeout=25) as c:
+            r = await c.post(url, json=body)
+        j = r.json()
+        if r.status_code != 200:
+            print("gemini slip classify http error:", r.status_code, str(j)[:300])
+            return None
+        cand = (j.get("candidates") or [{}])[0]
+        parts = (cand.get("content") or {}).get("parts") or []
+        text = "".join(p.get("text", "") for p in parts).strip()
+        data = json.loads(text)
+        return {
+            "is_slip": bool(data.get("is_slip")),
+            "confidence": float(data.get("confidence") or 0),
+            "amount": data.get("amount"),
+            "bank": data.get("bank"),
+            "receiver_account": data.get("receiver_account"),
+            "ref": data.get("ref"),
+            "date": data.get("date"),
+        }
+    except Exception as e:
+        print("gemini slip classify error:", e)
+        return None
+
+
 async def _handle_slips(img_events: list):
     notify_all = bool(await _get_setting("slip_notify_all_images", True))
 
@@ -475,7 +527,7 @@ async def _handle_slips(img_events: list):
             except Exception as ex:
                 print("slip upload error:", ex)
 
-        # เป็นสลิปไหม — ดูจาก context: เคยคุยเรื่องชำระเงินใน 24 ชม.ล่าสุด
+        # เป็นสลิปไหม — ดูจาก context: เคยคุยเรื่องชำระเงินใน 24 ชม.ล่าสุด (heuristic แบบเดิม)
         pay_ctx = False
         try:
             since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=24)).isoformat()
@@ -485,9 +537,14 @@ async def _handle_slips(img_events: list):
             blob = " ".join((r.get("text") or "") for r in recent)
             pay_ctx = any(w in blob for w in ("ชำระ", "โอน", "สลิป", "สมัคร", "ค่าติว", "บัญชี", "หลักสูตร"))
         except Exception:
-            pass
+            blob = ""
 
-        if not (notify_all or pay_ctx):
+        # ให้ Gemini (vision) ช่วยดูรูปจริง ๆ ว่าน่าจะเป็นสลิปไหม — ไม่ต้องพึ่งแค่เดาจากคำในแชท
+        # (เปิดใช้อัตโนมัติถ้าตั้ง GEMINI_API_KEY ไว้แล้ว ไม่ต้องตั้งอะไรเพิ่ม)
+        gclass = await _gemini_classify_slip(content, ctype) if content else None
+        gemini_thinks_slip = bool(gclass and gclass.get("is_slip") and (gclass.get("confidence") or 0) >= 0.55)
+
+        if not (notify_all or pay_ctx or gemini_thinks_slip):
             continue
 
         # ---- เดาหลักสูตรจากบทสนทนา ----
@@ -498,6 +555,13 @@ async def _handle_slips(img_events: list):
                 break
 
         ocr = await _easyslip_verify(content) if content else None
+        if not ocr and gclass and gclass.get("is_slip"):
+            # ไม่มี EasySlip ตั้งไว้ (หรืออ่านไม่ได้) แต่ Gemini เดาว่าเป็นสลิป -> ใช้ผลจาก Gemini แทน
+            # (best-effort เท่านั้น ไม่ auto-verify ให้ผ่าน ต้องรอแอดมินเช็ค)
+            ocr = {"verified": False, "amount": gclass.get("amount"),
+                   "receiver_acc": gclass.get("receiver_account"), "receiver_bank": gclass.get("bank"),
+                   "ref": gclass.get("ref"), "date": gclass.get("date"),
+                   "source": "gemini", "confidence": gclass.get("confidence")}
         prof = await line.get_profile(uid)
         name = (prof or {}).get("displayName") or uid[:10]
 
@@ -527,6 +591,9 @@ async def _handle_slips(img_events: list):
                         status, auto_note = "verified", f"✓ {acc['course']} · {amount} บาท · {acc['bank']}"
                     else:
                         status, auto_note = "review", f"ยอดไม่ตรง: โอน {amount} / ราคา {acc['price']} ({acc['course']})"
+        elif ocr and not ocr.get("verified") and ocr.get("source") == "gemini":
+            conf_pct = round((ocr.get("confidence") or 0) * 100)
+            status, auto_note = "review", f"🤖 Gemini เดาว่าอาจเป็นสลิป (มั่นใจ {conf_pct}%) — ยังไม่ตรวจยอด/ธนาคารจริง รบกวนแอดมินเช็คเอง"
         elif ocr and not ocr.get("verified"):
             status, auto_note = "review", f"ตรวจสลิปไม่ผ่าน: {ocr.get('error')}"
         elif EASYSLIP_TOKEN:
