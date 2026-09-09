@@ -1804,8 +1804,14 @@ async def richmenu_history(request: Request, admin=Depends(current_admin)):
     if uid:
         params["line_user_id"] = f"eq.{uid}"
         count_params["line_user_id"] = f"eq.{uid}"
-    rows = await supa.select("richmenu_history", params=params)
-    total = await supa.count("richmenu_history", count_params)
+    try:
+        rows = await supa.select("richmenu_history", params=params)
+        total = await supa.count("richmenu_history", count_params)
+    except Exception as e:
+        # ตาราง richmenu_history ยังไม่ถูกสร้าง (migration 0003 ยังไม่รัน)
+        return {"items": [], "total": 0, "limit": limit, "offset": offset,
+                "schema_missing": True,
+                "hint": "ยังไม่ได้สร้างตาราง richmenu_history — รัน migration 0003 ใน Supabase SQL Editor"}
     return {"items": rows, "total": total, "limit": limit, "offset": offset}
 
 

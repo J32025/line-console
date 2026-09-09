@@ -37,6 +37,7 @@ export default function RichMenuHistory() {
       setItems((prev) => (append ? [...(prev || []), ...r.items] : r.items))
       setTotal(r.total)
       setOffset(nextOffset)
+      if (r.schema_missing) setErr(r.hint || 'ตาราง richmenu_history ยังไม่ถูกสร้าง (รัน migration 0003)')
     } catch (e) {
       setErr(e.message); setItems([]); t.err(e.message)
     } finally { setBusy(false) }
@@ -74,13 +75,7 @@ export default function RichMenuHistory() {
         <div className="row spread">
           <h3>รายการเปลี่ยนแปลง {total ? `(${total.toLocaleString()})` : ''}</h3>
         </div>
-        {err && (
-          <p className="err">
-            โหลดไม่สำเร็จ: {err}
-            {/richmenu_history|does not exist|PGRST|relation/i.test(err) &&
-              <> — ตาราง <code>richmenu_history</code> ยังไม่ถูกสร้างใน DB (รัน migration 0003 ใน Supabase SQL Editor)</>}
-          </p>
-        )}
+        {err && <p className="err">{err}</p>}
         {!items ? <Spinner /> : (
           <>
             <table>
