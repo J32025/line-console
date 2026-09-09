@@ -3101,14 +3101,19 @@ async def _liff_channel_token() -> tuple[str | None, str | None]:
         return _liff_token_cache["token"], None
     try:
         async with httpx.AsyncClient(timeout=15) as c:
-            r = await c.post("https://api.line.me/oauth2/v2.1/token",
+            r = await c.post("https://api.line.me/v2/oauth/accessToken",
                              data={"grant_type": "client_credentials",
                                    "client_id": LINE_LOGIN_CHANNEL_ID,
                                    "client_secret": LINE_LOGIN_CHANNEL_SECRET},
                              headers={"Content-Type": "application/x-www-form-urlencoded"})
         j = r.json()
         if r.status_code != 200 or not j.get("access_token"):
-            return None, f"ขอ token ไม่สำเร็จ ({r.status_code}): {j.get('error_description') or j.get('error') or r.text[:120]}"
+            err = j.get("error_description") or j.get("error") or r.text[:120]
+            if "client_secret" in str(err).lower():
+                err += (" — channel นี้อาจเป็น LINE Login channel (endpoint นี้ออก token ให้เฉพาะ "
+                        "Messaging API channel). ใส่ LINE_LOGIN_CHANNEL_TOKEN ที่ออกจาก v2.1 JWT แทน "
+                        "หรือเพิ่มรายการ LIFF เองในหน้านี้")
+            return None, f"ขอ token ไม่สำเร็จ ({r.status_code}): {err}"
         tok = j["access_token"]
         _liff_token_cache["token"] = tok
         _liff_token_cache["exp"] = time.time() + max(600, int(j.get("expires_in", 2592000)) - 86400)
