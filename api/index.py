@@ -24,7 +24,8 @@ from _lib.config import (LINE_CHANNEL_SECRET, CRON_SECRET, ALERT_USER_IDS,
                          LINE_CHANNEL_ACCESS_TOKEN, LIFF_CHANNEL_ID,
                          SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY,
                          LINE_LOGIN_CHANNEL_TOKEN, LINE_LOGIN_CHANNEL_ID,
-                         LINE_LOGIN_CHANNEL_SECRET, APP_URL, EASYSLIP_TOKEN,
+                         LINE_LOGIN_CHANNEL_SECRET, LINE_LOGIN_ASSERTION_KID,
+                         LINE_LOGIN_ASSERTION_PRIVATE_KEY, APP_URL, EASYSLIP_TOKEN,
                          ENFORCE_RICHMENU_ID, ENFORCE_EXCLUDE_MENUS,
                          GEMINI_API_KEY, GEMINI_MODEL, GEMINI_TRIGGER_MENU_NAME,
                          SLIP_SUCCESS_RICHMENU_ID)
@@ -3090,36 +3091,60 @@ _liff_token_cache: dict = {"token": None, "exp": 0.0}
 
 
 async def _liff_channel_token() -> tuple[str | None, str | None]:
-    """channel access token ของ LINE Login channel (สำหรับเรียก LIFF API)
-    คืน (token, error). ใช้ LINE_LOGIN_CHANNEL_TOKEN ถ้าตั้งไว้ตรง ๆ
-    ไม่งั้นขอเองด้วย client_credentials จาก id+secret แล้ว cache"""
+    """channel access token สำหรับเรียก LIFF API — คืน (token, error)
+    ลำดับ: LINE_LOGIN_CHANNEL_TOKEN ตรง ๆ > JWT assertion (Login channel) > client_credentials (Messaging API)"""
     if LINE_LOGIN_CHANNEL_TOKEN:
         return LINE_LOGIN_CHANNEL_TOKEN, None
-    if not (LINE_LOGIN_CHANNEL_ID and LINE_LOGIN_CHANNEL_SECRET):
-        return None, "ยังไม่ได้ตั้ง LINE_LOGIN_CHANNEL_SECRET (หรือ LINE_LOGIN_CHANNEL_TOKEN)"
     if _liff_token_cache["token"] and time.time() < _liff_token_cache["exp"]:
         return _liff_token_cache["token"], None
-    try:
-        async with httpx.AsyncClient(timeout=15) as c:
-            r = await c.post("https://api.line.me/v2/oauth/accessToken",
-                             data={"grant_type": "client_credentials",
-                                   "client_id": LINE_LOGIN_CHANNEL_ID,
-                                   "client_secret": LINE_LOGIN_CHANNEL_SECRET},
-                             headers={"Content-Type": "application/x-www-form-urlencoded"})
-        j = r.json()
-        if r.status_code != 200 or not j.get("access_token"):
+
+    # --- JWT assertion (LINE Login channel) ---
+    if LINE_LOGIN_CHANNEL_ID and LINE_LOGIN_ASSERTION_KID and LINE_LOGIN_ASSERTION_PRIVATE_KEY:
+        try:
+            import jwt as _jwt
+            now = int(time.time())
+            assertion = _jwt.encode(
+                {"iss": LINE_LOGIN_CHANNEL_ID, "sub": LINE_LOGIN_CHANNEL_ID,
+                 "aud": "https://api.line.me/", "exp": now + 60 * 25,
+                 "token_exp": 60 * 60 * 24 * 30},
+                LINE_LOGIN_ASSERTION_PRIVATE_KEY, algorithm="RS256",
+                headers={"kid": LINE_LOGIN_ASSERTION_KID})
+            async with httpx.AsyncClient(timeout=15) as c:
+                r = await c.post("https://api.line.me/oauth2/v2.1/token", data={
+                    "grant_type": "client_credentials",
+                    "client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+                    "client_assertion": assertion,
+                })
+            j = r.json()
+            if r.status_code == 200 and j.get("access_token"):
+                _liff_token_cache["token"] = j["access_token"]
+                _liff_token_cache["exp"] = time.time() + max(600, int(j.get("expires_in", 2592000)) - 86400)
+                return j["access_token"], None
+            return None, f"JWT assertion ไม่ผ่าน ({r.status_code}): {j.get('error_description') or j.get('error') or r.text[:150]}"
+        except Exception as e:
+            return None, f"JWT assertion error: {e}"
+
+    # --- client_credentials (Messaging API channel เท่านั้น) ---
+    if LINE_LOGIN_CHANNEL_ID and LINE_LOGIN_CHANNEL_SECRET:
+        try:
+            async with httpx.AsyncClient(timeout=15) as c:
+                r = await c.post("https://api.line.me/v2/oauth/accessToken",
+                                 data={"grant_type": "client_credentials",
+                                       "client_id": LINE_LOGIN_CHANNEL_ID,
+                                       "client_secret": LINE_LOGIN_CHANNEL_SECRET})
+            j = r.json()
+            if r.status_code == 200 and j.get("access_token"):
+                _liff_token_cache["token"] = j["access_token"]
+                _liff_token_cache["exp"] = time.time() + max(600, int(j.get("expires_in", 2592000)) - 86400)
+                return j["access_token"], None
             err = j.get("error_description") or j.get("error") or r.text[:120]
             if "client_secret" in str(err).lower():
-                err += (" — channel นี้อาจเป็น LINE Login channel (endpoint นี้ออก token ให้เฉพาะ "
-                        "Messaging API channel). ใส่ LINE_LOGIN_CHANNEL_TOKEN ที่ออกจาก v2.1 JWT แทน "
-                        "หรือเพิ่มรายการ LIFF เองในหน้านี้")
+                err += " — channel นี้เป็น LINE Login channel: ต้องตั้ง LINE_LOGIN_ASSERTION_KID + LINE_LOGIN_ASSERTION_PRIVATE_KEY"
             return None, f"ขอ token ไม่สำเร็จ ({r.status_code}): {err}"
-        tok = j["access_token"]
-        _liff_token_cache["token"] = tok
-        _liff_token_cache["exp"] = time.time() + max(600, int(j.get("expires_in", 2592000)) - 86400)
-        return tok, None
-    except Exception as e:
-        return None, str(e)
+        except Exception as e:
+            return None, str(e)
+
+    return None, "ยังไม่ได้ตั้งค่าเชื่อม LINE Login channel (LINE_LOGIN_ASSERTION_KID + PRIVATE_KEY)"
 
 
 @app.get("/api/liff")
@@ -3168,6 +3193,7 @@ async def liff_list(admin=Depends(current_admin)):
         },
         "syncEnabled": bool(token),
         "syncMode": ("token" if LINE_LOGIN_CHANNEL_TOKEN
+                     else "jwt" if (LINE_LOGIN_ASSERTION_KID and LINE_LOGIN_ASSERTION_PRIVATE_KEY)
                      else "client_credentials" if LINE_LOGIN_CHANNEL_SECRET else "off"),
         "syncError": sync_err,
     }

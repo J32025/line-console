@@ -25,6 +25,10 @@ LINE_LOGIN_CHANNEL_TOKEN = os.environ.get("LINE_LOGIN_CHANNEL_TOKEN", "").strip(
 LINE_LOGIN_CHANNEL_ID = (os.environ.get("LINE_LOGIN_CHANNEL_ID", "").strip().split("-")[0]
                          or LIFF_CHANNEL_ID)
 LINE_LOGIN_CHANNEL_SECRET = os.environ.get("LINE_LOGIN_CHANNEL_SECRET", "").strip()
+# (แนะนำสำหรับ LINE Login channel) JWT assertion — ระบบเซ็น JWT ขอ channel token เอง
+#   LINE console > channel > Basic settings > Assertion Signing Key > register public key -> ได้ kid
+LINE_LOGIN_ASSERTION_KID = os.environ.get("LINE_LOGIN_ASSERTION_KID", "").strip()
+LINE_LOGIN_ASSERTION_PRIVATE_KEY = os.environ.get("LINE_LOGIN_ASSERTION_PRIVATE_KEY", "").replace("\\n", "\n").strip()
 
 # EasySlip API token (ตรวจสลิปอัตโนมัติ) — ว่าง = ไม่ตรวจ OCR แค่แจ้งเตือน
 EASYSLIP_TOKEN = os.environ.get("EASYSLIP_TOKEN", "").strip()

@@ -63,13 +63,12 @@ export default function Liff() {
         )}
         {!data.syncEnabled && (
           <div className="muted xs">
-            <b>ยังไม่ได้เชื่อม LINE</b> — ตอนนี้แสดงเฉพาะรายการที่บันทึกเอง<br />
-            เปิดการดึงรายการ LIFF ทั้งหมดของ bot อัตโนมัติ: ตั้ง env ตัวใดตัวหนึ่งบน Vercel แล้ว redeploy
-            <ul style={{ margin: '4px 0' }}>
-              <li><code>LINE_LOGIN_CHANNEL_SECRET</code> = Channel secret ของ LINE Login channel <code>{env.LINE_LOGIN_CHANNEL_ID}</code> (แนะนำ — ระบบต่อ token ให้เอง)</li>
-              <li>หรือ <code>LINE_LOGIN_CHANNEL_TOKEN</code> = channel access token (ต้องต่ออายุเองทุก 30 วัน)</li>
-            </ul>
-            ดู secret ได้ที่ LINE Developers Console → channel <code>{env.LINE_LOGIN_CHANNEL_ID}</code> → Basic settings
+            <b>ยังไม่ได้เชื่อม LINE Login channel</b> — ตอนนี้แสดงเฉพาะรายการที่บันทึกเอง<br />
+            เปิด auto-sync (LINE Login channel <code>{env.LINE_LOGIN_CHANNEL_ID}</code> ต้องใช้ JWT assertion):
+            <ol style={{ margin: '4px 0' }}>
+              <li>LINE console → channel → Basic settings → <b>Assertion Signing Key</b> → Register a public key → วาง JWK ที่ได้จาก Claude → ได้ <b>kid</b></li>
+              <li>Vercel env: <code>LINE_LOGIN_ASSERTION_KID</code>, <code>LINE_LOGIN_ASSERTION_PRIVATE_KEY</code>, <code>LINE_LOGIN_CHANNEL_ID</code> → Redeploy</li>
+            </ol>
           </div>
         )}
       </section>
