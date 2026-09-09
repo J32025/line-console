@@ -377,20 +377,46 @@ async def webhook(request: Request):
         except Exception as e:
             print("follow profile fetch error:", e)
 
-    # ---- Gemini: ตอบคำถามอิสระ เฉพาะ user ที่ current rich menu ตรงชื่อ GEMINI_TRIGGER_MENU_NAME ----
-    gemini_handled_uids: set = set()
+    # ---- หา user ที่อยู่บนเมนูที่เปิด Gemini (เช็ค rich menu สดทีละคน) ----
+    # Gemini เป็น "ตัวสำรอง" เท่านั้น — กฎคีย์เวิร์ด/ปุ่ม/ต้อนรับ ทำงานปกติเสมอ
+    # Gemini จะตอบเฉพาะ "ข้อความที่ไม่ตรงกฎไหนเลย" (แทน fallback) ของ user บนเมนู Gemini
+    gemini_uids: set = set()
+    text_uids = {e["source"]["userId"] for e in events
+                 if e.get("type") == "message" and e.get("message", {}).get("type") == "text"
+                 and e.get("replyToken") and e.get("source", {}).get("userId")}
     try:
-        gemini_handled_uids = await asyncio.wait_for(_handle_gemini_replies(events), timeout=15)
-    except BaseException as e:  # noqa: BLE001 — webhook ต้องตอบ 200 เสมอ
-        print("gemini reply error:", repr(e))
+        gmenu_ids = await _gemini_enabled_menu_ids() if text_uids else set()
+        if gmenu_ids:
+            async def _chk(u):
+                try:
+                    return u, await line.user_richmenu_get(u)
+                except Exception:
+                    return u, None
+            for u, rid in await asyncio.gather(*[_chk(u) for u in text_uids]):
+                if rid in gmenu_ids:
+                    gemini_uids.add(u)
+    except BaseException as e:  # noqa: BLE001
+        print("gemini menu check error:", repr(e))
 
-    # ---- auto-reply (ห้าม block webhook เกิน 12 วิ, ห้าม 500) ----
-    # ข้าม event ของ user ที่ Gemini ตอบไปแล้ว กันตอบซ้ำ 2 ระบบ
+    # ---- auto-reply ก่อน (คีย์เวิร์ด/ปุ่ม/ต้อนรับ) — ข้าม fallback ให้ user บนเมนู Gemini ----
+    replied_uids: set = set()
     try:
-        remaining = [e for e in events if e.get("source", {}).get("userId") not in gemini_handled_uids]
-        await asyncio.wait_for(_handle_auto_replies(remaining), timeout=12)
+        replied_uids = await asyncio.wait_for(
+            _handle_auto_replies(events, gemini_uids=gemini_uids), timeout=12) or set()
     except BaseException as e:  # noqa: BLE001 — webhook ต้องตอบ 200 เสมอ
         print("auto-reply error:", repr(e))
+
+    # ---- Gemini: ตอบข้อความที่ไม่ตรงกฎ ของ user บนเมนู Gemini ----
+    if gemini_uids:
+        try:
+            g_targets = [e for e in events
+                         if e.get("type") == "message" and e.get("message", {}).get("type") == "text"
+                         and e.get("source", {}).get("userId") in gemini_uids
+                         and e.get("source", {}).get("userId") not in replied_uids]
+            if g_targets:
+                await asyncio.wait_for(_handle_gemini_replies(g_targets), timeout=15)
+        except BaseException as e:  # noqa: BLE001
+            print("gemini reply error:", repr(e))
 
     # ---- automation: trigger=follow ----
     if follow_uids:
@@ -780,7 +806,9 @@ async def _gemini_answer(question: str, temperature: float = 0.7) -> str | None:
                     "กระชับ สุภาพ เป็นกันเอง ไม่เกิน 3-4 ประโยค ถ้าไม่ทราบคำตอบให้บอกตรง ๆ ว่าไม่ทราบ"
         }]},
         "generationConfig": {
-            "maxOutputTokens": 500,
+            # gemini-3.x flash เป็น thinking model — thinking กิน output tokens ด้วย
+            # ต้องเผื่อ budget ให้พอ ไม่งั้นได้ข้อความว่าง (thinking กินหมด)
+            "maxOutputTokens": 2048,
             "temperature": max(0.0, min(2.0, temperature if temperature is not None else 0.7)),
         },
     }
@@ -800,9 +828,30 @@ async def _gemini_answer(question: str, temperature: float = 0.7) -> str | None:
         return None
 
 
+async def _gemini_enabled_menu_ids() -> set:
+    """rich_menu_id ทั้งหมดที่เปิด Gemini (gemini_enabled=true หรือชื่อตรง GEMINI_TRIGGER_MENU_NAME)"""
+    if not GEMINI_API_KEY:
+        return set()
+    ids: set = set()
+    try:
+        for m in await supa.select("rich_menus", params={
+                "select": "rich_menu_id", "gemini_enabled": "eq.true"}):
+            ids.add(m["rich_menu_id"])
+    except Exception as e:
+        print("gemini menu ids error:", e)
+    if GEMINI_TRIGGER_MENU_NAME:
+        try:
+            for m in await supa.select("rich_menus", params={
+                    "select": "rich_menu_id", "name": f"eq.{GEMINI_TRIGGER_MENU_NAME}"}):
+                ids.add(m["rich_menu_id"])
+        except Exception:
+            pass
+    return ids
+
+
 async def _handle_gemini_replies(events: list) -> set:
-    """ตอบคำถามอิสระด้วย Gemini เฉพาะ user ที่ current rich menu (เช็คสด) เป็นเมนูที่เปิด
-    gemini_enabled ไว้ (ตั้งได้ต่อเมนูจากหน้าเว็บ) — ปิดอยู่ถ้าไม่ได้ตั้ง GEMINI_API_KEY (no-op ปลอดภัย)"""
+    """ตอบข้อความที่ไม่ตรงกฎไหน ด้วย Gemini — เรียกหลัง _handle_auto_replies แล้ว
+    (events ถูกกรองมาแล้วว่าเป็น text ของ user บนเมนู Gemini ที่ยังไม่มีใครตอบ)"""
     if not GEMINI_API_KEY:
         return set()
     text_events = [e for e in events if e.get("type") == "message"
@@ -870,18 +919,20 @@ async def _handle_gemini_replies(events: list) -> set:
     return handled
 
 
-async def _handle_auto_replies(events: list):
+async def _handle_auto_replies(events: list, gemini_uids: set = frozenset()) -> set:
+    """ตอบกฎ auto-reply / postback / ต้อนรับ. คืน set ของ uid ที่ตอบไปแล้ว.
+    user ใน gemini_uids: ข้ามกฎ fallback (ปล่อยให้ Gemini ตอบแทน) — กฎอื่น ๆ ทำงานปกติ"""
     repliable = [e for e in events if e.get("replyToken") and e.get("type") in
                  ("message", "follow", "postback", "beacon")]
     if not repliable:
-        return
+        return set()
     rules = await supa.select("auto_replies", params={
         "select": "*", "enabled": "eq.true", "order": "priority.desc,id.asc", "limit": "300",
     })
     for r in rules:
         r.setdefault("trigger", "text")
     if not rules:
-        return
+        return set()
 
     # หา user ที่ปิด auto-reply ไว้ (แอดมินกำลังคุยเอง)
     uids = {e.get("source", {}).get("userId") for e in repliable if e.get("source", {}).get("userId")}
@@ -944,6 +995,9 @@ async def _handle_auto_replies(events: list):
             rule = _pick_rule(e, rules)
             if not rule:
                 continue
+            # user บนเมนู Gemini + กฎที่เจอคือ fallback -> ไม่ตอบ ปล่อยให้ Gemini จัดการ
+            if rule.get("trigger") == "fallback" and uid in gemini_uids:
+                continue
             nm = await name_of(uid) if _has_placeholder(rule["messages"]) else None
             if await _reply_rule(e["replyToken"], rule, nm):
                 replied_uids.add(uid)
@@ -957,6 +1011,7 @@ async def _handle_auto_replies(events: list):
             await supa.insert("messages", out_msgs)
         except Exception:
             pass
+    return replied_uids
 
 
 # ============================================================
