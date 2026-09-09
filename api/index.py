@@ -196,6 +196,23 @@ async def health(deep: int = 0, test_gemini: int = 0, test_uid: str = ""):
     except Exception as e:
         checks["schema"]["rich_menus.gemini_*"] = f"MISSING — {str(e)[:100]}"
         out["ok"] = False
+    # EasySlip
+    if EASYSLIP_TOKEN:
+        try:
+            async with httpx.AsyncClient(timeout=12) as _c:
+                _r = await _c.get("https://developer.easyslip.com/api/v1/me",
+                                  headers={"Authorization": f"Bearer {EASYSLIP_TOKEN}"})
+            _j = _r.json()
+            if _r.status_code == 200:
+                _q = (_j.get("data") or {}).get("quota") or {}
+                checks["easyslip"] = f"ok — quota {_q.get('used', '?')}/{_q.get('max', _q.get('limit', '?'))}"
+            else:
+                checks["easyslip"] = f"token error {_r.status_code}: {str(_j)[:120]}"
+        except Exception as e:
+            checks["easyslip"] = f"error: {str(e)[:120]}"
+    else:
+        checks["easyslip"] = "off (ยังไม่ตั้ง EASYSLIP_TOKEN)"
+
     # LIFF sync
     try:
         _tok, _terr = await _liff_channel_token()
