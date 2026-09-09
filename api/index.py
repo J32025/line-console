@@ -1068,6 +1068,21 @@ async def dashboard(admin=Depends(current_admin), range: int = 30):
         rows_msg=supa.count("messages"),
         rows_wh=supa.count("webhook_events"),
         rows_ev_pending=supa.count("automation_runs", {"status": "eq.pending"}),
+        msg_today=supa.count("messages", {"created_at": f"gte.{today0}"}),
+        wh_7=supa.count("webhook_events", {"created_at": f"gte.{d7}"}),
+        gemini_7=supa.count("messages", {"by": "eq.gemini", "created_at": f"gte.{d7}"}),
+        ar_total=supa.count("auto_replies"),
+        ar_on=supa.count("auto_replies", {"enabled": "eq.true"}),
+        pb_total=supa.count("postback_actions"),
+        pb_on=supa.count("postback_actions", {"enabled": "eq.true"}),
+        seg_total=supa.count("segments"),
+        tpl_total=supa.count("message_templates"),
+        link_total=supa.count("short_links"),
+        menu_total=supa.count("rich_menus"),
+        auto_total=supa.count("automations"),
+        auto_on=supa.count("automations", {"enabled": "eq.true"}),
+        sched_pending=supa.count("scheduled_jobs", {"status": "eq.pending"}),
+        blocked=supa.count("line_users", {"block_count": "gt.0", "is_following": "eq.false"}),
     )
 
     # ---------- LINE API ----------
@@ -1166,6 +1181,24 @@ async def dashboard(admin=Depends(current_admin), range: int = 30):
     recent_bc = await supa.select("broadcasts", params={
         "select": "id,kind,target_count,status,created_at", "order": "created_at.desc", "limit": "6"})
 
+    # ---------- สลิปล่าสุด + follow ล่าสุด ----------
+    recent_slips = await supa.select("slips", params={
+        "select": "id,line_user_id,amount,status,expected_course,auto_note,created_at",
+        "order": "created_at.desc", "limit": "8"})
+    recent_follows = await supa.select("follow_history", params={
+        "select": "line_user_id,action,is_unblocked,event_ts", "order": "created_at.desc", "limit": "10"})
+    _uids = list({r["line_user_id"] for r in recent_slips + recent_follows if r.get("line_user_id")})
+    _names = {}
+    if _uids:
+        for r in await supa.select("line_users", params={
+                "select": "line_user_id,display_name,picture_url",
+                "line_user_id": f"in.({','.join(_uids)})", "limit": "50"}):
+            _names[r["line_user_id"]] = r
+    for r in recent_slips + recent_follows:
+        u = _names.get(r.get("line_user_id"), {})
+        r["display_name"] = u.get("display_name")
+        r["picture_url"] = u.get("picture_url")
+
     # quota projection
     qv = (quota.get("quota") or {})
     q_limit = qv.get("value") if isinstance(qv, dict) else None
@@ -1200,8 +1233,18 @@ async def dashboard(admin=Depends(current_admin), range: int = 30):
             "by_course": slip_courses,
             "daily": [sdaily[k] for k in skeys],
         },
-        "messages": {"in_7d": c["msg_in_7"], "out_7d": c["msg_out_7"]},
+        "messages": {"in_7d": c["msg_in_7"], "out_7d": c["msg_out_7"],
+                     "today": c["msg_today"], "gemini_7d": c["gemini_7"],
+                     "webhook_7d": c["wh_7"]},
         "bot": bot, "quota": quota,
+        "counts": {
+            "auto_replies": c["ar_total"], "auto_replies_on": c["ar_on"],
+            "postbacks": c["pb_total"], "postbacks_on": c["pb_on"],
+            "automations": c["auto_total"], "automations_on": c["auto_on"],
+            "segments": c["seg_total"], "templates": c["tpl_total"],
+            "links": c["link_total"], "rich_menus": c["menu_total"],
+            "scheduled_pending": c["sched_pending"], "blocked_ever": c["blocked"],
+        },
         "system": {
             "quota_limit": q_limit, "quota_used": q_used,
             "quota_pct": round((q_used or 0) / (q_limit or 1) * 100) if q_limit else None,
@@ -1214,6 +1257,8 @@ async def dashboard(admin=Depends(current_admin), range: int = 30):
         },
         "recent_operations": recent_ops,
         "recent_broadcasts": recent_bc,
+        "recent_slips": recent_slips,
+        "recent_follows": recent_follows,
     }
 
 
@@ -1223,12 +1268,14 @@ async def dashboard_analytics(admin=Depends(current_admin), range: int = 30):
     dkeys = _day_series(days)
     dN = _iso_ago(days=days)
 
-    # ---------- messages: type / source / daily / heatmap ----------
+    # ---------- messages: type / source / daily / heatmap / top talkers ----------
     msgs = await supa.select_all("messages", params={
-        "select": "direction,by,msg_type,created_at", "created_at": f"gte.{dN}"})
+        "select": "direction,by,msg_type,created_at,line_user_id", "created_at": f"gte.{dN}"})
     in_daily = {k: 0 for k in dkeys}
+    out_daily = {k: 0 for k in dkeys}
     type_map: dict[str, int] = {}
     out_src: dict[str, int] = {}
+    talk: dict[str, int] = {}
     # heatmap: 7 weekday rows x 24 hour cols (นับ inbound)
     heat = [[0] * 24 for _ in range(7)]
     for m in msgs:
@@ -1237,15 +1284,32 @@ async def dashboard_analytics(admin=Depends(current_admin), range: int = 30):
             if k in in_daily:
                 in_daily[k] += 1
             type_map[m.get("msg_type") or "?"] = type_map.get(m.get("msg_type") or "?", 0) + 1
+            if m.get("line_user_id"):
+                talk[m["line_user_id"]] = talk.get(m["line_user_id"], 0) + 1
             try:
                 ts = dt.datetime.fromisoformat(m["created_at"].replace("Z", "+00:00"))
                 heat[ts.weekday()][ts.hour] += 1
             except Exception:
                 pass
         else:
+            if k in out_daily:
+                out_daily[k] += 1
             b = m.get("by") or "?"
-            b = b if b in ("auto", "manual", "postback", "automation", "system", "broadcast") else "admin"
+            b = b if b in ("auto", "manual", "postback", "automation", "system", "broadcast", "gemini") else "admin"
             out_src[b] = out_src.get(b, 0) + 1
+
+    top_talk_ids = sorted(talk, key=lambda u: -talk[u])[:10]
+    talk_names = {}
+    if top_talk_ids:
+        for r in await supa.select("line_users", params={
+                "select": "line_user_id,display_name,picture_url",
+                "line_user_id": f"in.({','.join(top_talk_ids)})", "limit": "20"}):
+            talk_names[r["line_user_id"]] = r
+    top_talkers = [{
+        "line_user_id": u, "count": talk[u],
+        "display_name": (talk_names.get(u) or {}).get("display_name"),
+        "picture_url": (talk_names.get(u) or {}).get("picture_url"),
+    } for u in top_talk_ids]
 
     # ---------- webhook events by type / day ----------
     whe = await supa.select_all("webhook_events", params={
@@ -1285,12 +1349,13 @@ async def dashboard_analytics(admin=Depends(current_admin), range: int = 30):
         "select": "kind,run_at,label,repeat,status", "status": "eq.pending",
         "order": "run_at.asc", "limit": "8"})
 
-    # ---------- LINE insight (demographic) ----------
-    demo = {}
-    try:
-        demo = await line.insight_demographic()
-    except Exception:
-        pass
+    # ---------- LINE insight (demographic + delivery) ----------
+    li = await _gather_dict(
+        demo=line.insight_demographic(),
+        delivery=line.insight_message_delivery((dt.date.today() - dt.timedelta(days=2)).strftime("%Y%m%d")),
+    )
+    demo = li.get("demo") or {}
+    delivery = li.get("delivery") or {}
     hist = await supa.select("stats_daily", params={
         "select": "day,followers,targeted_reaches,blocks", "order": "day.desc", "limit": str(days)})
 
@@ -1307,17 +1372,20 @@ async def dashboard_analytics(admin=Depends(current_admin), range: int = 30):
                   "audio": "เสียง", "location": "ตำแหน่ง", "file": "ไฟล์"}
     SRC_LABEL = {"auto": "ตอบอัตโนมัติ", "manual": "แอดมินพิมพ์", "admin": "แอดมินพิมพ์",
                  "postback": "ปุ่ม/Postback", "automation": "Automation",
-                 "broadcast": "Broadcast", "system": "ระบบ"}
+                 "broadcast": "Broadcast", "system": "ระบบ", "gemini": "Gemini AI"}
     return {
         "range_days": days,
         "messages": {
             "in_daily": [{"day": k, "count": in_daily[k]} for k in dkeys],
+            "out_daily": [{"day": k, "count": out_daily[k]} for k in dkeys],
             "by_type": sorted([{"type": TYPE_LABEL.get(k, k), "count": v}
                                for k, v in type_map.items()], key=lambda x: -x["count"]),
             "out_by_source": sorted([{"source": SRC_LABEL.get(k, k), "count": v}
                                      for k, v in out_src.items()], key=lambda x: -x["count"]),
             "heatmap": heat,
+            "top_talkers": top_talkers,
         },
+        "delivery": delivery,
         "webhook": {
             "by_type": sorted([{"type": k, "count": v} for k, v in wh_type.items()], key=lambda x: -x["count"]),
             "daily": [{"day": k, "count": wh_daily[k]} for k in dkeys],
