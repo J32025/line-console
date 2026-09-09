@@ -405,6 +405,43 @@ table.kv td { padding: 4px 0; border: 0; font-size: .8rem; word-break: break-all
   .user-grid { grid-template-columns: 1fr; }
 }
 
+/* ---------- dashboard ---------- */
+.dash h3 { font-size: .92rem; }
+.dash-tabs {
+  display: flex; gap: 4px; overflow-x: auto; margin-bottom: 14px;
+  border-bottom: 1px solid var(--border); -webkit-overflow-scrolling: touch;
+}
+.dash-tabs button {
+  flex-shrink: 0; background: none; border: none; padding: 9px 13px; font-size: .85rem;
+  color: var(--muted); border-bottom: 2px solid transparent; cursor: pointer; white-space: nowrap;
+}
+.dash-tabs button.active { color: var(--primary); border-bottom-color: var(--primary); font-weight: 600; }
+
+.barlist { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
+.barlist-row { display: grid; grid-template-columns: minmax(70px, 34%) 1fr auto; gap: 8px; align-items: center; font-size: .78rem; }
+.barlist-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--muted); }
+.barlist-track { height: 16px; background: var(--panel-2); border-radius: 5px; overflow: hidden; }
+.barlist-fill { display: block; height: 100%; border-radius: 5px; min-width: 2px; transition: width .3s; }
+.barlist-val { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+.dot-sq { width: 10px; height: 10px; border-radius: 3px; flex-shrink: 0; }
+.donut-legend { flex: 1; min-width: 160px; display: flex; flex-direction: column; gap: 5px; }
+
+.heatmap { display: flex; flex-direction: column; gap: 3px; overflow-x: auto; padding-bottom: 4px; }
+.heat-hours { display: grid; grid-template-columns: 24px repeat(8, 1fr); font-size: .62rem; color: var(--muted); }
+.heat-row { display: grid; grid-template-columns: 24px repeat(24, 1fr); gap: 2px; align-items: center; }
+.heat-dow { font-size: .66rem; color: var(--muted); }
+.heat-cell { aspect-ratio: 1; min-width: 9px; border-radius: 2px; }
+
+.quota-bar { height: 20px; background: var(--panel-2); border-radius: 6px; overflow: hidden; }
+.quota-fill { display: block; height: 100%; border-radius: 6px; transition: width .4s; }
+.chip.xs { font-size: .62rem; padding: 1px 5px; }
+.dash .center { min-height: auto; }
+
+@media (max-width: 720px) {
+  .barlist-row { grid-template-columns: minmax(64px, 40%) 1fr auto; font-size: .74rem; }
+}
+
 /* ---------- dark ---------- */
 @media (prefers-color-scheme: dark) {
   :root {

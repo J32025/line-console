@@ -33,7 +33,8 @@ export const api = {
   del: (p) => req('DELETE', p),
 
   me: () => req('GET', '/me'),
-  dashboard: () => req('GET', '/dashboard'),
+  dashboard: (range = 30) => req('GET', `/dashboard?range=${range}`),
+  dashboardAnalytics: (range = 30) => req('GET', `/dashboard/analytics?range=${range}`),
 
   richmenus: () => req('GET', '/richmenus'),
   richmenuUsage: () => req('GET', '/richmenu/usage'),

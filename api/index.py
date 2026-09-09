@@ -962,38 +962,329 @@ async def _handle_auto_replies(events: list):
 # ============================================================
 # dashboard
 # ============================================================
+def _day(s):
+    return (s or "")[:10]
+
+
+def _day_series(n: int) -> list[str]:
+    today = dt.date.today()
+    return [(today - dt.timedelta(days=i)).isoformat() for i in range(n - 1, -1, -1)]
+
+
+def _iso_ago(**kw):
+    return (dt.datetime.now(dt.timezone.utc) - dt.timedelta(**kw)).isoformat()
+
+
+async def _gather_dict(**coros):
+    keys = list(coros.keys())
+    vals = await asyncio.gather(*coros.values(), return_exceptions=True)
+    return {k: (None if isinstance(v, Exception) else v) for k, v in zip(keys, vals)}
+
+
 @app.get("/api/dashboard")
-async def dashboard(admin=Depends(current_admin)):
-    total = await supa.count("line_users")
-    following = await supa.count("line_users", {"is_following": "eq.true"})
-    no_menu = await supa.count("line_users", {"is_following": "eq.true", "rich_menu_status": "eq.none"})
-    bot = {}
-    quota = {}
+async def dashboard(admin=Depends(current_admin), range: int = 30):
+    days = max(7, min(range, 90))
+    d7, d30, dN = _iso_ago(days=7), _iso_ago(days=30), _iso_ago(days=days)
+    today0 = dt.date.today().isoformat()
+
+    # ---------- headline counts (ขนานกันหมด) ----------
+    c = await _gather_dict(
+        total=supa.count("line_users"),
+        following=supa.count("line_users", {"is_following": "eq.true"}),
+        not_following=supa.count("line_users", {"is_following": "eq.false"}),
+        no_menu=supa.count("line_users", {"is_following": "eq.true", "current_rich_menu_id": "is.null"}),
+        active7=supa.count("line_users", {"is_following": "eq.true", "last_message_at": f"gte.{d7}"}),
+        active30=supa.count("line_users", {"is_following": "eq.true", "last_message_at": f"gte.{d30}"}),
+        unread=supa.count("line_users", {"unread": "gt.0"}),
+        new7=supa.count("line_users", {"first_followed_at": f"gte.{d7}"}),
+        new30=supa.count("line_users", {"first_followed_at": f"gte.{d30}"}),
+        msg_in_7=supa.count("messages", {"direction": "eq.in", "created_at": f"gte.{d7}"}),
+        msg_out_7=supa.count("messages", {"direction": "eq.out", "created_at": f"gte.{d7}"}),
+        wh_today=supa.count("webhook_events", {"created_at": f"gte.{today0}"}),
+        slip_total=supa.count("slips"),
+        slip_new=supa.count("slips", {"status": "eq.new"}),
+        slip_review=supa.count("slips", {"status": "eq.review"}),
+        slip_verified=supa.count("slips", {"status": "eq.verified"}),
+        slip_rejected=supa.count("slips", {"status": "eq.rejected"}),
+        slip_today=supa.count("slips", {"created_at": f"gte.{today0}"}),
+        slip_week=supa.count("slips", {"created_at": f"gte.{d7}"}),
+        err24=supa.count("operations", {"status": "eq.error", "created_at": f"gte.{_iso_ago(hours=24)}"}),
+        rows_users=supa.count("line_users"),
+        rows_msg=supa.count("messages"),
+        rows_wh=supa.count("webhook_events"),
+        rows_ev_pending=supa.count("automation_runs", {"status": "eq.pending"}),
+    )
+
+    # ---------- LINE API ----------
+    line_data = await _gather_dict(bot=line.bot_info(), quota=line.message_quota())
+    bot = line_data.get("bot") or {"error": "ดึงข้อมูลบอทไม่ได้"}
+    quota = line_data.get("quota") or {}
+
+    # ---------- growth: follow_history (real-time) ----------
+    fh = await supa.select_all("follow_history", params={"select": "action,is_unblocked,event_ts,created_at"})
+    gkeys = _day_series(days)
+    gmap = {k: {"day": k, "follow": 0, "unfollow": 0, "unblock": 0} for k in gkeys}
+    for r in fh:
+        k = _day(r.get("event_ts") or r.get("created_at"))
+        if k in gmap:
+            if r["action"] == "follow":
+                gmap[k]["follow"] += 1
+                if r.get("is_unblocked"):
+                    gmap[k]["unblock"] += 1
+            elif r["action"] == "unfollow":
+                gmap[k]["unfollow"] += 1
+    growth = []
+    run = 0
+    for k in gkeys:
+        g = gmap[k]
+        g["net"] = g["follow"] - g["unfollow"]
+        run += g["net"]
+        g["cumulative"] = run
+        growth.append(g)
+    tot_follow = sum(g["follow"] for g in growth)
+    tot_unfollow = sum(g["unfollow"] for g in growth)
+
+    # ---------- new followers / day (first_followed_at) ----------
+    lu = await supa.select_all("line_users", params={
+        "select": "first_followed_at,source,current_rich_menu_id,is_following"})
+    nmap = {k: 0 for k in gkeys}
+    src_map: dict[str, int] = {}
+    menu_count: dict[str, int] = {}
+    for u in lu:
+        k = _day(u.get("first_followed_at"))
+        if k in nmap:
+            nmap[k] += 1
+        src_map[u.get("source") or "unknown"] = src_map.get(u.get("source") or "unknown", 0) + 1
+        if u.get("is_following"):
+            mk = u.get("current_rich_menu_id") or "__none__"
+            menu_count[mk] = menu_count.get(mk, 0) + 1
+    new_daily = [{"day": k, "count": nmap[k]} for k in gkeys]
+    source_breakdown = sorted(
+        [{"source": k, "count": v} for k, v in src_map.items()], key=lambda x: -x["count"])
+
+    # ---------- menu distribution ----------
+    menu_names = {m["rich_menu_id"]: m.get("name") for m in await supa.select(
+        "rich_menus", params={"select": "rich_menu_id,name"})}
     try:
-        bot = await line.bot_info()
-        quota = await line.message_quota()
-    except Exception as e:
-        bot = {"error": str(e)}
+        default_menu = await line.richmenu_get_default()
+    except Exception:
+        default_menu = None
+    menu_dist = sorted([{
+        "name": "— ไม่มีเมนู —" if k == "__none__" else (menu_names.get(k) or "(เมนูถูกลบ)"),
+        "rich_menu_id": None if k == "__none__" else k,
+        "count": v, "is_default": k == default_menu,
+    } for k, v in menu_count.items()], key=lambda x: -x["count"])
+
+    # ---------- slips: revenue ----------
+    slips = await supa.select_all("slips", params={
+        "select": "status,amount,expected_course,created_at,reviewed_at"})
+    rev_total = sum(float(s.get("amount") or 0) for s in slips if s.get("status") == "verified")
+    rev_week = sum(float(s.get("amount") or 0) for s in slips
+                   if s.get("status") == "verified" and _day(s.get("reviewed_at") or s.get("created_at")) >= _day(d7))
+    course_map: dict[str, dict] = {}
+    skeys = _day_series(days)
+    sdaily = {k: {"day": k, "verified": 0, "review": 0, "rejected": 0, "new": 0} for k in skeys}
+    for s in slips:
+        co = s.get("expected_course") or "ไม่ระบุ"
+        cm = course_map.setdefault(co, {"course": co, "count": 0, "verified": 0, "amount": 0.0})
+        cm["count"] += 1
+        if s.get("status") == "verified":
+            cm["verified"] += 1
+            cm["amount"] += float(s.get("amount") or 0)
+        k = _day(s.get("created_at"))
+        if k in sdaily and s.get("status") in sdaily[k]:
+            sdaily[k][s["status"]] += 1
+    slip_courses = sorted(course_map.values(), key=lambda x: -x["amount"])
+
+    # ---------- system: cron health ----------
+    ops = await supa.select("operations", params={
+        "select": "action,status,created_at", "order": "created_at.desc", "limit": "80"})
+    cron_jobs = {}
+    for o in ops:
+        a = o.get("action") or ""
+        if "cron" in a or a.startswith(("richmenu.sync", "automation.run", "stats.snapshot", "backup")):
+            base = a.split(".cron")[0]
+            if base not in cron_jobs:
+                cron_jobs[base] = {"job": base, "last_run": o["created_at"], "status": o.get("status")}
     recent_ops = await supa.select("operations", params={
-        "select": "id,actor,action,status,created_at", "order": "created_at.desc", "limit": "8",
-    })
+        "select": "id,actor,action,status,created_at", "order": "created_at.desc", "limit": "10"})
     recent_bc = await supa.select("broadcasts", params={
-        "select": "id,kind,target_count,status,created_at", "order": "created_at.desc", "limit": "5",
-    })
-    trend = await supa.select("stats_daily", params={
-        "select": "day,followers,targeted_reaches,blocks", "order": "day.desc", "limit": "30",
-    })
-    # นับ event 7 วันล่าสุด แยกชนิด
-    since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=7)).isoformat()
-    ev7 = {}
-    for et in ("follow", "unfollow", "message"):
-        ev7[et] = await supa.count("webhook_events", {"event_type": f"eq.{et}", "created_at": f"gte.{since}"})
+        "select": "id,kind,target_count,status,created_at", "order": "created_at.desc", "limit": "6"})
+
+    # quota projection
+    qv = (quota.get("quota") or {})
+    q_limit = qv.get("value") if isinstance(qv, dict) else None
+    q_used = quota.get("totalUsage")
+    day_of_month = dt.date.today().day
+    q_proj = round(q_used / day_of_month * 30) if (q_used and day_of_month) else None
+
     return {
-        "users": {"total": total, "following": following, "no_menu": no_menu},
+        "generated_at": NOW(),
+        "range_days": days,
+        "commit": (os.environ.get("VERCEL_GIT_COMMIT_SHA") or "?")[:7],
+        "users": {
+            "total": c["total"], "following": c["following"], "not_following": c["not_following"],
+            "no_menu": c["no_menu"], "with_menu": (c["following"] or 0) - (c["no_menu"] or 0),
+            "active_7d": c["active7"], "active_30d": c["active30"],
+            "new_7d": c["new7"], "new_30d": c["new30"], "unread_threads": c["unread"],
+            "follow_rate": round((c["following"] or 0) / (c["total"] or 1) * 100),
+            "active_rate": round((c["active30"] or 0) / (c["following"] or 1) * 100),
+            "source_breakdown": source_breakdown,
+        },
+        "growth": growth,
+        "growth_totals": {"follow": tot_follow, "unfollow": tot_unfollow,
+                          "net": tot_follow - tot_unfollow},
+        "new_daily": new_daily,
+        "menu_distribution": menu_dist,
+        "slips": {
+            "total": c["slip_total"], "today": c["slip_today"], "week": c["slip_week"],
+            "by_status": {"new": c["slip_new"], "review": c["slip_review"],
+                          "verified": c["slip_verified"], "rejected": c["slip_rejected"]},
+            "pending_action": (c["slip_new"] or 0) + (c["slip_review"] or 0),
+            "revenue_verified": round(rev_total), "revenue_week": round(rev_week),
+            "by_course": slip_courses,
+            "daily": [sdaily[k] for k in skeys],
+        },
+        "messages": {"in_7d": c["msg_in_7"], "out_7d": c["msg_out_7"]},
         "bot": bot, "quota": quota,
-        "recent_operations": recent_ops, "recent_broadcasts": recent_bc,
-        "trend": list(reversed(trend)),
-        "events_7d": ev7,
+        "system": {
+            "quota_limit": q_limit, "quota_used": q_used,
+            "quota_pct": round((q_used or 0) / (q_limit or 1) * 100) if q_limit else None,
+            "quota_projected": q_proj,
+            "webhook_today": c["wh_today"], "errors_24h": c["err24"],
+            "automations_pending": c["rows_ev_pending"],
+            "cron": sorted(cron_jobs.values(), key=lambda x: x["job"]),
+            "db_rows": {"line_users": c["rows_users"], "messages": c["rows_msg"],
+                        "webhook_events": c["rows_wh"], "slips": c["slip_total"]},
+        },
+        "recent_operations": recent_ops,
+        "recent_broadcasts": recent_bc,
+    }
+
+
+@app.get("/api/dashboard/analytics")
+async def dashboard_analytics(admin=Depends(current_admin), range: int = 30):
+    days = max(7, min(range, 90))
+    dkeys = _day_series(days)
+    dN = _iso_ago(days=days)
+
+    # ---------- messages: type / source / daily / heatmap ----------
+    msgs = await supa.select_all("messages", params={
+        "select": "direction,by,msg_type,created_at", "created_at": f"gte.{dN}"})
+    in_daily = {k: 0 for k in dkeys}
+    type_map: dict[str, int] = {}
+    out_src: dict[str, int] = {}
+    # heatmap: 7 weekday rows x 24 hour cols (นับ inbound)
+    heat = [[0] * 24 for _ in range(7)]
+    for m in msgs:
+        k = _day(m.get("created_at"))
+        if m.get("direction") == "in":
+            if k in in_daily:
+                in_daily[k] += 1
+            type_map[m.get("msg_type") or "?"] = type_map.get(m.get("msg_type") or "?", 0) + 1
+            try:
+                ts = dt.datetime.fromisoformat(m["created_at"].replace("Z", "+00:00"))
+                heat[ts.weekday()][ts.hour] += 1
+            except Exception:
+                pass
+        else:
+            b = m.get("by") or "?"
+            b = b if b in ("auto", "manual", "postback", "automation", "system", "broadcast") else "admin"
+            out_src[b] = out_src.get(b, 0) + 1
+
+    # ---------- webhook events by type / day ----------
+    whe = await supa.select_all("webhook_events", params={
+        "select": "event_type,created_at", "created_at": f"gte.{dN}"})
+    wh_type: dict[str, int] = {}
+    wh_daily = {k: 0 for k in dkeys}
+    for w in whe:
+        wh_type[w.get("event_type") or "?"] = wh_type.get(w.get("event_type") or "?", 0) + 1
+        k = _day(w.get("created_at"))
+        if k in wh_daily:
+            wh_daily[k] += 1
+
+    # ---------- bot: top auto-replies / postbacks ----------
+    rules = await supa.select("auto_replies", params={
+        "select": "name,trigger,hits,enabled,last_hit_at", "order": "hits.desc", "limit": "12"})
+    pbs = await supa.select("postback_actions", params={
+        "select": "data,label,hits,enabled,last_hit_at", "order": "hits.desc", "limit": "12"})
+    autos = await supa.select("automations", params={"select": "name,enabled,trigger,runs"})
+    ar_runs = await supa.select_all("automation_runs", params={"select": "status"})
+    ar_stat: dict[str, int] = {}
+    for r in ar_runs:
+        ar_stat[r.get("status") or "?"] = ar_stat.get(r.get("status") or "?", 0) + 1
+
+    # ---------- links ----------
+    links = await supa.select("short_links", params={
+        "select": "code,label,clicks,target", "order": "clicks.desc", "limit": "12"})
+    lc = await supa.select_all("link_clicks", params={
+        "select": "clicked_at", "clicked_at": f"gte.{dN}"})
+    lc_daily = {k: 0 for k in dkeys}
+    for x in lc:
+        k = _day(x.get("clicked_at"))
+        if k in lc_daily:
+            lc_daily[k] += 1
+
+    # ---------- scheduled upcoming ----------
+    sched = await supa.select("scheduled_jobs", params={
+        "select": "kind,run_at,label,repeat,status", "status": "eq.pending",
+        "order": "run_at.asc", "limit": "8"})
+
+    # ---------- LINE insight (demographic) ----------
+    demo = {}
+    try:
+        demo = await line.insight_demographic()
+    except Exception:
+        pass
+    hist = await supa.select("stats_daily", params={
+        "select": "day,followers,targeted_reaches,blocks", "order": "day.desc", "limit": str(days)})
+
+    # ---------- funnel ----------
+    fu = await _gather_dict(
+        total=supa.count("line_users"),
+        following=supa.count("line_users", {"is_following": "eq.true"}),
+        messaged=supa.count("line_users", {"is_following": "eq.true", "last_message_at": "not.is.null"}),
+        slipped=supa.count("slips"),
+        verified=supa.count("slips", {"status": "eq.verified"}),
+    )
+
+    TYPE_LABEL = {"text": "ข้อความ", "image": "รูป", "sticker": "สติกเกอร์", "video": "วิดีโอ",
+                  "audio": "เสียง", "location": "ตำแหน่ง", "file": "ไฟล์"}
+    SRC_LABEL = {"auto": "ตอบอัตโนมัติ", "manual": "แอดมินพิมพ์", "admin": "แอดมินพิมพ์",
+                 "postback": "ปุ่ม/Postback", "automation": "Automation",
+                 "broadcast": "Broadcast", "system": "ระบบ"}
+    return {
+        "range_days": days,
+        "messages": {
+            "in_daily": [{"day": k, "count": in_daily[k]} for k in dkeys],
+            "by_type": sorted([{"type": TYPE_LABEL.get(k, k), "count": v}
+                               for k, v in type_map.items()], key=lambda x: -x["count"]),
+            "out_by_source": sorted([{"source": SRC_LABEL.get(k, k), "count": v}
+                                     for k, v in out_src.items()], key=lambda x: -x["count"]),
+            "heatmap": heat,
+        },
+        "webhook": {
+            "by_type": sorted([{"type": k, "count": v} for k, v in wh_type.items()], key=lambda x: -x["count"]),
+            "daily": [{"day": k, "count": wh_daily[k]} for k in dkeys],
+        },
+        "bot": {
+            "top_rules": rules, "top_postbacks": pbs,
+            "automations": autos, "automation_runs": ar_stat,
+        },
+        "links": {
+            "top": links,
+            "daily": [{"day": k, "count": lc_daily[k]} for k in dkeys],
+        },
+        "scheduled": sched,
+        "demographic": demo,
+        "history": list(reversed(hist)),
+        "funnel": [
+            {"step": "ผู้ใช้ทั้งหมด", "count": fu["total"] or 0},
+            {"step": "กำลังติดตาม", "count": fu["following"] or 0},
+            {"step": "เคยทักแชท", "count": fu["messaged"] or 0},
+            {"step": "ส่งสลิป", "count": fu["slipped"] or 0},
+            {"step": "ยืนยันชำระ", "count": fu["verified"] or 0},
+        ],
     }
 
 
