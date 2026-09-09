@@ -196,6 +196,21 @@ async def health(deep: int = 0, test_gemini: int = 0, test_uid: str = ""):
     except Exception as e:
         checks["schema"]["rich_menus.gemini_*"] = f"MISSING — {str(e)[:100]}"
         out["ok"] = False
+    # LIFF sync
+    try:
+        _tok, _terr = await _liff_channel_token()
+        if _terr:
+            checks["liff_sync"] = f"error: {_terr[:150]}"
+        elif _tok:
+            async with httpx.AsyncClient(timeout=12) as _c:
+                _r = await _c.get("https://api.line.me/liff/v1/apps",
+                                  headers={"Authorization": f"Bearer {_tok}"})
+            checks["liff_sync"] = (f"ok ({len(_r.json().get('apps', []))} apps)"
+                                   if _r.status_code == 200 else f"{_r.status_code}: {_r.text[:100]}")
+        else:
+            checks["liff_sync"] = "off (ยังไม่ตั้ง LINE_LOGIN_CHANNEL_SECRET / KID)"
+    except Exception as e:
+        checks["liff_sync"] = f"error: {str(e)[:120]}"
     checks["gemini"] = {
         "api_key_set": bool(GEMINI_API_KEY),
         "model": GEMINI_MODEL,
