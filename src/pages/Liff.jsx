@@ -51,14 +51,27 @@ export default function Liff() {
           <tbody>
             <tr><th>VITE_LIFF_ID</th><td className="mono">{env.VITE_LIFF_ID || '–'} {env.VITE_LIFF_ID && <button className="xs" onClick={() => copy(env.VITE_LIFF_ID)}>คัดลอก</button>}</td></tr>
             <tr><th>LIFF_CHANNEL_ID</th><td className="mono">{env.LIFF_CHANNEL_ID || '–'}</td></tr>
+            <tr><th>LINE Login channel</th><td className="mono">{env.LINE_LOGIN_CHANNEL_ID || '–'}</td></tr>
             <tr><th>Endpoint ที่แนะนำ</th><td className="mono">{env.recommendedEndpoint} <button className="xs" onClick={() => copy(env.recommendedEndpoint)}>คัดลอก</button></td></tr>
           </tbody>
         </table>
-        <p className="muted xs">
-          {data.syncEnabled
-            ? (data.syncError ? `sync จาก LINE ล้มเหลว: ${data.syncError}` : 'ดึงรายการจาก LINE อัตโนมัติ ✓')
-            : 'ยังไม่ได้ตั้ง LINE_LOGIN_CHANNEL_TOKEN — เพิ่มรายการ LIFF เอง (ดูรายละเอียดครบจาก LINE Developers Console)'}
-        </p>
+        {data.syncEnabled && !data.syncError && (
+          <p className="chip ok">✓ ดึงรายการจาก LINE อัตโนมัติ ({data.line_count} รายการ · โหมด {data.syncMode})</p>
+        )}
+        {data.syncError && (
+          <p className="muted xs" style={{ color: 'var(--warn)' }}>⚠ ดึงจาก LINE ไม่สำเร็จ: {data.syncError}</p>
+        )}
+        {!data.syncEnabled && (
+          <div className="muted xs">
+            <b>ยังไม่ได้เชื่อม LINE</b> — ตอนนี้แสดงเฉพาะรายการที่บันทึกเอง<br />
+            เปิดการดึงรายการ LIFF ทั้งหมดของ bot อัตโนมัติ: ตั้ง env ตัวใดตัวหนึ่งบน Vercel แล้ว redeploy
+            <ul style={{ margin: '4px 0' }}>
+              <li><code>LINE_LOGIN_CHANNEL_SECRET</code> = Channel secret ของ LINE Login channel <code>{env.LINE_LOGIN_CHANNEL_ID}</code> (แนะนำ — ระบบต่อ token ให้เอง)</li>
+              <li>หรือ <code>LINE_LOGIN_CHANNEL_TOKEN</code> = channel access token (ต้องต่ออายุเองทุก 30 วัน)</li>
+            </ul>
+            ดู secret ได้ที่ LINE Developers Console → channel <code>{env.LINE_LOGIN_CHANNEL_ID}</code> → Basic settings
+          </div>
+        )}
       </section>
 
       <div className="row spread">

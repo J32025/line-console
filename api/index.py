@@ -23,7 +23,8 @@ from _lib.auth import current_admin
 from _lib.config import (LINE_CHANNEL_SECRET, CRON_SECRET, ALERT_USER_IDS,
                          LINE_CHANNEL_ACCESS_TOKEN, LIFF_CHANNEL_ID,
                          SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY,
-                         LINE_LOGIN_CHANNEL_TOKEN, APP_URL, EASYSLIP_TOKEN,
+                         LINE_LOGIN_CHANNEL_TOKEN, LINE_LOGIN_CHANNEL_ID,
+                         LINE_LOGIN_CHANNEL_SECRET, APP_URL, EASYSLIP_TOKEN,
                          ENFORCE_RICHMENU_ID, ENFORCE_EXCLUDE_MENUS,
                          GEMINI_API_KEY, GEMINI_MODEL, GEMINI_TRIGGER_MENU_NAME,
                          SLIP_SUCCESS_RICHMENU_ID)
@@ -3085,18 +3086,54 @@ def _liff_meta(liff_id: str) -> dict:
     }
 
 
+_liff_token_cache: dict = {"token": None, "exp": 0.0}
+
+
+async def _liff_channel_token() -> tuple[str | None, str | None]:
+    """channel access token ของ LINE Login channel (สำหรับเรียก LIFF API)
+    คืน (token, error). ใช้ LINE_LOGIN_CHANNEL_TOKEN ถ้าตั้งไว้ตรง ๆ
+    ไม่งั้นขอเองด้วย client_credentials จาก id+secret แล้ว cache"""
+    if LINE_LOGIN_CHANNEL_TOKEN:
+        return LINE_LOGIN_CHANNEL_TOKEN, None
+    if not (LINE_LOGIN_CHANNEL_ID and LINE_LOGIN_CHANNEL_SECRET):
+        return None, "ยังไม่ได้ตั้ง LINE_LOGIN_CHANNEL_SECRET (หรือ LINE_LOGIN_CHANNEL_TOKEN)"
+    if _liff_token_cache["token"] and time.time() < _liff_token_cache["exp"]:
+        return _liff_token_cache["token"], None
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.post("https://api.line.me/oauth2/v2.1/token",
+                             data={"grant_type": "client_credentials",
+                                   "client_id": LINE_LOGIN_CHANNEL_ID,
+                                   "client_secret": LINE_LOGIN_CHANNEL_SECRET},
+                             headers={"Content-Type": "application/x-www-form-urlencoded"})
+        j = r.json()
+        if r.status_code != 200 or not j.get("access_token"):
+            return None, f"ขอ token ไม่สำเร็จ ({r.status_code}): {j.get('error_description') or j.get('error') or r.text[:120]}"
+        tok = j["access_token"]
+        _liff_token_cache["token"] = tok
+        _liff_token_cache["exp"] = time.time() + max(600, int(j.get("expires_in", 2592000)) - 86400)
+        return tok, None
+    except Exception as e:
+        return None, str(e)
+
+
 @app.get("/api/liff")
 async def liff_list(admin=Depends(current_admin)):
     stored = await supa.select("liff_apps", params={"select": "*", "order": "is_primary.desc,updated_at.desc"})
-    # sync จาก LINE ถ้ามี token
+    # sync จาก LINE — ดึงรายการ LIFF ทั้งหมดของ Login channel
     line_apps, sync_err = [], None
-    if LINE_LOGIN_CHANNEL_TOKEN:
+    token, terr = await _liff_channel_token()
+    if terr:
+        sync_err = terr
+    elif token:
         try:
             async with httpx.AsyncClient(timeout=15) as c:
                 r = await c.get("https://api.line.me/liff/v1/apps",
-                                headers={"Authorization": f"Bearer {LINE_LOGIN_CHANNEL_TOKEN}"})
+                                headers={"Authorization": f"Bearer {token}"})
             if r.status_code == 200:
                 line_apps = r.json().get("apps", [])
+            elif r.status_code == 401:
+                sync_err = "token ไม่ผ่าน — channel secret/id อาจผิด หรือไม่ใช่ Login channel"
             else:
                 sync_err = f"{r.status_code}: {r.text[:150]}"
         except Exception as e:
@@ -3115,15 +3152,18 @@ async def liff_list(admin=Depends(current_admin)):
             merged.append({**_liff_meta(a["liffId"]), "name": a.get("description"),
                            "line": a, "source": "line"})
 
-    env_liff = os.environ.get("VITE_LIFF_ID") or (LIFF_CHANNEL_ID and "")
     return {
         "apps": merged,
+        "line_count": len(line_apps),
         "env": {
             "VITE_LIFF_ID": os.environ.get("VITE_LIFF_ID"),
             "LIFF_CHANNEL_ID": LIFF_CHANNEL_ID,
+            "LINE_LOGIN_CHANNEL_ID": LINE_LOGIN_CHANNEL_ID,
             "recommendedEndpoint": APP_URL,
         },
-        "syncEnabled": bool(LINE_LOGIN_CHANNEL_TOKEN),
+        "syncEnabled": bool(token),
+        "syncMode": ("token" if LINE_LOGIN_CHANNEL_TOKEN
+                     else "client_credentials" if LINE_LOGIN_CHANNEL_SECRET else "off"),
         "syncError": sync_err,
     }
 

@@ -17,8 +17,14 @@ CRON_SECRET = os.environ.get("CRON_SECRET", "").strip()
 # LINE userId ที่จะรับแจ้งเตือน error ของระบบ (คั่นด้วย ,) — ว่าง = ไม่แจ้ง
 ALERT_USER_IDS = [u.strip() for u in os.environ.get("ALERT_USER_IDS", "").split(",") if u.strip()]
 
-# LINE Login channel (สำหรับ LIFF) — ใส่ access token ถ้าอยาก sync รายการ LIFF จาก LINE อัตโนมัติ
+# LINE Login channel (สำหรับ LIFF) — ดึงรายการ LIFF จาก LINE อัตโนมัติได้ 2 วิธี:
+#  (ก) ใส่ LINE_LOGIN_CHANNEL_TOKEN โดยตรง (channel access token ของ Login channel)
+#  (ข) ใส่ LINE_LOGIN_CHANNEL_SECRET (+ LINE_LOGIN_CHANNEL_ID ถ้าต่างจาก LIFF_CHANNEL_ID)
+#      -> ระบบจะขอ token เองด้วย client_credentials แล้ว cache ไว้
 LINE_LOGIN_CHANNEL_TOKEN = os.environ.get("LINE_LOGIN_CHANNEL_TOKEN", "").strip()
+LINE_LOGIN_CHANNEL_ID = (os.environ.get("LINE_LOGIN_CHANNEL_ID", "").strip().split("-")[0]
+                         or LIFF_CHANNEL_ID)
+LINE_LOGIN_CHANNEL_SECRET = os.environ.get("LINE_LOGIN_CHANNEL_SECRET", "").strip()
 
 # EasySlip API token (ตรวจสลิปอัตโนมัติ) — ว่าง = ไม่ตรวจ OCR แค่แจ้งเตือน
 EASYSLIP_TOKEN = os.environ.get("EASYSLIP_TOKEN", "").strip()
