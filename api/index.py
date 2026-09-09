@@ -181,6 +181,21 @@ async def health(deep: int = 0, test_gemini: int = 0, test_uid: str = ""):
         checks["last_cron"] = rows
     except Exception:
         pass
+    # เช็คว่า migration 0002/0003/0004 รันครบใน DB ไหม
+    checks["schema"] = {}
+    for tb in ("slips", "payment_accounts", "postback_actions", "app_settings", "richmenu_history"):
+        try:
+            n = await supa.count(tb)
+            checks["schema"][tb] = f"ok ({n} rows)"
+        except Exception as e:
+            checks["schema"][tb] = f"MISSING — {str(e)[:100]}"
+            out["ok"] = False
+    try:
+        await supa.select("rich_menus", params={"select": "gemini_enabled,gemini_temperature", "limit": "1"})
+        checks["schema"]["rich_menus.gemini_*"] = "ok"
+    except Exception as e:
+        checks["schema"]["rich_menus.gemini_*"] = f"MISSING — {str(e)[:100]}"
+        out["ok"] = False
     checks["gemini"] = {
         "api_key_set": bool(GEMINI_API_KEY),
         "model": GEMINI_MODEL,

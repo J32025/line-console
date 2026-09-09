@@ -9,6 +9,7 @@ const SOURCE_LABEL = {
   link: 'assign (เว็บ)',
   unlink: 'unlink (เว็บ)',
   enforce: 'enforce (cron)',
+  slip: 'ส่งสลิป (อัตโนมัติ)',
 }
 
 function menuLabel(id) {
@@ -24,10 +25,11 @@ export default function RichMenuHistory() {
   const [total, setTotal] = useState(0)
   const [offset, setOffset] = useState(0)
   const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
   const LIMIT = 100
 
   const load = async (nextOffset = 0, append = false) => {
-    setBusy(true)
+    setBusy(true); setErr('')
     try {
       const qs = { limit: LIMIT, offset: nextOffset }
       if (uidFilter.trim()) qs.userId = uidFilter.trim()
@@ -35,7 +37,9 @@ export default function RichMenuHistory() {
       setItems((prev) => (append ? [...(prev || []), ...r.items] : r.items))
       setTotal(r.total)
       setOffset(nextOffset)
-    } catch (e) { t.err(e.message) } finally { setBusy(false) }
+    } catch (e) {
+      setErr(e.message); setItems([]); t.err(e.message)
+    } finally { setBusy(false) }
   }
 
   useEffect(() => { load(0, false) }, []) // eslint-disable-line react-hooks/exhaustive-deps
@@ -70,6 +74,13 @@ export default function RichMenuHistory() {
         <div className="row spread">
           <h3>รายการเปลี่ยนแปลง {total ? `(${total.toLocaleString()})` : ''}</h3>
         </div>
+        {err && (
+          <p className="err">
+            โหลดไม่สำเร็จ: {err}
+            {/richmenu_history|does not exist|PGRST|relation/i.test(err) &&
+              <> — ตาราง <code>richmenu_history</code> ยังไม่ถูกสร้างใน DB (รัน migration 0003 ใน Supabase SQL Editor)</>}
+          </p>
+        )}
         {!items ? <Spinner /> : (
           <>
             <table>
