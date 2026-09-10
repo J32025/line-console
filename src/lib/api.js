@@ -97,6 +97,8 @@ export const api = {
   updateRegistration: (id, patch) => req('PATCH', `/registrations/${id}`, patch),
   importRegistrations: (payload) => req('POST', '/registrations/import', payload),
   retagRegistrations: () => req('POST', '/registrations/retag'),
+  reconcile: () => req('GET', '/reconcile'),
+  reconcileMarkPaid: (ids) => req('POST', '/reconcile/mark-paid', { ids }),
   messageRegistrations: (payload) => req('POST', '/registrations/message', payload),
 
   slips: (status = '') => req('GET', '/slips' + (status ? `?status=${status}` : '')),

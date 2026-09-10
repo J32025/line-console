@@ -3,6 +3,7 @@ import { api } from '../lib/api.js'
 import { Spinner, InlineSpinner, Stat, useToast } from '../lib/ui.jsx'
 
 const nf = (n) => (n == null ? '–' : Number(n).toLocaleString('th-TH'))
+const baht = (n) => (n == null ? '–' : '฿' + Number(n).toLocaleString('th-TH'))
 
 export default function Registrations() {
   const t = useToast()
@@ -15,6 +16,8 @@ export default function Registrations() {
   const [imp, setImp] = useState(null)     // import modal: {text}
   const [msg, setMsg] = useState(null)     // message modal: {text}
   const [detail, setDetail] = useState(null)
+  const [view, setView] = useState('list')   // list | reconcile
+  const [rec, setRec] = useState(null)
   const LIMIT = 100
 
   const loadSum = () => api.registrationsSummary().then(setSum).catch((e) => t.err(e.message))
@@ -27,8 +30,10 @@ export default function Registrations() {
     api.registrations(qs).then((d) => { setList(d.registrations); setTotal(d.total); setOffset(off) })
       .catch((e) => t.err(e.message)).finally(() => setBusy(''))
   }
+  const loadRec = () => { setRec(null); api.reconcile().then(setRec).catch((e) => t.err(e.message)) }
   useEffect(() => { loadSum(); load(0) }, []) // eslint-disable-line
   useEffect(() => { load(0) }, [f.course, f.paid]) // eslint-disable-line
+  useEffect(() => { if (view === 'reconcile' && !rec) loadRec() }, [view]) // eslint-disable-line
 
   const doImport = async () => {
     setBusy('import')
@@ -69,7 +74,14 @@ export default function Registrations() {
         </div>
       </div>
 
-      {!sum ? <Spinner /> : (
+      <div className="dash-nav" style={{ position: 'static', border: 0, marginBottom: 10 }}>
+        <button className={view === 'list' ? 'active' : ''} onClick={() => setView('list')}>รายชื่อ</button>
+        <button className={view === 'reconcile' ? 'active' : ''} onClick={() => setView('reconcile')}>กระทบยอด</button>
+      </div>
+
+      {view === 'reconcile' && <ReconcileView rec={rec} reload={loadRec} onMarked={() => { loadRec(); loadSum(); }} />}
+
+      {view === 'list' && (!sum ? <Spinner /> : (
         <>
           <div className="grid stats">
             <Stat label="ลงทะเบียนทั้งหมด" value={nf(sum.total)} sub={`${nf(sum.people)} คน`} />
@@ -135,7 +147,7 @@ export default function Registrations() {
             )}
           </section>
         </>
-      )}
+      ))}
 
       {imp && (
         <div className="modal-bg" onClick={() => setImp(null)}>
@@ -237,6 +249,114 @@ function RegDetail({ id, onClose, onSaved }) {
           </>
         )}
       </div>
+    </div>
+  )
+}
+
+function ReconcileView({ rec, reload, onMarked }) {
+  const t = useToast()
+  const [busy, setBusy] = useState(false)
+  if (!rec) return <Spinner />
+  const T = rec.totals
+  const I = rec.issues
+
+  const markAll = async () => {
+    const ids = (I.paid_not_marked || []).map((x) => x.id)
+    if (!ids.length) return
+    setBusy(true)
+    try { const r = await api.reconcileMarkPaid(ids); t.ok(`mark จ่ายแล้ว ${r.marked} รายการ`); onMarked() }
+    catch (e) { t.err(e.message) } finally { setBusy(false) }
+  }
+
+  return (
+    <>
+      <div className="grid stats">
+        <Stat label="ลงทะเบียน" value={nf(T.registered)} />
+        <Stat label="mark จ่ายแล้ว" value={nf(T.paid_marked)} sub={`ค้าง ${nf(T.registered - T.paid_marked)}`} />
+        <Stat label="สลิปยืนยัน (EasySlip)" value={nf(T.slip_verified)} />
+        <Stat label="ยอดเงินรับจริง" value={baht(T.revenue)} sub={`คาด ${baht(T.expected_revenue)}`} />
+      </div>
+
+      <section className="card">
+        <div className="row spread"><h3>แยกตามหลักสูตร</h3><button className="xs" onClick={reload}>รีเฟรช</button></div>
+        <div className="table-scroll">
+          <table>
+            <thead><tr><th>หลักสูตร</th><th>ลงทะเบียน</th><th>จ่ายแล้ว</th><th>สลิปยืนยัน</th><th>รับจริง</th><th>คาด</th><th>ส่วนต่าง</th></tr></thead>
+            <tbody>
+              {rec.by_course.map((c) => (
+                <tr key={c.course}>
+                  <td><b>{c.course}</b></td><td>{nf(c.registered)}</td>
+                  <td>{nf(c.paid)}</td><td>{nf(c.slip_verified)}</td>
+                  <td>{baht(c.revenue)}</td><td className="muted">{baht(c.expected_revenue)}</td>
+                  <td style={{ color: c.revenue >= c.expected_revenue ? 'var(--primary-d)' : 'var(--danger)' }}>
+                    {baht(c.revenue - c.expected_revenue)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section className="card">
+        <div className="row spread">
+          <h3>🟢 จ่ายแล้ว (สลิปยืนยัน) แต่ทะเบียนยังไม่ mark — {nf(I.paid_not_marked_count)}</h3>
+          {I.paid_not_marked?.length > 0 && (
+            <button className="sm primary" disabled={busy} onClick={markAll}>
+              {busy && <InlineSpinner />}mark จ่ายแล้วทั้งหมด
+            </button>
+          )}
+        </div>
+        <IssueTable rows={I.paid_not_marked} extra="slip_amount" />
+      </section>
+
+      <section className="card">
+        <h3>🟠 ลงทะเบียนแล้ว ยังไม่จ่าย (ไม่มีสลิป) — {nf(I.unpaid_count)}</h3>
+        <p className="muted xs">tag `ลงทะเบียน` + คอร์ส แล้ว — ไปหน้า "ส่งข้อความ" เลือก tag คอร์ส (เอา tag `จ่ายแล้ว` ออก) เพื่อทวงชำระ</p>
+        <IssueTable rows={I.unpaid} />
+      </section>
+
+      <section className="card">
+        <h3>🔴 ส่งสลิปยืนยันแล้ว แต่ไม่มีทะเบียนคอร์สนั้น — {nf(I.slip_no_reg_count)}</h3>
+        <p className="muted xs">คนพวกนี้จ่ายเงินแล้วแต่ยังไม่ได้กรอกฟอร์มลงทะเบียน — ติดต่อให้ลงทะเบียน</p>
+        <div className="table-scroll">
+          <table>
+            <thead><tr><th>ชื่อ / userId</th><th>คอร์ส (จากสลิป)</th><th>ยอด</th><th>เหตุผล</th></tr></thead>
+            <tbody>
+              {(I.slip_no_reg || []).map((x) => (
+                <tr key={x.id}>
+                  <td>{x.name || <span className="mono xs">{x.line_user_id.slice(0, 12)}</span>}</td>
+                  <td>{x.course || '–'}</td><td>{baht(x.amount)}</td>
+                  <td className="muted sm">{x.reason}</td>
+                </tr>
+              ))}
+              {!I.slip_no_reg?.length && <tr><td colSpan={4} className="muted">ไม่มี — ทุกสลิปตรงกับทะเบียน 👍</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </>
+  )
+}
+
+function IssueTable({ rows, extra }) {
+  if (!rows?.length) return <p className="muted sm">ไม่มี 👍</p>
+  return (
+    <div className="table-scroll">
+      <table>
+        <thead><tr><th>ชื่อ</th><th>หลักสูตร</th><th>เบอร์</th><th>สังกัด</th>{extra && <th>สลิป</th>}</tr></thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.id}>
+              <td>{r.name || <span className="mono xs">{(r.line_user_id || '').slice(0, 10)}</span>}</td>
+              <td><span className="chip">{r.course}</span></td>
+              <td className="sm">{r.tel || '–'}</td>
+              <td className="sm ellipsis" style={{ maxWidth: 160 }}>{r.org || '–'}</td>
+              {extra && <td>{baht(r[extra])}</td>}
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   )
 }

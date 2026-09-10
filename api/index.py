@@ -3957,6 +3957,130 @@ async def registrations_list(admin=Depends(current_admin), course: str = "", pai
     return {"registrations": rows, "total": total, "limit": limit, "offset": offset}
 
 
+@app.get("/api/reconcile")
+async def reconcile(admin=Depends(current_admin)):
+    """กระทบยอด: ทะเบียน vs สลิปที่ยืนยัน vs สถานะจ่าย"""
+    regs = await supa.select_all("registrations", params={
+        "select": "id,line_user_id,course,course_raw,name,tel,org,paid,created_at"})
+    slips = await supa.select_all("slips", params={
+        "select": "id,line_user_id,expected_course,amount,created_at", "status": "eq.verified"})
+    accts = await supa.select("payment_accounts", params={"select": "course,price,full_price"})
+
+    def _price(course):
+        base = (course or "")[:2].upper()
+        for a in accts:
+            if str(a.get("course") or "").upper().startswith(base):
+                return float(a.get("price") or 0)
+        return 0.0
+
+    slips_by_uid: dict[str, list] = {}
+    for s in slips:
+        slips_by_uid.setdefault(s["line_user_id"], []).append(s)
+
+    def _slip_for(uid, course):
+        base = (course or "")[:2].upper()
+        for s in slips_by_uid.get(uid, []):
+            if base and str(s.get("expected_course") or "").upper().startswith(base) and not s.get("_used"):
+                return s
+        return None
+
+    course_map: dict[str, dict] = {}
+    unpaid, paid_not_marked = [], []
+    for r in regs:
+        c = r.get("course") or "?"
+        cm = course_map.setdefault(c, {"course": c, "registered": 0, "paid": 0,
+                                       "slip_verified": 0, "revenue": 0.0, "unpaid": 0})
+        cm["registered"] += 1
+        s = _slip_for(r["line_user_id"], c)
+        if s:
+            s["_used"] = True
+            cm["slip_verified"] += 1
+            cm["revenue"] += float(s.get("amount") or 0)
+        if r.get("paid"):
+            cm["paid"] += 1
+        else:
+            cm["unpaid"] += 1
+            item = {"id": r["id"], "line_user_id": r["line_user_id"], "name": r.get("name"),
+                    "tel": r.get("tel"), "org": r.get("org"), "course": c}
+            if s:
+                item["slip_amount"] = s.get("amount")
+                item["slip_date"] = s.get("created_at")
+                paid_not_marked.append(item)
+            else:
+                unpaid.append(item)
+
+    reg_keys = {(r["line_user_id"], (r.get("course") or "")[:2].upper()) for r in regs}
+    slip_no_reg = []
+    for s in slips:
+        base = str(s.get("expected_course") or "").upper()[:2]
+        if not base:
+            slip_no_reg.append({"id": s["id"], "line_user_id": s["line_user_id"],
+                                "amount": s.get("amount"), "created_at": s.get("created_at"),
+                                "reason": "สลิปไม่ระบุคอร์ส"})
+        elif (s["line_user_id"], base) not in reg_keys:
+            slip_no_reg.append({"id": s["id"], "line_user_id": s["line_user_id"],
+                                "amount": s.get("amount"), "created_at": s.get("created_at"),
+                                "course": s.get("expected_course"), "reason": "ไม่มีทะเบียนคอร์สนี้"})
+
+    # แนบชื่อ user ให้ slip_no_reg
+    uids = list({x["line_user_id"] for x in slip_no_reg})
+    if uids:
+        for i in range(0, len(uids), 60):
+            names = {u["line_user_id"]: u.get("display_name") for u in await supa.select("line_users", params={
+                "select": "line_user_id,display_name", "line_user_id": f"in.({','.join(uids[i:i+60])})", "limit": "200"})}
+            for x in slip_no_reg:
+                if x["line_user_id"] in names:
+                    x["name"] = names[x["line_user_id"]]
+
+    for cm in course_map.values():
+        cm["expected_revenue"] = round(_price(cm["course"]) * cm["registered"])
+        cm["revenue"] = round(cm["revenue"])
+
+    return {
+        "by_course": sorted(course_map.values(), key=lambda x: -x["registered"]),
+        "totals": {
+            "registered": len(regs),
+            "paid_marked": sum(1 for r in regs if r.get("paid")),
+            "slip_verified": len(slips),
+            "revenue": round(sum(float(s.get("amount") or 0) for s in slips)),
+            "expected_revenue": round(sum(_price(r.get("course")) for r in regs)),
+        },
+        "issues": {
+            "unpaid": unpaid[:300], "unpaid_count": len(unpaid),
+            "paid_not_marked": paid_not_marked[:300], "paid_not_marked_count": len(paid_not_marked),
+            "slip_no_reg": slip_no_reg[:300], "slip_no_reg_count": len(slip_no_reg),
+        },
+    }
+
+
+@app.post("/api/reconcile/mark-paid")
+async def reconcile_mark_paid(req: Request, admin=Depends(current_admin)):
+    """mark registrations เป็นจ่ายแล้วเป็นชุด (จาก paid_not_marked)"""
+    b = await req.json()
+    ids = [int(x) for x in b.get("ids", []) if str(x).isdigit()]
+    if not ids:
+        raise HTTPException(400, "ไม่มี id")
+    await supa.update("registrations", {"paid": True, "updated_at": NOW()},
+                      {"id": f"in.({','.join(map(str, ids))})"})
+    # tag จ่ายแล้ว
+    regs = await supa.select("registrations", params={
+        "select": "line_user_id", "id": f"in.({','.join(map(str, ids))})", "limit": "500"})
+    uids = list({r["line_user_id"] for r in regs if r.get("line_user_id")})
+    for i in range(0, len(uids), 60):
+        chunk = uids[i:i + 60]
+        try:
+            ex = {u["line_user_id"]: set(u.get("tags") or []) for u in await supa.select("line_users", params={
+                "select": "line_user_id,tags", "line_user_id": f"in.({','.join(chunk)})", "limit": "200"})}
+            patch = [{"line_user_id": u, "tags": sorted(ex.get(u, set()) | {"จ่ายแล้ว"}), "updated_at": NOW()}
+                     for u in chunk if "จ่ายแล้ว" not in ex.get(u, set())]
+            if patch:
+                await supa.upsert("line_users", patch, on_conflict="line_user_id")
+        except Exception as e:
+            print("mark-paid tag error:", e)
+    await supa.log_operation(admin["userId"], "reconcile.mark_paid", {"count": len(ids)}, None)
+    return {"ok": True, "marked": len(ids)}
+
+
 @app.get("/api/registrations/summary")
 async def registrations_summary(admin=Depends(current_admin)):
     rows = await supa.select_all("registrations", params={"select": "course,paid,approved,line_user_id"})
