@@ -4322,7 +4322,11 @@ async def classes_list(admin=Depends(current_admin), course: str = "", status: s
         params["course"] = f"eq.{course}"
     if status:
         params["status"] = f"eq.{status}"
-    classes = await supa.select("classes", params=params)
+    try:
+        classes = await supa.select("classes", params=params)
+    except Exception:
+        return {"classes": [], "schema_missing": True,
+                "hint": "ยังไม่ได้สร้างตาราง classes — รัน migration 0009 ใน Supabase SQL Editor"}
     if classes:
         ids = [c["id"] for c in classes]
         counts: dict = {}
@@ -4457,7 +4461,11 @@ async def tasks_list(admin=Depends(current_admin), status: str = "open", assigne
     if overdue:
         params["due_at"] = f"lt.{NOW()}"
         params["status"] = "eq.open"
-    rows = await supa.select("tasks", params=params)
+    try:
+        rows = await supa.select("tasks", params=params)
+    except Exception:
+        return {"tasks": [], "schema_missing": True,
+                "hint": "ยังไม่ได้สร้างตาราง tasks — รัน migration 0008 ใน Supabase SQL Editor"}
     uids = list({r["line_user_id"] for r in rows if r.get("line_user_id")})
     names = {}
     if uids:

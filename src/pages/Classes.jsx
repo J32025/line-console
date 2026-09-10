@@ -10,8 +10,9 @@ export default function Classes() {
   const [form, setForm] = useState(null)
   const [open, setOpen] = useState(null)   // class id
   const [busy, setBusy] = useState(false)
+  const [hint, setHint] = useState('')
 
-  const load = () => api.classes().then((d) => setList(d.classes)).catch((e) => t.err(e.message))
+  const load = () => api.classes().then((d) => { setList(d.classes); if (d.schema_missing) setHint(d.hint) }).catch((e) => t.err(e.message))
   useEffect(() => { load() }, [])
 
   const save = async () => {
@@ -30,6 +31,8 @@ export default function Classes() {
         <h1 style={{ margin: 0 }}>คลาส / รุ่น</h1>
         <button className="sm primary" onClick={() => setForm({ ...EMPTY })}>+ สร้างคลาส</button>
       </div>
+
+      {hint && <p className="err">{hint}</p>}
 
       {!list ? <Spinner /> : (
         <div className="grid two">

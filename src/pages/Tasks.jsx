@@ -20,14 +20,15 @@ export default function Tasks() {
   const [sum, setSum] = useState(null)
   const [add, setAdd] = useState(null)
   const [busy, setBusy] = useState(false)
+  const [hint, setHint] = useState('')
 
   const loadSum = () => api.tasksSummary().then(setSum).catch(() => {})
   const load = () => {
-    setList(null)
+    setList(null); setHint('')
     const qs = tab === 'me' ? { status: 'open', assignee: 'me' }
       : tab === 'overdue' ? { overdue: 1 }
         : tab === 'done' ? { status: 'done' } : { status: 'open' }
-    api.tasks(qs).then((d) => setList(d.tasks)).catch((e) => t.err(e.message))
+    api.tasks(qs).then((d) => { setList(d.tasks); if (d.schema_missing) setHint(d.hint) }).catch((e) => t.err(e.message))
   }
   useEffect(() => { loadSum() }, [])
   useEffect(() => { load() }, [tab]) // eslint-disable-line
@@ -64,8 +65,10 @@ export default function Tasks() {
         {TABS.map(([k, l]) => <button key={k} className={tab === k ? 'active' : ''} onClick={() => setTab(k)}>{l}</button>)}
       </div>
 
+      {hint && <p className="err">{hint}</p>}
+
       <section className="card">
-        {!list ? <Spinner /> : list.length === 0 ? <p className="muted center">ไม่มีงาน</p> : (
+        {!list ? <Spinner /> : list.length === 0 ? <p className="muted center">{hint ? 'รัน migration ก่อน' : 'ไม่มีงาน'}</p> : (
           <ul className="loglist">
             {list.map((k) => (
               <li key={k.id} style={{ opacity: k.status === 'done' ? 0.5 : 1, alignItems: 'flex-start', flexWrap: 'wrap' }}>
