@@ -107,6 +107,7 @@ export const api = {
   autoReplies: () => req('GET', '/auto-replies'),
   saveAutoReply: (payload) => req('POST', '/auto-replies', payload),
   delAutoReply: (id) => req('DELETE', `/auto-replies/${id}`),
+  insightGaps: (days = 14) => req('GET', `/insights/gaps?days=${days}`),
 
   postbacks: () => req('GET', '/postbacks'),
   savePostback: (payload) => req('POST', '/postbacks', payload),

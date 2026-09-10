@@ -842,18 +842,67 @@ def _pick_rule(event: dict, rules: list):
     return None
 
 
-async def _gemini_answer(question: str, temperature: float = 0.7) -> str | None:
+_gemini_ctx_cache: dict = {"text": None, "exp": 0.0}
+
+
+async def _gemini_context() -> str:
+    """รวมข้อมูลอ้างอิงให้ Gemini: ข้อความธุรกิจที่ตั้งเอง + ราคาคอร์ส/บัญชี + FAQ จากกฎ auto-reply
+    cache 5 นาที"""
+    if _gemini_ctx_cache["text"] is not None and time.time() < _gemini_ctx_cache["exp"]:
+        return _gemini_ctx_cache["text"]
+    parts: list[str] = []
+    try:
+        bi = await _get_setting("gemini_context", "")
+        if bi and str(bi).strip():
+            parts.append(str(bi).strip())
+    except Exception:
+        pass
+    try:
+        accts = await supa.select("payment_accounts", params={
+            "select": "course,bank,account_no,account_name,price,full_price", "active": "eq.true"})
+        if accts:
+            lines = ["ราคาคอร์สและบัญชีโอนเงิน:"]
+            for a in accts:
+                lines.append(f"- คอร์ส {a['course']}: ราคา {a.get('price')} บาท (เต็ม {a.get('full_price')}) "
+                             f"โอนเข้า {a.get('bank')} เลขบัญชี {a.get('account_no')} ชื่อ {a.get('account_name')}")
+            parts.append("\n".join(lines))
+    except Exception:
+        pass
+    try:
+        rules = await supa.select("auto_replies", params={
+            "select": "keywords,messages", "enabled": "eq.true",
+            "trigger": "in.(text,fallback)", "order": "priority.desc", "limit": "60"})
+        faq = []
+        for r in rules:
+            kw = ", ".join(k for k in (r.get("keywords") or []) if k)
+            ans = " ".join(m.get("text", "") for m in (r.get("messages") or [])
+                           if isinstance(m, dict) and m.get("type") == "text" and m.get("text"))
+            if kw and ans:
+                faq.append(f"ถาม: {kw}\nตอบ: {ans[:280]}")
+        if faq:
+            parts.append("ตัวอย่างคำถาม-คำตอบที่ใช้กับลูกค้า (ใช้เป็นแนวทาง):\n" + "\n\n".join(faq[:35]))
+    except Exception:
+        pass
+    text = "\n\n".join(parts)[:9000]
+    _gemini_ctx_cache["text"] = text
+    _gemini_ctx_cache["exp"] = time.time() + 300
+    return text
+
+
+async def _gemini_answer(question: str, temperature: float = 0.7, context: str = "") -> str | None:
     """เรียก Gemini API ตอบคำถามอิสระ — คืน None ถ้า error/ไม่ได้ตั้ง key (เงียบไว้ ไม่ตอบอะไร)"""
     if not GEMINI_API_KEY or not question.strip():
         return None
     url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
            f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}")
+    sys_text = ("คุณเป็นผู้ช่วยของเพจติวสอบ ตอบคำถามสมาชิกทางไลน์ เป็นภาษาไทย กระชับ สุภาพ เป็นกันเอง "
+                "ไม่เกิน 4 ประโยค ใช้ 'ข้อมูลอ้างอิง' ด้านล่างเป็นหลักในการตอบ "
+                "ถ้าคำถามไม่เกี่ยวกับข้อมูลอ้างอิงหรือไม่แน่ใจ ให้บอกว่าไม่แน่ใจ และแนะนำให้พิมพ์ 'ติดต่อแอดมิน'")
+    if context:
+        sys_text += "\n\n=== ข้อมูลอ้างอิง ===\n" + context
     body = {
         "contents": [{"role": "user", "parts": [{"text": question[:2000]}]}],
-        "systemInstruction": {"parts": [{
-            "text": "คุณเป็นผู้ช่วยตอบคำถามทั่วไปให้สมาชิกทางไลน์ ตอบเป็นภาษาไทย "
-                    "กระชับ สุภาพ เป็นกันเอง ไม่เกิน 3-4 ประโยค ถ้าไม่ทราบคำตอบให้บอกตรง ๆ ว่าไม่ทราบ"
-        }]},
+        "systemInstruction": {"parts": [{"text": sys_text}]},
         "generationConfig": {
             # gemini-3.x flash เป็น thinking model — thinking กิน output tokens ด้วย
             # ต้องเผื่อ budget ให้พอ ไม่งั้นได้ข้อความว่าง (thinking กินหมด)
@@ -935,6 +984,7 @@ async def _handle_gemini_replies(events: list) -> set:
     if not menu_temp:
         return set()
 
+    ctx = await _gemini_context()
     handled: set = set()
     out_msgs = []
     for e in text_events:
@@ -950,7 +1000,7 @@ async def _handle_gemini_replies(events: list) -> set:
         if rid not in menu_temp:
             continue
         question = e["message"].get("text") or ""
-        answer = await _gemini_answer(question, menu_temp[rid])
+        answer = await _gemini_answer(question, menu_temp[rid], context=ctx)
         if not answer:
             continue  # Gemini ตอบไม่ได้/error -> เงียบไว้ก่อน ไม่ตอบอะไร (ตามที่ตกลง)
         code, _ = await line.reply(e["replyToken"], [{"type": "text", "text": answer[:4900]}])
@@ -1457,6 +1507,55 @@ async def dashboard_analytics(admin=Depends(current_admin), range: int = 30):
             {"step": "ส่งสลิป", "count": fu["slipped"] or 0},
             {"step": "ยืนยันชำระ", "count": fu["verified"] or 0},
         ],
+    }
+
+
+_GAP_STOP = {"ครับ", "ค่ะ", "คะ", "นะ", "น่ะ", "ที่", "การ", "ของ", "และ", "หรือ", "ไหม", "มั้ย",
+             "อยู่", "ได้", "จะ", "ให้", "มา", "ไป", "ว่า", "คือ", "กับ", "ใน", "เป็น", "ก็", "ๆ",
+             "ผม", "หนู", "เรา", "ยัง", "แล้ว", "ด้วย", "ค่ะ", "อ่ะ", "อะ", "เอา", "มี", "ไม่",
+             "ทำ", "ต้อง", "นี้", "นั้น", "อัน", "ตัว", "เลย", "จ้า", "จ้ะ", "งับ", "hello", "hi"}
+
+
+@app.get("/api/insights/gaps")
+async def insight_gaps(admin=Depends(current_admin), days: int = 14):
+    """ข้อความที่ลูกค้าพิมพ์มาแต่ไม่ตรงกฎ auto-reply ไหนเลย — จัดกลุ่มให้เห็นว่าควรสร้างกฎอะไร"""
+    days = max(3, min(days, 60))
+    since = _iso_ago(days=days)
+    msgs = await supa.select_all("messages", params={
+        "select": "text,created_at", "direction": "eq.in", "msg_type": "eq.text",
+        "created_at": f"gte.{since}"})
+    rules = await supa.select("auto_replies", params={
+        "select": "keywords,match_type", "enabled": "eq.true", "trigger": "eq.text", "limit": "300"})
+
+    def _has_rule(text: str) -> bool:
+        for r in rules:
+            if _match({"keywords": r.get("keywords"), "match_type": r.get("match_type", "contains")}, text):
+                return True
+        return False
+
+    from collections import Counter
+    unmatched = [re.sub(r"\s+", " ", (m.get("text") or "").strip())
+                 for m in msgs if m.get("text") and m["text"].strip()]
+    unmatched = [t for t in unmatched if not _has_rule(t)]
+
+    exact = Counter(t.lower()[:140] for t in unmatched if 2 <= len(t) <= 200)
+    top_questions = [{"text": k, "count": v} for k, v in exact.most_common(40) if v >= 2]
+
+    words = Counter()
+    for t in unmatched:
+        for w in re.findall(r"[ก-๙a-zA-Z]{2,}", t.lower()):
+            if w not in _GAP_STOP and len(w) >= 2:
+                words[w] += 1
+    top_keywords = [{"word": w, "count": c} for w, c in words.most_common(30) if c >= 3]
+
+    return {
+        "days": days,
+        "total_in_text": len(msgs),
+        "unmatched": len(unmatched),
+        "unmatched_pct": round(len(unmatched) / (len(msgs) or 1) * 100),
+        "top_questions": top_questions,
+        "top_keywords": top_keywords,
+        "samples": unmatched[:60],
     }
 
 

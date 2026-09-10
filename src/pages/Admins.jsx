@@ -13,6 +13,7 @@ export default function Admins({ me }) {
   const [fields, setFields] = useState([])
   const [nf, setNf] = useState({ key: '', label: '', type: 'text', options: '' })
   const [settings, setSettings] = useState({})
+  const [gctx, setGctx] = useState('')
   const [accts, setAccts] = useState([])
   const [na, setNa] = useState({ course: '', bank: '', account_no: '', account_name: '', price: '', full_price: '' })
   const [busy, setBusy] = useState('')
@@ -22,7 +23,7 @@ export default function Admins({ me }) {
     api.health().then(setHealth).catch(() => setHealth({ ok: false }))
     api.backupList().then((d) => setBackups(d.backups)).catch(() => {})
     api.fields().then((d) => setFields(d.fields)).catch(() => {})
-    api.settings().then((d) => setSettings(d.settings)).catch(() => {})
+    api.settings().then((d) => { setSettings(d.settings); setGctx(d.settings.gemini_context || '') }).catch(() => {})
     api.payAccounts().then((d) => setAccts(d.accounts)).catch(() => {})
   }
   const addAcct = async () => {
@@ -154,6 +155,22 @@ export default function Admins({ me }) {
           <input placeholder="ราคาเต็ม" type="number" style={{ width: 80 }} value={na.full_price} onChange={(e) => setNa({ ...na, full_price: e.target.value })} />
           <button className="primary sm" onClick={addAcct}>เพิ่ม</button>
         </div>
+      </section>
+
+      <section className="card">
+        <h3>Gemini AI — ข้อมูลให้ AI ใช้ตอบ</h3>
+        <p className="muted xs">
+          AI ตอบลูกค้าที่อยู่บนเมนู Gemini เฉพาะข้อความที่ไม่ตรงกฎไหน โดยใช้: ข้อความนี้ + ราคาคอร์ส/บัญชี + กฎตอบอัตโนมัติ (text/fallback) เป็นข้อมูล
+          <br />ใส่: ตารางติว · ช่องทางติดต่อ · นโยบายคืนเงิน/เลื่อนคอร์ส · FAQ ที่ยังไม่ได้ทำเป็นกฎ
+        </p>
+        <textarea rows={8} value={gctx} onChange={(e) => setGctx(e.target.value)}
+                  placeholder={'เช่น\nคอร์ส FC ติวทุกวันเสาร์ 9:00-16:00 ผ่าน Zoom เริ่ม 1 ก.พ.\nสอบถามเพิ่มเติม โทร 08x-xxx-xxxx\nโอนแล้วส่งสลิปในแชทนี้ ระบบตรวจอัตโนมัติ'} />
+        <button className="primary sm" disabled={busy === 'gctx'}
+                onClick={async () => {
+                  setBusy('gctx')
+                  try { await api.setSetting('gemini_context', gctx); t.ok('บันทึกแล้ว (มีผลใน ~5 นาที)') }
+                  catch (e) { t.err(e.message) } finally { setBusy('') }
+                }}>บันทึก</button>
       </section>
 
       <section className="card">

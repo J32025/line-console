@@ -28,9 +28,19 @@ export default function AutoReply() {
   const [form, setForm] = useState(null)
   const [busy, setBusy] = useState(false)
   const [gallery, setGallery] = useState(false)
+  const [gaps, setGaps] = useState(null)
+  const [showGaps, setShowGaps] = useState(false)
 
   const load = () => api.autoReplies().then((d) => setRules(d.rules)).catch((e) => t.err(e.message))
   useEffect(() => { load() }, [])
+  useEffect(() => {
+    if (showGaps && !gaps) api.insightGaps(14).then(setGaps).catch((e) => t.err(e.message))
+  }, [showGaps]) // eslint-disable-line
+
+  const ruleFromKeyword = (kw) => setForm({
+    ...EMPTY, name: kw, trigger: 'text', match_type: 'contains', keywords: kw, priority: 10,
+    messages: [blank('text')],
+  })
 
   const trg = (v) => TRIGGERS.find((x) => x.v === v) || TRIGGERS[0]
 
@@ -64,6 +74,49 @@ export default function AutoReply() {
   return (
     <div>
       <h1>ตอบอัตโนมัติ</h1>
+
+      <section className="card">
+        <div className="row spread">
+          <h3>🔍 คำถามที่ยังไม่มีกฎตอบ</h3>
+          <button className="sm" onClick={() => setShowGaps((v) => !v)}>{showGaps ? 'ซ่อน' : 'วิเคราะห์ 14 วัน'}</button>
+        </div>
+        {showGaps && (!gaps ? <Spinner /> : (
+          <>
+            <p className="muted sm">
+              จากข้อความ {gaps.total_in_text.toLocaleString()} ข้อความ · <b>{gaps.unmatched.toLocaleString()} ({gaps.unmatched_pct}%)</b> ไม่ตรงกฎไหนเลย
+              (ตกไป fallback / Gemini)
+            </p>
+            <div className="grid two">
+              <div>
+                <h4 className="sm">ข้อความซ้ำบ่อย</h4>
+                <table>
+                  <tbody>
+                    {gaps.top_questions.slice(0, 15).map((q, i) => (
+                      <tr key={i}>
+                        <td>{q.text}</td>
+                        <td className="muted">{q.count}×</td>
+                        <td><button className="xs primary" onClick={() => ruleFromKeyword(q.text)}>สร้างกฎ</button></td>
+                      </tr>
+                    ))}
+                    {!gaps.top_questions.length && <tr><td className="muted">ไม่มีข้อความซ้ำ ≥ 2 ครั้ง</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+              <div>
+                <h4 className="sm">คำที่โผล่บ่อย (ในข้อความที่ตอบไม่ได้)</h4>
+                <div className="row wrap" style={{ gap: 5 }}>
+                  {gaps.top_keywords.map((k, i) => (
+                    <button key={i} className="xs" onClick={() => ruleFromKeyword(k.word)}>
+                      {k.word} <span className="muted">{k.count}</span>
+                    </button>
+                  ))}
+                  {!gaps.top_keywords.length && <span className="muted sm">—</span>}
+                </div>
+              </div>
+            </div>
+          </>
+        ))}
+      </section>
 
       <section className="card">
         <div className="row spread">
