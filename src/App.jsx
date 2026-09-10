@@ -11,6 +11,7 @@ import Messaging from './pages/Messaging.jsx'
 import Inbox from './pages/Inbox.jsx'
 import Slips from './pages/Slips.jsx'
 import Registrations from './pages/Registrations.jsx'
+import Tasks from './pages/Tasks.jsx'
 import AutoReply from './pages/AutoReply.jsx'
 import Postbacks from './pages/Postbacks.jsx'
 import Automations from './pages/Automations.jsx'
@@ -27,6 +28,7 @@ const NAV = [
   ['/inbox', 'กล่องข้อความ', '💬'],
   ['/slips', 'สลิปโอนเงิน', '🧾'],
   ['/registrations', 'ผู้ลงทะเบียน', '📝'],
+  ['/tasks', 'งาน / ติดตาม', '✅'],
   ['/messaging', 'ส่งข้อความ', '✈️'],
   ['/richmenus', 'Rich Menu', '📱'],
   ['/richmenus/history', 'ประวัติ Rich Menu', '🕓'],
@@ -122,6 +124,7 @@ export default function App() {
               <Route path="/inbox" element={<Inbox />} />
               <Route path="/slips" element={<Slips />} />
               <Route path="/registrations" element={<Registrations />} />
+              <Route path="/tasks" element={<Tasks />} />
               <Route path="/auto-reply" element={<AutoReply />} />
               <Route path="/postbacks" element={<Postbacks />} />
               <Route path="/automations" element={<Automations />} />

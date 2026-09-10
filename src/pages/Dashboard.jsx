@@ -297,6 +297,7 @@ function Summary({ d, a, nav }) {
           <button className="sm primary" onClick={() => nav('/messaging')}>ส่งข้อความ</button>
           <button className="sm" onClick={() => nav('/slips')}>ตรวจสลิป {s.pending_action ? `(${s.pending_action})` : ''}</button>
           <button className="sm" onClick={() => nav('/inbox')}>กล่องข้อความ {u.unread_threads ? `(${u.unread_threads})` : ''}</button>
+          <button className="sm" onClick={() => nav('/tasks')}>งาน {sys.tasks_overdue ? `(⚠${sys.tasks_overdue})` : sys.tasks_open ? `(${sys.tasks_open})` : ''}</button>
           <button className="sm" onClick={() => nav('/richmenus')}>Rich Menu</button>
           <button className="sm" onClick={() => nav('/auto-reply')}>ตอบอัตโนมัติ</button>
           <button className="sm" onClick={() => nav('/stats')}>สถิติ LINE</button>
@@ -646,7 +647,7 @@ function System({ d, a }) {
         <Stat label="คาดใช้ทั้งเดือน" value={nf(sys.quota_projected)}
               sub={sys.quota_limit && sys.quota_projected > sys.quota_limit ? '⚠ เกินโควตา' : 'อยู่ในเกณฑ์'} />
         <Stat label="Error 24 ชม." value={nf(sys.errors_24h)} />
-        <Stat label="Automation ค้างส่ง" value={nf(sys.automations_pending)} />
+        <Stat label="งานค้าง" value={nf(sys.tasks_open)} sub={sys.tasks_overdue ? `⚠ เกินกำหนด ${sys.tasks_overdue}` : 'ไม่เกินกำหนด'} />
       </div>
 
       <Card title="โควตาข้อความเดือนนี้">

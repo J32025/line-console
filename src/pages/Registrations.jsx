@@ -311,8 +311,24 @@ function ReconcileView({ rec, reload, onMarked }) {
       </section>
 
       <section className="card">
-        <h3>🟠 ลงทะเบียนแล้ว ยังไม่จ่าย (ไม่มีสลิป) — {nf(I.unpaid_count)}</h3>
-        <p className="muted xs">tag `ลงทะเบียน` + คอร์ส แล้ว — ไปหน้า "ส่งข้อความ" เลือก tag คอร์ส (เอา tag `จ่ายแล้ว` ออก) เพื่อทวงชำระ</p>
+        <div className="row spread">
+          <h3>🟠 ลงทะเบียนแล้ว ยังไม่จ่าย (ไม่มีสลิป) — {nf(I.unpaid_count)}</h3>
+          {I.unpaid?.length > 0 && (
+            <button className="sm" disabled={busy} onClick={async () => {
+              if (!confirm(`สร้างงาน "ตามจ่าย" ${I.unpaid.length} รายการ?`)) return
+              setBusy(true)
+              try {
+                await api.createTasksBulk({
+                  title: 'ตามชำระเงิน', tag: 'จ่ายเงิน',
+                  dueAt: new Date(Date.now() + 2 * 864e5).toISOString(),
+                  userIds: I.unpaid.map((x) => x.line_user_id),
+                })
+                t.ok(`สร้างงาน ${I.unpaid.length} รายการ (ครบกำหนด 2 วัน)`)
+              } catch (e) { t.err(e.message) } finally { setBusy(false) }
+            }}>สร้างงานตามจ่ายทั้งหมด</button>
+          )}
+        </div>
+        <p className="muted xs">tag `ลงทะเบียน` + คอร์ส แล้ว — หรือไปหน้า "ส่งข้อความ" เลือก tag คอร์ส เพื่อทวงชำระ</p>
         <IssueTable rows={I.unpaid} />
       </section>
 

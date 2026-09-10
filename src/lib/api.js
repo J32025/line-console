@@ -99,6 +99,13 @@ export const api = {
   retagRegistrations: () => req('POST', '/registrations/retag'),
   reconcile: () => req('GET', '/reconcile'),
   reconcileMarkPaid: (ids) => req('POST', '/reconcile/mark-paid', { ids }),
+
+  tasks: (qs = {}) => req('GET', '/tasks?' + new URLSearchParams(qs)),
+  tasksSummary: () => req('GET', '/tasks/summary'),
+  createTask: (payload) => req('POST', '/tasks', payload),
+  createTasksBulk: (payload) => req('POST', '/tasks/bulk', payload),
+  updateTask: (id, patch) => req('PATCH', `/tasks/${id}`, patch),
+  delTask: (id) => req('DELETE', `/tasks/${id}`),
   messageRegistrations: (payload) => req('POST', '/registrations/message', payload),
 
   slips: (status = '') => req('GET', '/slips' + (status ? `?status=${status}` : '')),

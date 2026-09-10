@@ -185,7 +185,7 @@ async def health(deep: int = 0, test_gemini: int = 0, test_uid: str = "", test_a
     # เช็คว่า migration 0002/0003/0004 รันครบใน DB ไหม
     checks["schema"] = {}
     for tb in ("slips", "payment_accounts", "postback_actions", "app_settings",
-               "richmenu_history", "registrations", "webhook_jobs"):
+               "richmenu_history", "registrations", "webhook_jobs", "tasks"):
         try:
             n = await supa.count(tb)
             checks["schema"][tb] = f"ok ({n} rows)"
@@ -1400,6 +1400,8 @@ async def dashboard(admin=Depends(current_admin), range: int = 30):
         auto_on=supa.count("automations", {"enabled": "eq.true"}),
         sched_pending=supa.count("scheduled_jobs", {"status": "eq.pending"}),
         blocked=supa.count("line_users", {"block_count": "gt.0", "is_following": "eq.false"}),
+        tasks_open=supa.count("tasks", {"status": "eq.open"}),
+        tasks_overdue=supa.count("tasks", {"status": "eq.open", "due_at": f"lt.{_iso_ago(days=0)}"}),
     )
 
     # ---------- LINE API ----------
@@ -1568,6 +1570,7 @@ async def dashboard(admin=Depends(current_admin), range: int = 30):
             "quota_projected": q_proj,
             "webhook_today": c["wh_today"], "errors_24h": c["err24"],
             "automations_pending": c["rows_ev_pending"],
+            "tasks_open": c["tasks_open"], "tasks_overdue": c["tasks_overdue"],
             "cron": sorted(cron_jobs.values(), key=lambda x: x["job"]),
             "db_rows": {"line_users": c["rows_users"], "messages": c["rows_msg"],
                         "webhook_events": c["rows_wh"], "slips": c["slip_total"]},
@@ -4093,6 +4096,127 @@ async def registrations_list(admin=Depends(current_admin), course: str = "", pai
     cnt_params = {k: v for k, v in params.items() if k in ("course", "paid", "or")}
     total = await supa.count("registrations", cnt_params)
     return {"registrations": rows, "total": total, "limit": limit, "offset": offset}
+
+
+# ============================================================
+# TASKS (งาน / ติดตาม)
+# ============================================================
+@app.get("/api/tasks")
+async def tasks_list(admin=Depends(current_admin), status: str = "open", assignee: str = "",
+                     uid: str = "", overdue: int = 0, limit: int = 200):
+    params = {"select": "*", "order": "due_at.asc.nullslast,created_at.desc",
+              "limit": str(min(limit, 500))}
+    if status and status != "all":
+        params["status"] = f"eq.{status}"
+    if assignee == "me":
+        params["assigned_to"] = f"eq.{admin['userId']}"
+    elif assignee:
+        params["assigned_to"] = f"eq.{assignee}"
+    if uid:
+        params["line_user_id"] = f"eq.{uid}"
+    if overdue:
+        params["due_at"] = f"lt.{NOW()}"
+        params["status"] = "eq.open"
+    rows = await supa.select("tasks", params=params)
+    uids = list({r["line_user_id"] for r in rows if r.get("line_user_id")})
+    names = {}
+    if uids:
+        for i in range(0, len(uids), 80):
+            for u in await supa.select("line_users", params={
+                    "select": "line_user_id,display_name,picture_url",
+                    "line_user_id": f"in.({','.join(uids[i:i+80])})", "limit": "200"}):
+                names[u["line_user_id"]] = u
+    for r in rows:
+        r["user"] = names.get(r.get("line_user_id"))
+    return {"tasks": rows}
+
+
+@app.get("/api/tasks/summary")
+async def tasks_summary(admin=Depends(current_admin)):
+    now = NOW()
+    today0 = dt.date.today().isoformat()
+    c = await _gather_dict(
+        open=supa.count("tasks", {"status": "eq.open"}),
+        overdue=supa.count("tasks", {"status": "eq.open", "due_at": f"lt.{now}"}),
+        mine=supa.count("tasks", {"status": "eq.open", "assigned_to": f"eq.{admin['userId']}"}),
+        done_today=supa.count("tasks", {"status": "eq.done", "done_at": f"gte.{today0}"}),
+    )
+    return c
+
+
+@app.post("/api/tasks")
+async def task_create(req: Request, admin=Depends(current_admin)):
+    b = await req.json()
+    title = (b.get("title") or "").strip()
+    if not title:
+        raise HTTPException(400, "ต้องมีชื่องาน")
+    row = {"title": title, "detail": b.get("detail"), "line_user_id": b.get("lineUserId") or b.get("line_user_id"),
+           "due_at": b.get("dueAt") or b.get("due_at"), "priority": b.get("priority", "normal"),
+           "assigned_to": b.get("assignedTo") or b.get("assigned_to") or admin["userId"],
+           "tag": b.get("tag"), "created_by": admin["userId"]}
+    r = await supa.insert("tasks", row)
+    return {"ok": True, "task": r[0] if r else None}
+
+
+@app.post("/api/tasks/bulk")
+async def tasks_bulk(req: Request, admin=Depends(current_admin)):
+    """สร้างงานหลายชิ้นจากรายชื่อ userId (เช่น 'ตามจ่าย' จากหน้ากระทบยอด)"""
+    b = await req.json()
+    title = (b.get("title") or "").strip()
+    uids = [u.strip() for u in b.get("userIds", []) if u.strip()]
+    if not title or not uids:
+        raise HTTPException(400, "ต้องมีชื่องาน + รายชื่อ")
+    rows = [{"title": title, "line_user_id": u, "detail": b.get("detail"),
+             "due_at": b.get("dueAt"), "tag": b.get("tag"), "priority": b.get("priority", "normal"),
+             "assigned_to": b.get("assignedTo") or admin["userId"], "created_by": admin["userId"]}
+            for u in uids]
+    for i in range(0, len(rows), 200):
+        await supa.insert("tasks", rows[i:i + 200])
+    await supa.log_operation(admin["userId"], "tasks.bulk", {"count": len(rows), "title": title}, None)
+    return {"ok": True, "created": len(rows)}
+
+
+@app.patch("/api/tasks/{tid}")
+async def task_update(tid: int, req: Request, admin=Depends(current_admin)):
+    b = await req.json()
+    patch = {k: b[k] for k in ("title", "detail", "due_at", "priority", "assigned_to", "tag", "status") if k in b}
+    for camel, snake in (("dueAt", "due_at"), ("assignedTo", "assigned_to")):
+        if camel in b:
+            patch[snake] = b[camel]
+    if b.get("status") == "done":
+        patch["done_at"] = NOW()
+    patch["updated_at"] = NOW()
+    await supa.update("tasks", patch, {"id": f"eq.{tid}"})
+    return {"ok": True}
+
+
+@app.delete("/api/tasks/{tid}")
+async def task_delete(tid: int, admin=Depends(current_admin)):
+    await supa.delete("tasks", {"id": f"eq.{tid}"})
+    return {"ok": True}
+
+
+@app.api_route("/api/cron/task-reminders", methods=["GET", "POST"])
+async def cron_task_reminders(request: Request):
+    """แจ้งเตือนแอดมินแต่ละคนถ้ามีงานเกินกำหนด (push เข้า LINE)"""
+    _check_cron_key(request)
+    overdue = await supa.select("tasks", params={
+        "select": "assigned_to,title,due_at", "status": "eq.open", "due_at": f"lt.{NOW()}", "limit": "500"})
+    by_admin: dict[str, list] = {}
+    for t in overdue:
+        if t.get("assigned_to"):
+            by_admin.setdefault(t["assigned_to"], []).append(t)
+    sent = 0
+    for uid, items in by_admin.items():
+        txt = f"⏰ งานเกินกำหนด {len(items)} รายการ\n" + "\n".join(
+            f"• {i['title']}" for i in items[:8]) + (f"\n…และอีก {len(items)-8}" if len(items) > 8 else "")
+        txt += f"\n\nดูทั้งหมด: {APP_URL}/tasks"
+        try:
+            code, *_ = await line.push(uid, [{"type": "text", "text": txt}])
+            sent += (code == 200)
+        except Exception:
+            pass
+    return {"ok": True, "admins_notified": sent, "overdue": len(overdue)}
 
 
 @app.get("/api/reconcile")
