@@ -30,6 +30,9 @@ LINE_LOGIN_CHANNEL_SECRET = os.environ.get("LINE_LOGIN_CHANNEL_SECRET", "").stri
 LINE_LOGIN_ASSERTION_KID = os.environ.get("LINE_LOGIN_ASSERTION_KID", "").strip()
 LINE_LOGIN_ASSERTION_PRIVATE_KEY = os.environ.get("LINE_LOGIN_ASSERTION_PRIVATE_KEY", "").replace("\\n", "\n").strip()
 
+# channel id ของ LIFF หน้าลงทะเบียนสมาชิก (member-facing) — ตรวจ id_token ของหน้า register.html
+REG_LIFF_CHANNEL_ID = os.environ.get("REG_LIFF_CHANNEL_ID", "2004722900").strip().split("-")[0]
+
 # EasySlip API token (ตรวจสลิปอัตโนมัติ) — ว่าง = ไม่ตรวจ OCR แค่แจ้งเตือน
 EASYSLIP_TOKEN = os.environ.get("EASYSLIP_TOKEN", "").strip()
 

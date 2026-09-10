@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>ลงทะเบียนเรียน</title>
+<style>
+  :root { --g:#06c755; --gd:#05a648; --bg:#f2f4f7; --card:#fff; --ink:#1a1d21; --mut:#6b7280; --bd:#e4e7ec; --danger:#e5484d }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent }
+  body { margin:0; font-family:-apple-system,"Segoe UI","Sarabun","Noto Sans Thai",sans-serif; background:var(--bg); color:var(--ink); }
+  .wrap { max-width:460px; margin:0 auto; padding:18px 16px 40px; }
+  .card { background:var(--card); border-radius:16px; padding:20px 18px; box-shadow:0 1px 3px rgba(16,24,40,.08); }
+  h1 { font-size:1.2rem; margin:0 0 4px }
+  .mut { color:var(--mut); font-size:.86rem }
+  .center { text-align:center }
+  .prof { display:flex; align-items:center; gap:10px; margin:14px 0 }
+  .prof img { width:44px; height:44px; border-radius:50%; background:var(--bg) }
+  label { display:block; font-size:.85rem; margin:12px 0 4px; font-weight:600 }
+  input, select { width:100%; padding:11px 12px; border:1px solid var(--bd); border-radius:10px; font-size:1rem; background:#fff; color:var(--ink) }
+  input:focus, select:focus { outline:2px solid var(--g); border-color:var(--g) }
+  button { width:100%; padding:13px; border:0; border-radius:12px; background:var(--g); color:#fff; font-size:1.02rem; font-weight:700; margin-top:18px }
+  button:active { background:var(--gd) }
+  button[disabled] { opacity:.55 }
+  .btn-ghost { background:#eef1f4; color:var(--ink) }
+  .spin { width:26px;height:26px;border:3px solid var(--bd);border-top-color:var(--g);border-radius:50%;animation:s .8s linear infinite;margin:30px auto }
+  @keyframes s { to { transform:rotate(360deg) } }
+  .ok-ic { font-size:3rem; margin:6px 0 }
+  .err { background:#fdecec; color:#b42318; padding:10px 12px; border-radius:10px; font-size:.88rem; margin-top:12px }
+  .pill { display:inline-block; background:#e7faef; color:#05683a; border-radius:999px; padding:3px 10px; font-size:.8rem; margin:3px 3px 0 0 }
+  .pill.wait { background:#fef7e6; color:#b54708 }
+  .list { margin:12px 0; padding:0; list-style:none }
+  .list li { padding:10px 0; border-bottom:1px solid var(--bd); display:flex; justify-content:space-between; align-items:center }
+  .req::after { content:" *"; color:var(--danger) }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card" id="app">
+    <div class="spin"></div>
+    <p class="center mut">กำลังเชื่อมต่อ LINE…</p>
+  </div>
+</div>
+
+<script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+<script>
+(function () {
+  var qs = new URLSearchParams(location.search);
+  var LIFF_ID = qs.get('liffId') || '2004722900-KeQyDMRz';   // <- แก้เป็น LIFF ID ของหน้านี้
+  var API = qs.get('api') || '';                              // ว่าง = โดเมนเดียวกัน
+  var app = document.getElementById('app');
+  var state = {};
+
+  function h(html) { app.innerHTML = html; }
+  function esc(s) { return String(s == null ? '' : s).replace(/[<>&"]/g, function (c) { return ({ '<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;' })[c]; }); }
+  function post(path, body) {
+    return fetch(API + path, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) })
+      .then(function (r) { return r.json().then(function (j) { if (!r.ok) throw new Error(j.detail || j.message || ('HTTP ' + r.status)); return j; }); });
+  }
+  function goNext(url) {
+    if (url) { location.href = url; }
+    else if (liff.isInClient && liff.isInClient()) { liff.closeWindow(); }
+    else { h('<div class="center"><div class="ok-ic">✅</div><h1>เรียบร้อย</h1><p class="mut">ปิดหน้านี้ได้เลย</p></div>'); }
+  }
+
+  liff.init({ liffId: LIFF_ID })
+    .then(function () {
+      if (!liff.isLoggedIn()) { liff.login({ redirectUri: location.href }); return null; }
+      var tok = liff.getIDToken();
+      if (!tok) throw new Error('ไม่พบ id token — ลองเปิดใหม่ในแอป LINE');
+      state.idToken = tok;
+      return post('/api/public/reg-check', { idToken: tok });
+    })
+    .then(function (res) {
+      if (!res) return;
+      state.check = res;
+      res.registered ? showRegistered(res) : showForm(res);
+    })
+    .catch(function (e) {
+      h('<h1>เปิดไม่ได้</h1><div class="err">' + esc(e.message) + '</div>'
+        + '<button class="btn-ghost" onclick="location.reload()">ลองใหม่</button>');
+    });
+
+  function showRegistered(res) {
+    var items = (res.registrations || []).map(function (r) {
+      return '<li><span>' + esc(r.course_raw || r.course) + '</span>'
+        + (r.paid ? '<span class="pill">ชำระแล้ว</span>' : '<span class="pill wait">รอชำระ</span>') + '</li>';
+    }).join('');
+    h('<div class="center"><div class="ok-ic">✅</div><h1>คุณลงทะเบียนแล้ว</h1></div>'
+      + '<div class="prof">' + (res.picture ? '<img src="' + esc(res.picture) + '">' : '')
+      + '<div><b>' + esc(res.displayName || '') + '</b><div class="mut">หลักสูตรที่ลงทะเบียน</div></div></div>'
+      + '<ul class="list">' + items + '</ul>'
+      + '<button id="go">เข้าสู่บทเรียน / หน้าถัดไป</button>'
+      + '<button class="btn-ghost" id="add">ลงทะเบียนหลักสูตรเพิ่ม</button>');
+    document.getElementById('go').onclick = function () { goNext(res.nextUrl); };
+    document.getElementById('add').onclick = function () { showForm(res); };
+  }
+
+  function showForm(res) {
+    var opts = (res.courses || []).map(function (c) { return '<option value="' + esc(c) + '">' + esc(c) + '</option>'; }).join('');
+    h('<h1>ลงทะเบียนเรียน</h1><p class="mut">กรอกข้อมูลเพื่อเข้าใช้งาน — จำเป็นต้องลงทะเบียนก่อนทุกกรณี</p>'
+      + '<div class="prof">' + (res.picture ? '<img src="' + esc(res.picture) + '">' : '')
+      + '<div><b>' + esc(res.displayName || '') + '</b><div class="mut">บัญชี LINE ของคุณ</div></div></div>'
+      + '<label class="req">ชื่อ-นามสกุล</label><input id="f-name" value="' + esc(res.displayName || '') + '" autocomplete="name">'
+      + '<label class="req">เบอร์โทรศัพท์</label><input id="f-tel" type="tel" inputmode="tel" autocomplete="tel">'
+      + '<label class="req">หลักสูตร</label><select id="f-course">' + opts + '</select>'
+      + '<label>หน่วยงาน / สังกัด</label><input id="f-org">'
+      + '<label>อีเมล</label><input id="f-email" type="email" inputmode="email" autocomplete="email">'
+      + '<div id="err"></div>'
+      + '<button id="submit">ลงทะเบียน</button>'
+      + (res.registered ? '<button class="btn-ghost" id="back">ย้อนกลับ</button>' : ''));
+    var back = document.getElementById('back');
+    if (back) back.onclick = function () { showRegistered(res); };
+    document.getElementById('submit').onclick = submit;
+  }
+
+  function submit() {
+    var btn = document.getElementById('submit');
+    var errEl = document.getElementById('err');
+    var body = {
+      idToken: state.idToken,
+      name: val('f-name'), tel: val('f-tel'), course: val('f-course'),
+      org: val('f-org'), email: val('f-email'),
+    };
+    if (!body.name || !body.tel || !body.course) {
+      errEl.innerHTML = '<div class="err">กรอก ชื่อ-นามสกุล / เบอร์โทร / หลักสูตร ให้ครบ</div>'; return;
+    }
+    btn.disabled = true; btn.textContent = 'กำลังบันทึก…'; errEl.innerHTML = '';
+    post('/api/public/reg-submit', body)
+      .then(function (r) {
+        h('<div class="center"><div class="ok-ic">🎉</div><h1>ลงทะเบียนสำเร็จ</h1>'
+          + '<p class="mut">หลักสูตร ' + esc(r.course) + '</p></div>'
+          + '<button id="go">ไปหน้าถัดไป</button>');
+        document.getElementById('go').onclick = function () { goNext(r.nextUrl); };
+      })
+      .catch(function (e) {
+        btn.disabled = false; btn.textContent = 'ลงทะเบียน';
+        errEl.innerHTML = '<div class="err">' + esc(e.message) + '</div>';
+      });
+  }
+  function val(id) { return (document.getElementById(id).value || '').trim(); }
+})();
+</script>
+</body>
+</html>

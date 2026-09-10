@@ -25,6 +25,7 @@ from _lib.config import (LINE_CHANNEL_SECRET, CRON_SECRET, ALERT_USER_IDS,
                          SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY,
                          LINE_LOGIN_CHANNEL_TOKEN, LINE_LOGIN_CHANNEL_ID,
                          LINE_LOGIN_CHANNEL_SECRET, LINE_LOGIN_ASSERTION_KID,
+                         REG_LIFF_CHANNEL_ID,
                          LINE_LOGIN_ASSERTION_PRIVATE_KEY, APP_URL, EASYSLIP_TOKEN,
                          ENFORCE_RICHMENU_ID, ENFORCE_EXCLUDE_MENUS,
                          GEMINI_API_KEY, GEMINI_MODEL, GEMINI_TRIGGER_MENU_NAME,
@@ -3741,6 +3742,99 @@ _REG_COLS = {
     "tel": "tel", "สังกัด": "org", "หลักสูตร": "course_raw", "email": "email", "job": "job",
     "file": "slip_url", "ผ่าน": "passed",
 }
+
+_REG_COURSES_DEFAULT = ["FC70", "IC70", "PC70-1", "PC70-2"]
+_member_tok_cache: dict = {}
+
+
+async def _reg_courses() -> list:
+    v = await _get_setting("reg_courses", None)
+    if isinstance(v, list) and v:
+        return [str(x) for x in v]
+    return _REG_COURSES_DEFAULT
+
+
+async def _verify_member_token(id_token: str) -> dict | None:
+    """ตรวจ LIFF id_token ของหน้าลงทะเบียนสมาชิก (channel REG_LIFF_CHANNEL_ID) — cache 5 นาที"""
+    if not id_token:
+        return None
+    hit = _member_tok_cache.get(id_token)
+    if hit and hit[0] > time.time():
+        return hit[1]
+    try:
+        async with httpx.AsyncClient(timeout=12) as c:
+            r = await c.post("https://api.line.me/oauth2/v2.1/verify",
+                             data={"id_token": id_token, "client_id": REG_LIFF_CHANNEL_ID})
+        if r.status_code != 200:
+            return None
+        p = r.json()
+        if str(p.get("aud")) != str(REG_LIFF_CHANNEL_ID):
+            return None
+        if p.get("exp") and time.time() > p["exp"]:
+            return None
+        u = {"userId": p["sub"], "name": p.get("name", ""), "picture": p.get("picture", "")}
+        _member_tok_cache[id_token] = (time.time() + 300, u)
+        return u
+    except Exception as e:
+        print("member token verify error:", e)
+        return None
+
+
+@app.post("/api/public/reg-check")
+async def public_reg_check(req: Request):
+    """หน้าลงทะเบียนสมาชิกเรียก: ตรวจว่า userId นี้มีในทะเบียนแล้วหรือยัง"""
+    b = await req.json()
+    u = await _verify_member_token(b.get("idToken"))
+    if not u:
+        raise HTTPException(401, "ยืนยันตัวตน LINE ไม่สำเร็จ")
+    regs = await supa.select("registrations", params={
+        "line_user_id": f"eq.{u['userId']}",
+        "select": "id,course,course_raw,paid,name,approved,created_at",
+        "order": "created_at.desc"})
+    return {
+        "registered": bool(regs),
+        "userId": u["userId"], "displayName": u.get("name"), "picture": u.get("picture"),
+        "registrations": regs,
+        "courses": await _reg_courses(),
+        "nextUrl": await _get_setting("reg_next_url", ""),
+    }
+
+
+@app.post("/api/public/reg-submit")
+async def public_reg_submit(req: Request):
+    """หน้าลงทะเบียนสมาชิกส่งฟอร์ม -> upsert registration + tag user + แจ้งแอดมิน"""
+    b = await req.json()
+    u = await _verify_member_token(b.get("idToken"))
+    if not u:
+        raise HTTPException(401, "ยืนยันตัวตน LINE ไม่สำเร็จ")
+    name = (b.get("name") or "").strip()
+    tel = (b.get("tel") or "").strip()
+    course_raw = (b.get("course") or "").strip()
+    course = _norm_course(course_raw)
+    if not name or not tel or not course:
+        raise HTTPException(400, "กรอก ชื่อ-นามสกุล / เบอร์โทร / หลักสูตร ให้ครบ")
+    _rate_limit(f"reg:{u['userId']}", limit=6, window=300)
+    row = {"line_user_id": u["userId"], "course": course, "course_raw": course_raw,
+           "name": name, "tel": tel, "org": (b.get("org") or "").strip() or None,
+           "email": (b.get("email") or "").strip() or None, "source": "liff", "updated_at": NOW()}
+    await supa.upsert("registrations", row, on_conflict="line_user_id,course")
+    try:
+        ex = await supa.select("line_users", params={
+            "select": "tags", "line_user_id": f"eq.{u['userId']}", "limit": "1"})
+        cur = set((ex[0].get("tags") if ex else []) or [])
+        new = cur | {"ลงทะเบียน", course}
+        patch = {"line_user_id": u["userId"], "tags": sorted(new), "updated_at": NOW()}
+        if not ex:
+            patch.update({"source": "registration", "is_following": True,
+                          "display_name": _clean_str(u.get("name"))})
+        if new != cur or not ex:
+            await supa.upsert("line_users", [patch], on_conflict="line_user_id")
+    except Exception as e:
+        print("reg-submit tag error:", e)
+    await alert_admin("📝 ลงทะเบียนใหม่ (LIFF)",
+                      f"{name}\nหลักสูตร {course} · {b.get('org') or '-'}\nโทร {tel}",
+                      throttle_key=f"reg_{u['userId']}_{course}")
+    return {"ok": True, "course": course, "nextUrl": await _get_setting("reg_next_url", "")}
 
 
 @app.post("/api/registrations/import")

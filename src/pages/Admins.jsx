@@ -14,6 +14,8 @@ export default function Admins({ me }) {
   const [nf, setNf] = useState({ key: '', label: '', type: 'text', options: '' })
   const [settings, setSettings] = useState({})
   const [gctx, setGctx] = useState('')
+  const [regNext, setRegNext] = useState('')
+  const [regCourses, setRegCourses] = useState('')
   const [accts, setAccts] = useState([])
   const [na, setNa] = useState({ course: '', bank: '', account_no: '', account_name: '', price: '', full_price: '' })
   const [busy, setBusy] = useState('')
@@ -23,7 +25,11 @@ export default function Admins({ me }) {
     api.health().then(setHealth).catch(() => setHealth({ ok: false }))
     api.backupList().then((d) => setBackups(d.backups)).catch(() => {})
     api.fields().then((d) => setFields(d.fields)).catch(() => {})
-    api.settings().then((d) => { setSettings(d.settings); setGctx(d.settings.gemini_context || '') }).catch(() => {})
+    api.settings().then((d) => {
+      setSettings(d.settings); setGctx(d.settings.gemini_context || '')
+      setRegNext(d.settings.reg_next_url || '')
+      setRegCourses(Array.isArray(d.settings.reg_courses) ? d.settings.reg_courses.join(', ') : (d.settings.reg_courses || ''))
+    }).catch(() => {})
     api.payAccounts().then((d) => setAccts(d.accounts)).catch(() => {})
   }
   const addAcct = async () => {
@@ -155,6 +161,26 @@ export default function Admins({ me }) {
           <input placeholder="ราคาเต็ม" type="number" style={{ width: 80 }} value={na.full_price} onChange={(e) => setNa({ ...na, full_price: e.target.value })} />
           <button className="primary sm" onClick={addAcct}>เพิ่ม</button>
         </div>
+      </section>
+
+      <section className="card">
+        <h3>หน้าลงทะเบียนสมาชิก (LIFF)</h3>
+        <p className="muted xs">
+          หน้า <code>{location.origin}/register</code> — สมาชิกเปิดผ่าน LIFF → ตรวจ userId กับทะเบียน · มีแล้ว→ไปหน้าถัดไป · ยังไม่มี→ต้องกรอกฟอร์มก่อน
+          <br />ตั้ง Endpoint URL ของ LIFF (channel 2004722900) เป็น URL นี้ · env <code>REG_LIFF_CHANNEL_ID</code> = channel id (default 2004722900)
+        </p>
+        <label className="sm">URL หน้าถัดไป (หลังผ่านการตรวจ/ลงทะเบียน)</label>
+        <input value={regNext} onChange={(e) => setRegNext(e.target.value)} placeholder="https://ecppquiz.glitch.me/..." />
+        <label className="sm">หลักสูตรให้เลือก (คั่นด้วย , )</label>
+        <input value={regCourses} onChange={(e) => setRegCourses(e.target.value)} placeholder="FC70, IC70, PC70-1, PC70-2" />
+        <button className="primary sm" disabled={busy === 'reg'} onClick={async () => {
+          setBusy('reg')
+          try {
+            await api.setSetting('reg_next_url', regNext.trim())
+            await api.setSetting('reg_courses', regCourses.split(',').map((s) => s.trim()).filter(Boolean))
+            t.ok('บันทึกแล้ว')
+          } catch (e) { t.err(e.message) } finally { setBusy('') }
+        }}>บันทึก</button>
       </section>
 
       <section className="card">
