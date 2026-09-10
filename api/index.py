@@ -183,7 +183,8 @@ async def health(deep: int = 0, test_gemini: int = 0, test_uid: str = ""):
         pass
     # เช็คว่า migration 0002/0003/0004 รันครบใน DB ไหม
     checks["schema"] = {}
-    for tb in ("slips", "payment_accounts", "postback_actions", "app_settings", "richmenu_history"):
+    for tb in ("slips", "payment_accounts", "postback_actions", "app_settings",
+               "richmenu_history", "registrations"):
         try:
             n = await supa.count(tb)
             checks["schema"][tb] = f"ok ({n} rows)"
