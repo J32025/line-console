@@ -2590,13 +2590,33 @@ async def user_detail(uid: str, admin=Depends(current_admin)):
         live["richMenuId"] = rid
     except Exception as e:
         live["error"] = str(e)
-    return {"user": user, "events": events, "follow_history": follows, "live": live}
+    regs, slips_rows, tasks_rows, notes_n = [], [], [], 0
+    try:
+        regs = await supa.select("registrations", params={
+            "line_user_id": f"eq.{uid}", "select": "id,course,course_raw,paid,approved,class_id", "limit": "10"})
+        slips_rows = await supa.select("slips", params={
+            "line_user_id": f"eq.{uid}", "select": "id,status,amount,expected_course,created_at,media_url",
+            "order": "created_at.desc", "limit": "6"})
+        tasks_rows = await supa.select("tasks", params={
+            "line_user_id": f"eq.{uid}", "select": "id,title,status,due_at", "status": "eq.open", "limit": "10"})
+        notes_n = await supa.count("contact_notes", {"line_user_id": f"eq.{uid}"})
+    except Exception:
+        pass
+    return {"user": user, "events": events, "follow_history": follows, "live": live,
+            "registrations": regs, "slips": slips_rows, "open_tasks": tasks_rows, "notes_count": notes_n,
+            "stages": [{"key": s, "label": _STAGE_LABEL.get(s, s)} for s in PIPELINE_STAGES]}
 
 
 @app.patch("/api/users/{uid}")
 async def update_user(uid: str, req: Request, admin=Depends(current_admin)):
     b = await req.json()
-    patch = {k: b[k] for k in ("note", "tags") if k in b}
+    patch = {k: b[k] for k in ("note", "tags", "assigned_to") if k in b}
+    if "stage" in b:
+        patch["stage"] = b["stage"] or None
+        patch["stage_at"] = NOW()
+    if "consent" in b:
+        patch["consent"] = b["consent"]
+        patch["consent_at"] = NOW()
     if "custom" in b:
         cur = await supa.select("line_users", params={"select": "custom", "line_user_id": f"eq.{uid}", "limit": "1"})
         merged = {**((cur[0].get("custom") if cur else {}) or {}), **b["custom"]}
@@ -2604,6 +2624,114 @@ async def update_user(uid: str, req: Request, admin=Depends(current_admin)):
     patch["updated_at"] = NOW()
     await supa.update("line_users", patch, {"line_user_id": f"eq.{uid}"})
     return {"ok": True}
+
+
+PIPELINE_STAGES = ["lead", "interested", "registered", "paid", "enrolled", "completed", "alumni", "lost"]
+_STAGE_LABEL = {"lead": "Lead", "interested": "สนใจ", "registered": "ลงทะเบียน", "paid": "จ่ายแล้ว",
+                "enrolled": "เข้าเรียน", "completed": "เรียนจบ", "alumni": "ศิษย์เก่า", "lost": "หลุด"}
+
+
+@app.get("/api/pipeline")
+async def pipeline(admin=Depends(current_admin)):
+    counts = {}
+    for s in PIPELINE_STAGES:
+        counts[s] = await supa.count("line_users", {"stage": f"eq.{s}", "is_following": "eq.true"})
+    counts["_none"] = await supa.count("line_users", {"stage": "is.null", "is_following": "eq.true"})
+    return {"stages": [{"key": s, "label": _STAGE_LABEL[s], "count": counts[s]} for s in PIPELINE_STAGES],
+            "unstaged": counts["_none"]}
+
+
+@app.get("/api/users/{uid}/timeline")
+async def user_timeline(uid: str, admin=Depends(current_admin)):
+    """รวมทุกกิจกรรมของลูกค้าคนนี้ เรียงตามเวลา"""
+    ev: list = []
+
+    def add(ts, kind, text, meta=None):
+        if ts:
+            ev.append({"at": str(ts), "kind": kind, "text": text, "meta": meta or {}})
+
+    try:
+        for m in await supa.select("messages", params={
+                "select": "direction,by,msg_type,text,created_at", "line_user_id": f"eq.{uid}",
+                "order": "created_at.desc", "limit": "40"}):
+            who = "ลูกค้า" if m["direction"] == "in" else ({"auto": "บอท", "gemini": "Gemini",
+                   "automation": "Automation", "postback": "ปุ่ม", "system": "ระบบ", "broadcast": "Broadcast"}
+                   .get(m.get("by"), "แอดมิน"))
+            t = (m.get("text") or f"[{m.get('msg_type')}]")[:200]
+            add(m["created_at"], "message", f"{who}: {t}", {"dir": m["direction"]})
+    except Exception:
+        pass
+    for tb, fn in (
+        ("follow_history", lambda r: ("follow", "ปลดบล็อก/เพิ่มเพื่อน" if r["action"] == "follow" else "บล็อก/ลบเพื่อน")),
+        ("slips", lambda r: ("slip", f"สลิป {r.get('status')} {r.get('amount') or ''} {r.get('expected_course') or ''}")),
+        ("registrations", lambda r: ("registration", f"ลงทะเบียน {r.get('course_raw') or r.get('course')}"
+                                     + (" (จ่ายแล้ว)" if r.get("paid") else ""))),
+        ("richmenu_history", lambda r: ("richmenu", f"เปลี่ยนเมนู → {r.get('new_rich_menu_id') or 'ไม่มี'} ({r.get('source')})")),
+        ("contact_notes", lambda r: (r.get("kind") or "note", f"{r.get('author') or ''}: {r.get('body')}")),
+        ("tasks", lambda r: ("task", f"งาน: {r.get('title')} [{r.get('status')}]")),
+    ):
+        try:
+            for r in await supa.select(tb, params={
+                    "select": "*", "line_user_id": f"eq.{uid}", "order": "created_at.desc", "limit": "25"}):
+                k, txt = fn(r)
+                add(r.get("event_ts") or r.get("created_at"), k, txt)
+        except Exception:
+            pass
+    ev.sort(key=lambda x: x["at"], reverse=True)
+    return {"timeline": ev[:120]}
+
+
+@app.get("/api/users/{uid}/notes")
+async def user_notes(uid: str, admin=Depends(current_admin)):
+    return {"notes": await supa.select("contact_notes", params={
+        "line_user_id": f"eq.{uid}", "select": "*", "order": "created_at.desc", "limit": "100"})}
+
+
+@app.post("/api/users/{uid}/notes")
+async def user_note_add(uid: str, req: Request, admin=Depends(current_admin)):
+    b = await req.json()
+    body = (b.get("body") or "").strip()
+    if not body:
+        raise HTTPException(400, "โน้ตว่าง")
+    r = await supa.insert("contact_notes", {
+        "line_user_id": uid, "body": body, "kind": b.get("kind", "note"),
+        "author": admin.get("name") or admin["userId"][:8]})
+    return {"ok": True, "note": r[0] if r else None}
+
+
+@app.delete("/api/users/{uid}/notes/{nid}")
+async def user_note_del(uid: str, nid: int, admin=Depends(current_admin)):
+    await supa.delete("contact_notes", {"id": f"eq.{nid}"})
+    return {"ok": True}
+
+
+@app.post("/api/users/merge")
+async def users_merge(req: Request, admin=Depends(current_admin)):
+    """รวมบัญชีซ้ำ: ย้าย registrations/slips/tasks/notes จาก 'from' -> 'into', mark from.merged_into"""
+    b = await req.json()
+    src, dst = (b.get("from") or "").strip(), (b.get("into") or "").strip()
+    if not (src.startswith("U") and dst.startswith("U") and src != dst):
+        raise HTTPException(400, "ต้องระบุ from / into เป็น userId คนละอัน")
+    moved = {}
+    for tb in ("registrations", "slips", "tasks", "contact_notes", "messages", "webhook_events",
+               "follow_history", "richmenu_history", "attendance"):
+        try:
+            r = await supa.update(tb, {"line_user_id": dst}, {"line_user_id": f"eq.{src}"})
+            moved[tb] = len(r or [])
+        except Exception as e:
+            moved[tb] = f"err: {str(e)[:60]}"
+    # รวม tags + note
+    su = await supa.select("line_users", params={"select": "tags,note", "line_user_id": f"eq.{src}", "limit": "1"})
+    du = await supa.select("line_users", params={"select": "tags,note", "line_user_id": f"eq.{dst}", "limit": "1"})
+    if su and du:
+        tags = sorted(set((su[0].get("tags") or []) + (du[0].get("tags") or [])))
+        note = "\n".join(x for x in [du[0].get("note"), su[0].get("note")] if x)
+        await supa.update("line_users", {"tags": tags, "note": note or None, "updated_at": NOW()},
+                          {"line_user_id": f"eq.{dst}"})
+    await supa.update("line_users", {"is_following": False, "merged_into": dst, "updated_at": NOW()},
+                      {"line_user_id": f"eq.{src}"})
+    await supa.log_operation(admin["userId"], "users.merge", {"from": src, "into": dst}, moved)
+    return {"ok": True, "moved": moved}
 
 
 @app.post("/api/users/import-mapped")

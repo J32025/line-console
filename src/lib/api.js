@@ -50,6 +50,12 @@ export const api = {
 
   users: (qs = {}) => req('GET', '/users?' + new URLSearchParams(qs)),
   userDetail: (uid) => req('GET', `/users/${uid}`),
+  userTimeline: (uid) => req('GET', `/users/${uid}/timeline`),
+  userNotes: (uid) => req('GET', `/users/${uid}/notes`),
+  addUserNote: (uid, payload) => req('POST', `/users/${uid}/notes`, payload),
+  delUserNote: (uid, nid) => req('DELETE', `/users/${uid}/notes/${nid}`),
+  mergeUsers: (payload) => req('POST', '/users/merge', payload),
+  pipeline: () => req('GET', '/pipeline'),
   importUsers: (payload) => req('POST', '/users/import', payload),
   importMapped: (payload) => req('POST', '/users/import-mapped', payload),
   refreshProfiles: (payload) => req('POST', '/users/refresh-profile', payload),

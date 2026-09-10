@@ -14,6 +14,10 @@ export default function UserDetail({ uid, onClose, onSaved }) {
   const [menus, setMenus] = useState([])
   const [selMenu, setSelMenu] = useState('')
   const [menuBusy, setMenuBusy] = useState(false)
+  const [tl, setTl] = useState(null)
+  const [notes, setNotes] = useState(null)
+  const [newNote, setNewNote] = useState('')
+  const [mergeInto, setMergeInto] = useState('')
 
   const loadDetail = () => api.userDetail(uid)
     .then((r) => {
@@ -21,13 +25,30 @@ export default function UserDetail({ uid, onClose, onSaved }) {
       setCustom(r.user.custom || {})
     })
     .catch((e) => setErr(e.message))
+  const loadNotes = () => api.userNotes(uid).then((r) => setNotes(r.notes)).catch(() => setNotes([]))
 
   useEffect(() => {
-    setD(null); setErr('')
+    setD(null); setErr(''); setTl(null); setNotes(null)
     api.fields().then((r) => setFields(r.fields)).catch(() => {})
     api.richmenus().then((r) => setMenus(r.menus || [])).catch(() => {})
     loadDetail()
+    api.userTimeline(uid).then((r) => setTl(r.timeline)).catch(() => setTl([]))
+    loadNotes()
   }, [uid])
+
+  const quickPatch = async (patch) => {
+    try { await api.updateUser(uid, patch); loadDetail(); onSaved?.() } catch (e) { t.err(e.message) }
+  }
+  const addNote = async () => {
+    if (!newNote.trim()) return
+    try { await api.addUserNote(uid, { body: newNote.trim() }); setNewNote(''); loadNotes(); api.userTimeline(uid).then((r) => setTl(r.timeline)) }
+    catch (e) { t.err(e.message) }
+  }
+  const doMerge = async () => {
+    if (!mergeInto.startsWith('U') || !confirm(`รวมบัญชีนี้เข้า ${mergeInto.slice(0, 12)}… ? (ย้ายทะเบียน/สลิป/งาน/โน้ต)`)) return
+    try { const r = await api.mergeUsers({ from: uid, into: mergeInto.trim() }); t.ok('รวมแล้ว: ' + JSON.stringify(r.moved).slice(0, 80)); onClose() }
+    catch (e) { t.err(e.message) }
+  }
 
   const assignMenuToUser = async (mode) => {
     if (mode === 'link' && !selMenu) return t.err('เลือก rich menu ก่อน')
@@ -95,6 +116,28 @@ export default function UserDetail({ uid, onClose, onSaved }) {
                 </div>
               </div>
             </div>
+
+            <section className="card" style={{ padding: 12, margin: '10px 0' }}>
+              <div className="row wrap" style={{ gap: 8, alignItems: 'center' }}>
+                <label className="sm">สถานะ&nbsp;
+                  <select value={u.stage || ''} onChange={(e) => quickPatch({ stage: e.target.value })}>
+                    <option value="">— ยังไม่กำหนด —</option>
+                    {(d.stages || []).map((s) => <option key={s.key} value={s.key}>{s.label}</option>)}
+                  </select>
+                </label>
+                <label className="sm"><input type="checkbox" checked={u.consent === true}
+                  onChange={(e) => quickPatch({ consent: e.target.checked })} /> ยินยอมรับข่าวสาร</label>
+              </div>
+              <div className="row wrap" style={{ gap: 5, marginTop: 8 }}>
+                {(d.registrations || []).map((r) => (
+                  <span key={r.id} className={`chip ${r.paid ? 'ok' : ''}`}>{r.course_raw || r.course}{r.paid ? ' ✓' : ' ค้าง'}</span>
+                ))}
+                {(d.slips || []).slice(0, 3).map((s) => (
+                  <span key={s.id} className={`chip xs ${s.status === 'verified' ? 'ok' : s.status === 'rejected' ? 'failed' : ''}`}>สลิป {s.status}</span>
+                ))}
+                {(d.open_tasks || []).length > 0 && <span className="chip xs failed">งานค้าง {d.open_tasks.length}</span>}
+              </div>
+            </section>
 
             <table className="kv">
               <tbody>
@@ -169,17 +212,43 @@ export default function UserDetail({ uid, onClose, onSaved }) {
               <button className="primary sm" onClick={save} disabled={saving}>{saving && <InlineSpinner />}บันทึก</button>
             </div>
 
-            <h4 className="sm">ประวัติ event ({d.events.length})</h4>
+            <h4 className="sm">โน้ต / บันทึก {notes ? `(${notes.length})` : ''}</h4>
+            <div className="row" style={{ gap: 6 }}>
+              <input value={newNote} onChange={(e) => setNewNote(e.target.value)}
+                     onKeyDown={(e) => e.key === 'Enter' && addNote()} placeholder="พิมพ์โน้ต แล้ว Enter" />
+              <button className="xs primary" onClick={addNote}>+</button>
+            </div>
             <div className="udetail-events">
-              {d.events.map((e, i) => (
-                <div key={i} className="row" style={{ fontSize: 12 }}>
-                  <span className={`chip ${e.event_type}`}>{e.event_type}</span>
-                  <span>{e.text || e.message_type || ''}</span>
-                  <span className="muted xs" style={{ marginLeft: 'auto' }}>{fmt(e.created_at)}</span>
+              {(notes || []).map((n) => (
+                <div key={n.id} className="row" style={{ fontSize: 12, alignItems: 'flex-start' }}>
+                  <span style={{ flex: 1 }}>{n.body}</span>
+                  <span className="muted xs">{n.author} · {fmt(n.created_at)}</span>
+                  <button className="xs" onClick={() => api.delUserNote(uid, n.id).then(loadNotes)}>✕</button>
                 </div>
               ))}
-              {!d.events.length && <p className="muted xs">ยังไม่มี event (ต้องตั้ง webhook)</p>}
+              {notes && !notes.length && <p className="muted xs">ยังไม่มีโน้ต</p>}
             </div>
+
+            <h4 className="sm">ไทม์ไลน์ {tl ? `(${tl.length})` : ''}</h4>
+            <div className="udetail-events" style={{ maxHeight: 280, overflowY: 'auto' }}>
+              {!tl ? <InlineSpinner /> : tl.map((e, i) => (
+                <div key={i} className="row" style={{ fontSize: 12, alignItems: 'flex-start' }}>
+                  <span className="chip xs">{e.kind}</span>
+                  <span style={{ flex: 1 }}>{e.text}</span>
+                  <span className="muted xs">{fmt(e.at)}</span>
+                </div>
+              ))}
+              {tl && !tl.length && <p className="muted xs">ยังไม่มีกิจกรรม</p>}
+            </div>
+
+            <details style={{ marginTop: 10 }}>
+              <summary className="muted sm">รวมบัญชีซ้ำ (merge)</summary>
+              <div className="row" style={{ gap: 6, marginTop: 6 }}>
+                <input className="mono" value={mergeInto} onChange={(e) => setMergeInto(e.target.value)} placeholder="userId ปลายทาง U..." />
+                <button className="xs danger" onClick={doMerge}>รวม</button>
+              </div>
+              <p className="muted xs">ย้ายทะเบียน/สลิป/งาน/โน้ต/ข้อความ ของคนนี้ไปบัญชีปลายทาง แล้วปิดบัญชีนี้</p>
+            </details>
           </>
         )}
       </div>
