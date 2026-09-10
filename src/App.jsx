@@ -14,6 +14,7 @@ import Registrations from './pages/Registrations.jsx'
 import Tasks from './pages/Tasks.jsx'
 import Classes from './pages/Classes.jsx'
 import AutoReply from './pages/AutoReply.jsx'
+import KB from './pages/KB.jsx'
 import Postbacks from './pages/Postbacks.jsx'
 import Automations from './pages/Automations.jsx'
 import Segments from './pages/Segments.jsx'
@@ -35,6 +36,7 @@ const NAV = [
   ['/richmenus', 'Rich Menu', '📱'],
   ['/richmenus/history', 'ประวัติ Rich Menu', '🕓'],
   ['/auto-reply', 'ตอบอัตโนมัติ', '🤖'],
+  ['/kb', 'คลังความรู้ AI', '📚'],
   ['/postbacks', 'Postback', '🔘'],
   ['/automations', 'Automation', '⚡'],
   ['/segments', 'กลุ่มเป้าหมาย', '🎯'],
@@ -129,6 +131,7 @@ export default function App() {
               <Route path="/tasks" element={<Tasks />} />
               <Route path="/classes" element={<Classes />} />
               <Route path="/auto-reply" element={<AutoReply />} />
+              <Route path="/kb" element={<KB />} />
               <Route path="/postbacks" element={<Postbacks />} />
               <Route path="/automations" element={<Automations />} />
               <Route path="/segments" element={<Segments />} />

@@ -186,7 +186,7 @@ async def health(deep: int = 0, test_gemini: int = 0, test_uid: str = "", test_a
     checks["schema"] = {}
     for tb in ("slips", "payment_accounts", "postback_actions", "app_settings",
                "richmenu_history", "registrations", "webhook_jobs", "tasks",
-               "contact_notes", "classes", "attendance"):
+               "contact_notes", "classes", "attendance", "kb_articles"):
         try:
             n = await supa.count(tb)
             checks["schema"][tb] = f"ok ({n} rows)"
@@ -271,9 +271,11 @@ async def health(deep: int = 0, test_gemini: int = 0, test_uid: str = "", test_a
     if test_ask:
         try:
             ctx = await _gemini_context()
-            ans = await _gemini_answer(test_ask, context=ctx, uid=(test_uid or None),
-                                       user_facts="(ทดสอบระบบ)")
+            kb = await _gemini_retrieve(test_ask)
+            ans = await _gemini_answer(test_ask, context=(ctx + ("\n\n" + kb if kb else "")),
+                                       uid=(test_uid or None), user_facts="(ทดสอบระบบ)")
             checks["gemini"]["ask_q"] = test_ask
+            checks["gemini"]["ask_kb_hit"] = bool(kb)
             checks["gemini"]["ask_answer"] = ans
         except Exception as e:
             checks["gemini"]["ask_error"] = str(e)
@@ -999,25 +1001,66 @@ async def _gemini_context() -> str:
             parts.append("\n".join(lines))
     except Exception:
         pass
-    try:
-        rules = await supa.select("auto_replies", params={
-            "select": "keywords,messages", "enabled": "eq.true",
-            "trigger": "in.(text,fallback)", "order": "priority.desc", "limit": "60"})
-        faq = []
-        for r in rules:
-            kw = ", ".join(k for k in (r.get("keywords") or []) if k)
-            ans = " ".join(m.get("text", "") for m in (r.get("messages") or [])
-                           if isinstance(m, dict) and m.get("type") == "text" and m.get("text"))
-            if kw and ans:
-                faq.append(f"ถาม: {kw}\nตอบ: {ans[:280]}")
-        if faq:
-            parts.append("ตัวอย่างคำถาม-คำตอบที่ใช้กับลูกค้า (ใช้เป็นแนวทาง):\n" + "\n\n".join(faq[:35]))
-    except Exception:
-        pass
-    text = "\n\n".join(parts)[:9000]
+    text = "\n\n".join(parts)[:4000]
     _gemini_ctx_cache["text"] = text
     _gemini_ctx_cache["exp"] = time.time() + 300
     return text
+
+
+_gemini_kb_cache: dict = {"items": None, "exp": 0.0}
+
+
+async def _gemini_kb_items() -> list:
+    """คลังความรู้ + FAQ จาก auto_replies — [{title, body, kw:set}] cache 5 นาที"""
+    if _gemini_kb_cache["items"] is not None and time.time() < _gemini_kb_cache["exp"]:
+        return _gemini_kb_cache["items"]
+    items: list = []
+    try:
+        for a in await supa.select("kb_articles", params={
+                "select": "title,body,keywords", "enabled": "eq.true", "limit": "300"}):
+            items.append({"title": a["title"], "body": a["body"],
+                          "kw": set((a.get("keywords") or []) + a["title"].lower().split())})
+    except Exception:
+        pass
+    try:
+        for r in await supa.select("auto_replies", params={
+                "select": "keywords,messages", "enabled": "eq.true",
+                "trigger": "in.(text,fallback)", "order": "priority.desc", "limit": "80"}):
+            kws = [k for k in (r.get("keywords") or []) if k]
+            ans = " ".join(m.get("text", "") for m in (r.get("messages") or [])
+                           if isinstance(m, dict) and m.get("type") == "text" and m.get("text"))
+            if kws and ans:
+                items.append({"title": ", ".join(kws), "body": ans[:400],
+                              "kw": set(k.lower() for k in kws)})
+    except Exception:
+        pass
+    _gemini_kb_cache["items"] = items
+    _gemini_kb_cache["exp"] = time.time() + 300
+    return items
+
+
+def _tok(s: str) -> set:
+    return set(w for w in re.findall(r"[ก-๙a-zA-Z0-9]{2,}", (s or "").lower()))
+
+
+async def _gemini_retrieve(question: str, k: int = 6) -> str:
+    """ดึงบทความ KB/FAQ ที่เกี่ยวกับคำถามนี้มากสุด k อัน"""
+    items = await _gemini_kb_items()
+    if not items:
+        return ""
+    qt = _tok(question)
+    scored = []
+    for it in items:
+        body_t = _tok(it["body"])
+        score = len(qt & it["kw"]) * 3 + len(qt & _tok(it["title"])) * 2 + len(qt & body_t)
+        if score:
+            scored.append((score, it))
+    scored.sort(key=lambda x: -x[0])
+    top = scored[:k]
+    if not top:
+        return ""
+    return "ข้อมูลที่เกี่ยวข้อง (ใช้ตอบ):\n" + "\n\n".join(
+        f"[{it['title']}]\n{it['body'][:500]}" for _s, it in top)
 
 
 _GEMINI_TOOLS = [{"functionDeclarations": [
@@ -1032,6 +1075,24 @@ _GEMINI_TOOLS = [{"functionDeclarations": [
         "description": "ดูรายละเอียดหลักสูตร: ราคา ราคาเต็ม ธนาคาร เลขบัญชี ชื่อบัญชีสำหรับโอนเงิน",
         "parameters": {"type": "object", "properties": {
             "course": {"type": "string", "description": "รหัสหลักสูตร เช่น FC IC PC AC"}}, "required": ["course"]},
+    },
+    {
+        "name": "get_class_info",
+        "description": "ดูข้อมูลคลาส/รุ่นของหลักสูตร: วันเริ่มเรียน ตารางเรียน ลิงก์ Zoom ลิงก์เอกสาร",
+        "parameters": {"type": "object", "properties": {
+            "course": {"type": "string", "description": "รหัสหลักสูตร เช่น FC IC PC"}}, "required": ["course"]},
+    },
+    {
+        "name": "search_knowledge",
+        "description": "ค้นหาข้อมูลเพิ่มเติมในคลังความรู้ของเพจ ใช้เมื่อยังตอบคำถามไม่ได้จากข้อมูลที่มี",
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string", "description": "คำค้น"}}, "required": ["query"]},
+    },
+    {
+        "name": "note_interest",
+        "description": "บันทึกว่าผู้ใช้สนใจหลักสูตรนี้ (ยังไม่ได้ลงทะเบียน) เรียกเมื่อผู้ใช้แสดงความสนใจอยากเรียน/สมัคร",
+        "parameters": {"type": "object", "properties": {
+            "course": {"type": "string", "description": "รหัสหลักสูตรที่สนใจ"}}, "required": ["course"]},
     },
     {
         "name": "escalate_to_admin",
@@ -1070,6 +1131,33 @@ async def _gemini_tool_exec(name: str, args: dict, uid: str) -> dict:
                 return {"error": f"ไม่พบหลักสูตร {args.get('course')}"}
             return {"course": m["course"], "price": m.get("price"), "full_price": m.get("full_price"),
                     "bank": m.get("bank"), "account_no": m.get("account_no"), "account_name": m.get("account_name")}
+        if name == "get_class_info":
+            c = re.sub(r"[^A-Za-z]", "", str(args.get("course") or "")).upper()[:2]
+            cls = await supa.select("classes", params={
+                "select": "name,course,cohort,start_date,schedule,zoom_url,materials_url,status,capacity",
+                "course": f"like.{c}*", "status": "in.(open,running)",
+                "order": "start_date.asc", "limit": "5"})
+            if not cls:
+                return {"note": f"ยังไม่มีคลาส {args.get('course')} ที่เปิดอยู่ตอนนี้"}
+            return {"classes": cls}
+        if name == "search_knowledge":
+            snip = await _gemini_retrieve(str(args.get("query") or ""), k=5)
+            return {"result": snip or "ไม่พบข้อมูลที่เกี่ยวข้องในคลังความรู้"}
+        if name == "note_interest":
+            course = re.sub(r"[^A-Za-z0-9]", "", str(args.get("course") or "")).upper()
+            try:
+                u = await supa.select("line_users", params={
+                    "select": "stage,tags", "line_user_id": f"eq.{uid}", "limit": "1"})
+                cur = u[0] if u else {}
+                patch = {"tags": sorted(set(cur.get("tags") or []) | {f"สนใจ-{course}" if course else "สนใจ"}),
+                         "updated_at": NOW()}
+                if not cur.get("stage") or cur.get("stage") == "lead":
+                    patch["stage"] = "interested"
+                    patch["stage_at"] = NOW()
+                await supa.update("line_users", patch, {"line_user_id": f"eq.{uid}"})
+            except Exception as e:
+                print("note_interest err:", e)
+            return {"ok": True}
         if name == "escalate_to_admin":
             _gemini_escalations[uid] = str(args.get("reason") or "ผู้ใช้ขอคุยกับแอดมิน")[:200]
             return {"ok": True, "message": "แจ้งแอดมินแล้ว จะรีบติดต่อกลับ"}
@@ -1243,7 +1331,12 @@ async def _handle_gemini_replies(events: list) -> set:
         except Exception as ex:
             print("gemini history/facts error:", ex)
 
-        answer = await _gemini_answer(question, menu_temp[rid], context=ctx,
+        try:
+            kb = await _gemini_retrieve(question)
+        except Exception:
+            kb = ""
+        full_ctx = (ctx + ("\n\n" + kb if kb else "")).strip()
+        answer = await _gemini_answer(question, menu_temp[rid], context=full_ctx,
                                       history=history, uid=uid, user_facts=user_facts)
         if not answer:
             continue
@@ -1780,6 +1873,41 @@ _GAP_STOP = {"ครับ", "ค่ะ", "คะ", "นะ", "น่ะ", "ท�
              "อยู่", "ได้", "จะ", "ให้", "มา", "ไป", "ว่า", "คือ", "กับ", "ใน", "เป็น", "ก็", "ๆ",
              "ผม", "หนู", "เรา", "ยัง", "แล้ว", "ด้วย", "ค่ะ", "อ่ะ", "อะ", "เอา", "มี", "ไม่",
              "ทำ", "ต้อง", "นี้", "นั้น", "อัน", "ตัว", "เลย", "จ้า", "จ้ะ", "งับ", "hello", "hi"}
+
+
+# ---------- knowledge base ----------
+@app.get("/api/kb")
+async def kb_list(admin=Depends(current_admin)):
+    try:
+        rows = await supa.select("kb_articles", params={"select": "*", "order": "category,title"})
+    except Exception:
+        return {"articles": [], "schema_missing": True,
+                "hint": "รัน migration 0010 (kb_articles) ใน Supabase SQL Editor"}
+    return {"articles": rows}
+
+
+@app.post("/api/kb")
+async def kb_save(req: Request, admin=Depends(current_admin)):
+    b = await req.json()
+    if not (b.get("title") or "").strip() or not (b.get("body") or "").strip():
+        raise HTTPException(400, "ต้องมีหัวข้อและเนื้อหา")
+    row = {"title": b["title"].strip(), "body": b["body"].strip(),
+           "keywords": [k.strip() for k in (b.get("keywords") or []) if k.strip()],
+           "category": b.get("category"), "enabled": b.get("enabled", True),
+           "updated_by": admin["userId"], "updated_at": NOW()}
+    if b.get("id"):
+        await supa.update("kb_articles", row, {"id": f"eq.{b['id']}"})
+    else:
+        await supa.insert("kb_articles", row)
+    _gemini_kb_cache["items"] = None
+    return {"ok": True}
+
+
+@app.delete("/api/kb/{aid}")
+async def kb_delete(aid: int, admin=Depends(current_admin)):
+    await supa.delete("kb_articles", {"id": f"eq.{aid}"})
+    _gemini_kb_cache["items"] = None
+    return {"ok": True}
 
 
 @app.get("/api/insights/gaps")
