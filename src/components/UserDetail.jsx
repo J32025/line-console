@@ -242,12 +242,26 @@ export default function UserDetail({ uid, onClose, onSaved }) {
             </div>
 
             <details style={{ marginTop: 10 }}>
-              <summary className="muted sm">รวมบัญชีซ้ำ (merge)</summary>
+              <summary className="muted sm">รวมบัญชีซ้ำ / PDPA</summary>
               <div className="row" style={{ gap: 6, marginTop: 6 }}>
                 <input className="mono" value={mergeInto} onChange={(e) => setMergeInto(e.target.value)} placeholder="userId ปลายทาง U..." />
-                <button className="xs danger" onClick={doMerge}>รวม</button>
+                <button className="xs danger" onClick={doMerge}>รวมบัญชี</button>
               </div>
-              <p className="muted xs">ย้ายทะเบียน/สลิป/งาน/โน้ต/ข้อความ ของคนนี้ไปบัญชีปลายทาง แล้วปิดบัญชีนี้</p>
+              <p className="muted xs">ย้ายทะเบียน/สลิป/งาน/โน้ต/ข้อความ ไปบัญชีปลายทาง แล้วปิดบัญชีนี้</p>
+              <div className="row" style={{ gap: 6, marginTop: 6 }}>
+                <button className="xs" onClick={async () => {
+                  try {
+                    const data = await api.userExport(uid)
+                    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+                    const a = document.createElement('a'); a.href = URL.createObjectURL(blob)
+                    a.download = `user-${uid.slice(0, 10)}.json`; a.click()
+                  } catch (e) { t.err(e.message) }
+                }}>ดาวน์โหลดข้อมูลทั้งหมด (PDPA)</button>
+                <button className="xs danger" onClick={async () => {
+                  if (!confirm('ลบข้อมูลส่วนบุคคลของคนนี้ถาวร? (ชื่อ/เบอร์/อีเมล/โน้ต/ข้อความ)')) return
+                  try { await api.userForget(uid, uid); t.ok('ลบข้อมูลแล้ว'); onClose() } catch (e) { t.err(e.message) }
+                }}>ลบข้อมูลส่วนบุคคล</button>
+              </div>
             </details>
           </>
         )}

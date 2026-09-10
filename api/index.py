@@ -185,7 +185,8 @@ async def health(deep: int = 0, test_gemini: int = 0, test_uid: str = "", test_a
     # เช็คว่า migration 0002/0003/0004 รันครบใน DB ไหม
     checks["schema"] = {}
     for tb in ("slips", "payment_accounts", "postback_actions", "app_settings",
-               "richmenu_history", "registrations", "webhook_jobs", "tasks"):
+               "richmenu_history", "registrations", "webhook_jobs", "tasks",
+               "contact_notes", "classes", "attendance"):
         try:
             n = await supa.count(tb)
             checks["schema"][tb] = f"ok ({n} rows)"
@@ -418,6 +419,15 @@ async def webhook(request: Request):
         print("webhook store error:", e)
         await alert_admin("webhook เก็บข้อมูลไม่สำเร็จ", str(e), "wh_store")
 
+    # ---- PDPA: คำสั่งขอหยุด/รับข่าวสาร ----
+    consent_uids: set = set()
+    try:
+        consent_uids = await _handle_consent_keywords(events)
+    except Exception as e:
+        print("consent kw error:", e)
+    if consent_uids:
+        events = [e for e in events if e.get("source", {}).get("userId") not in consent_uids]
+
     # ---- ดึงโปรไฟล์คนที่เพิ่ง follow (จังหวะที่ดีที่สุด) ----
     if follow_uids:
         try:
@@ -546,6 +556,37 @@ async def _run_webhook_jobs(limit: int = 15) -> dict:
 async def run_jobs_endpoint(request: Request):
     _check_cron_key(request)
     return {"ok": True, **await _run_webhook_jobs()}
+
+
+_OPTOUT_KW = ("ยกเลิกรับข่าว", "หยุดส่งข่าว", "หยุดส่งข้อความ", "ไม่รับข่าวสาร", "unsubscribe", "เลิกรับข่าว", "ขอหยุดรับข่าว")
+_OPTIN_KW = ("รับข่าวสาร", "สมัครรับข่าว", "subscribe", "เปิดรับข่าว")
+
+
+async def _handle_consent_keywords(events: list) -> set:
+    handled: set = set()
+    for e in events:
+        if e.get("type") != "message" or e.get("message", {}).get("type") != "text":
+            continue
+        uid = e.get("source", {}).get("userId")
+        rtok = e.get("replyToken")
+        if not uid:
+            continue
+        txt = (e["message"].get("text") or "").lower().strip()
+        if any(k in txt for k in _OPTOUT_KW):
+            handled.add(uid)
+            await supa.update("line_users", {"consent": False, "consent_at": NOW(), "updated_at": NOW()},
+                              {"line_user_id": f"eq.{uid}"})
+            if rtok:
+                await line.reply(rtok, [{"type": "text", "text":
+                    "รับทราบครับ ระบบจะไม่ส่งข่าวสาร/โปรโมชันให้อีก\n(ยังตอบข้อความที่คุณถามเข้ามาตามปกติ) "
+                    "พิมพ์ 'รับข่าวสาร' เพื่อเปิดรับใหม่"}])
+        elif any(k in txt for k in _OPTIN_KW):
+            handled.add(uid)
+            await supa.update("line_users", {"consent": True, "consent_at": NOW(), "updated_at": NOW()},
+                              {"line_user_id": f"eq.{uid}"})
+            if rtok:
+                await line.reply(rtok, [{"type": "text", "text": "เปิดรับข่าวสารเรียบร้อยครับ 🙏"}])
+    return handled
 
 
 async def _get_setting(key: str, default=None):
@@ -1402,6 +1443,8 @@ async def dashboard(admin=Depends(current_admin), range: int = 30):
         blocked=supa.count("line_users", {"block_count": "gt.0", "is_following": "eq.false"}),
         tasks_open=supa.count("tasks", {"status": "eq.open"}),
         tasks_overdue=supa.count("tasks", {"status": "eq.open", "due_at": f"lt.{_iso_ago(days=0)}"}),
+        **{f"stg_{s}": supa.count("line_users", {"stage": f"eq.{s}", "is_following": "eq.true"})
+           for s in PIPELINE_STAGES},
     )
 
     # ---------- LINE API ----------
@@ -1537,6 +1580,8 @@ async def dashboard(admin=Depends(current_admin), range: int = 30):
             "follow_rate": round((c["following"] or 0) / (c["total"] or 1) * 100),
             "active_rate": round((c["active30"] or 0) / (c["following"] or 1) * 100),
             "source_breakdown": source_breakdown,
+            "pipeline": [{"key": s, "label": _STAGE_LABEL.get(s, s), "count": c.get(f"stg_{s}") or 0}
+                         for s in PIPELINE_STAGES],
         },
         "growth": growth,
         "growth_totals": {"follow": tot_follow, "unfollow": tot_unfollow,
@@ -2705,6 +2750,42 @@ async def user_note_del(uid: str, nid: int, admin=Depends(current_admin)):
     return {"ok": True}
 
 
+@app.get("/api/users/{uid}/export")
+async def user_export(uid: str, admin=Depends(current_admin)):
+    """PDPA — ข้อมูลทั้งหมดของลูกค้าคนนี้ (สำหรับคำขอเข้าถึงข้อมูล)"""
+    out: dict = {"exported_at": NOW(), "line_user_id": uid}
+    for tb in ("line_users", "registrations", "slips", "contact_notes", "tasks", "messages",
+               "webhook_events", "follow_history", "richmenu_history", "attendance", "link_clicks"):
+        try:
+            out[tb] = await supa.select(tb, params={
+                "line_user_id": f"eq.{uid}", "select": "*", "limit": "2000"})
+        except Exception as e:
+            out[tb] = {"error": str(e)[:80]}
+    return out
+
+
+@app.post("/api/users/{uid}/forget")
+async def user_forget(uid: str, req: Request, admin=Depends(current_admin)):
+    """PDPA — ลบข้อมูลส่วนบุคคล (anonymize) เก็บเฉพาะสถิติรวม"""
+    b = await req.json()
+    if b.get("confirm") != uid:
+        raise HTTPException(400, "ต้องยืนยันด้วย userId")
+    await supa.update("line_users", {
+        "display_name": None, "picture_url": None, "status_message": None,
+        "note": None, "custom": {}, "tags": [], "consent": False, "consent_at": NOW(),
+        "stage": "lost", "updated_at": NOW(),
+    }, {"line_user_id": f"eq.{uid}"})
+    await supa.update("registrations", {"name": None, "tel": None, "email": None, "org": None},
+                     {"line_user_id": f"eq.{uid}"})
+    for tb in ("contact_notes", "messages"):
+        try:
+            await supa.delete(tb, {"line_user_id": f"eq.{uid}"})
+        except Exception:
+            pass
+    await supa.log_operation(admin["userId"], "users.forget", {"uid": uid}, None)
+    return {"ok": True}
+
+
 @app.post("/api/users/merge")
 async def users_merge(req: Request, admin=Depends(current_admin)):
     """รวมบัญชีซ้ำ: ย้าย registrations/slips/tasks/notes จาก 'from' -> 'into', mark from.merged_into"""
@@ -3618,6 +3699,11 @@ def _filter_to_params(f: dict) -> dict:
     if f.get("search"):
         s = f["search"]
         p["or"] = f"(line_user_id.ilike.*{s}*,display_name.ilike.*{s}*,note.ilike.*{s}*)"
+    if f.get("stage"):
+        p["stage"] = f"eq.{f['stage']}"
+    # PDPA: ไม่ส่งหาคนที่ขอหยุดข่าวสาร (consent=false) เว้นแต่ระบุ includeOptOut
+    if not f.get("includeOptOut"):
+        p["consent"] = "not.is.false"
     return p
 
 
@@ -4227,6 +4313,132 @@ async def registrations_list(admin=Depends(current_admin), course: str = "", pai
 
 
 # ============================================================
+# CLASSES (คลาส / รุ่น) + ATTENDANCE (เช็คชื่อ)
+# ============================================================
+@app.get("/api/classes")
+async def classes_list(admin=Depends(current_admin), course: str = "", status: str = ""):
+    params = {"select": "*", "order": "start_date.desc.nullslast,id.desc", "limit": "200"}
+    if course:
+        params["course"] = f"eq.{course}"
+    if status:
+        params["status"] = f"eq.{status}"
+    classes = await supa.select("classes", params=params)
+    if classes:
+        ids = [c["id"] for c in classes]
+        counts: dict = {}
+        for r in await supa.select("registrations", params={
+                "select": "class_id", "class_id": f"in.({','.join(map(str, ids))})", "limit": "5000"}):
+            counts[r["class_id"]] = counts.get(r["class_id"], 0) + 1
+        for c in classes:
+            c["enrolled"] = counts.get(c["id"], 0)
+    return {"classes": classes}
+
+
+@app.post("/api/classes")
+async def class_save(req: Request, admin=Depends(current_admin)):
+    b = await req.json()
+    row = {k: b[k] for k in ("course", "name", "cohort", "start_date", "end_date", "schedule",
+                             "zoom_url", "materials_url", "capacity", "status", "note") if k in b}
+    if not row.get("course"):
+        raise HTTPException(400, "ต้องระบุหลักสูตร")
+    row["updated_at"] = NOW()
+    if b.get("id"):
+        await supa.update("classes", row, {"id": f"eq.{b['id']}"})
+        return {"ok": True, "id": b["id"]}
+    row["created_by"] = admin["userId"]
+    r = await supa.insert("classes", row)
+    return {"ok": True, "class": r[0] if r else None}
+
+
+@app.delete("/api/classes/{cid}")
+async def class_delete(cid: int, admin=Depends(current_admin)):
+    await supa.update("registrations", {"class_id": None}, {"class_id": f"eq.{cid}"})
+    await supa.delete("classes", {"id": f"eq.{cid}"})
+    return {"ok": True}
+
+
+@app.get("/api/classes/{cid}")
+async def class_detail(cid: int, admin=Depends(current_admin)):
+    rows = await supa.select("classes", params={"id": f"eq.{cid}", "select": "*", "limit": "1"})
+    if not rows:
+        raise HTTPException(404, "ไม่พบ")
+    cls = rows[0]
+    base = (cls.get("course") or "")[:2].upper()
+    roster = await supa.select("registrations", params={
+        "select": "id,line_user_id,name,tel,course,course_raw,paid,class_id,exam_passed",
+        "class_id": f"eq.{cid}", "order": "name.asc", "limit": "1000"})
+    # ผู้ที่ยังไม่ถูก assign เข้าคลาสไหน แต่คอร์สตรง
+    avail = await supa.select("registrations", params={
+        "select": "id,line_user_id,name,tel,course_raw,paid", "class_id": "is.null",
+        "course": f"like.{base}*", "limit": "500"})
+    att = await supa.select("attendance", params={
+        "select": "line_user_id,session,present", "class_id": f"eq.{cid}", "limit": "5000"})
+    sessions = sorted({a["session"] for a in att})
+    att_map: dict = {}
+    for a in att:
+        att_map.setdefault(a["line_user_id"], {})[a["session"]] = a["present"]
+    return {"class": cls, "roster": roster, "available": avail,
+            "sessions": sessions, "attendance": att_map}
+
+
+@app.post("/api/classes/{cid}/assign")
+async def class_assign(cid: int, req: Request, admin=Depends(current_admin)):
+    b = await req.json()
+    ids = [int(x) for x in b.get("registrationIds", []) if str(x).isdigit()]
+    if not ids:
+        raise HTTPException(400, "ไม่มีรายการ")
+    val = cid if b.get("mode") != "remove" else None
+    await supa.update("registrations", {"class_id": val, "updated_at": NOW()},
+                      {"id": f"in.({','.join(map(str, ids))})"})
+    return {"ok": True, "changed": len(ids)}
+
+
+@app.post("/api/classes/{cid}/attendance")
+async def class_attendance(cid: int, req: Request, admin=Depends(current_admin)):
+    b = await req.json()
+    session = int(b.get("session", 1))
+    recs = b.get("records", [])
+    rows = [{"class_id": cid, "line_user_id": r["line_user_id"], "session": session,
+             "present": bool(r.get("present", True)), "marked_by": admin["userId"]}
+            for r in recs if r.get("line_user_id")]
+    if rows:
+        await supa.upsert("attendance", rows, on_conflict="class_id,line_user_id,session")
+    return {"ok": True, "marked": len(rows)}
+
+
+@app.post("/api/classes/{cid}/message")
+async def class_message(cid: int, req: Request, admin=Depends(current_admin)):
+    rows = await supa.select("classes", params={"id": f"eq.{cid}", "select": "*", "limit": "1"})
+    if not rows:
+        raise HTTPException(404, "ไม่พบคลาส")
+    cls = rows[0]
+    b = await req.json()
+    roster = await supa.select("registrations", params={
+        "select": "line_user_id,name,course_raw", "class_id": f"eq.{cid}", "limit": "1000"})
+    uids = list({r["line_user_id"] for r in roster if r.get("line_user_id")})
+    if not uids:
+        raise HTTPException(400, "คลาสนี้ยังไม่มีนักเรียน")
+    text = (b.get("text") or "")
+    text = (text.replace("{zoom}", cls.get("zoom_url") or "")
+                .replace("{materials}", cls.get("materials_url") or "")
+                .replace("{class}", cls.get("name") or cls.get("course") or "")
+                .replace("{schedule}", cls.get("schedule") or "")
+                .replace("{start}", str(cls.get("start_date") or "")))
+    msgs = [{"type": "text", "text": text}]
+    sent = failed = 0
+    for i in range(0, len(uids), 500):
+        code, *_ = await line.multicast(uids[i:i + 500], msgs)
+        if code == 200:
+            sent += len(uids[i:i + 500])
+        else:
+            failed += len(uids[i:i + 500])
+    await supa.insert("broadcasts", {"actor": admin["userId"], "kind": "multicast",
+                                     "target_count": len(uids), "messages": msgs,
+                                     "status": "sent" if not failed else "failed"})
+    return {"ok": not failed, "sent": sent, "failed": failed}
+
+
+# ============================================================
 # TASKS (งาน / ติดตาม)
 # ============================================================
 @app.get("/api/tasks")
@@ -4441,6 +4653,52 @@ async def reconcile(admin=Depends(current_admin)):
             "slip_no_reg": slip_no_reg[:300], "slip_no_reg_count": len(slip_no_reg),
         },
     }
+
+
+@app.get("/api/reports/revenue")
+async def report_revenue(admin=Depends(current_admin), frm: str = "", to: str = "",
+                         group: str = "course", format: str = ""):
+    """รายงานรายได้จากสลิปที่ verified — group: course | bank | day | month"""
+    params = {"select": "amount,bank,expected_course,status,reviewed_at,created_at,slip_date",
+              "status": "eq.verified"}
+    slips = await supa.select_all("slips", params=params)
+    fromd = frm or "0000"
+    tod = to or "9999"
+
+    def _d(s):
+        return (s.get("reviewed_at") or s.get("slip_date") or s.get("created_at") or "")[:10]
+
+    rows: dict[str, dict] = {}
+    total = 0.0
+    for s in slips:
+        d = _d(s)
+        if not (fromd <= d <= tod):
+            continue
+        amt = float(s.get("amount") or 0)
+        total += amt
+        if group == "bank":
+            k = s.get("bank") or "ไม่ระบุ"
+        elif group == "day":
+            k = d
+        elif group == "month":
+            k = d[:7]
+        else:
+            k = s.get("expected_course") or "ไม่ระบุ"
+        g = rows.setdefault(k, {"key": k, "count": 0, "amount": 0.0})
+        g["count"] += 1
+        g["amount"] += amt
+    out = sorted(rows.values(), key=lambda x: (x["key"] if group in ("day", "month") else -x["amount"]))
+    for r in out:
+        r["amount"] = round(r["amount"])
+
+    if format == "csv":
+        lines = ["key,count,amount"] + [f'"{r["key"]}",{r["count"]},{r["amount"]}' for r in out]
+        lines.append(f'"รวม",{sum(r["count"] for r in out)},{round(total)}')
+        from fastapi.responses import Response
+        return Response("﻿" + "\r\n".join(lines), media_type="text/csv",
+                        headers={"Content-Disposition": f'attachment; filename="revenue-{group}-{dt.date.today()}.csv"'})
+    return {"group": group, "from": frm, "to": to, "rows": out,
+            "total": round(total), "count": sum(r["count"] for r in out)}
 
 
 @app.post("/api/reconcile/mark-paid")

@@ -3,6 +3,9 @@ import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, BarChart, 
 import { api } from '../lib/api.js'
 import { Spinner, Stat, useToast } from '../lib/ui.jsx'
 
+const todayISO = () => new Date().toISOString().slice(0, 10)
+const daysAgoISO = (n) => new Date(Date.now() - n * 864e5).toISOString().slice(0, 10)
+
 export default function Stats() {
   const t = useToast()
   const [insight, setInsight] = useState(null)
@@ -10,13 +13,17 @@ export default function Stats() {
   const [quota, setQuota] = useState(null)
   const [follows, setFollows] = useState(null)
   const [funnel, setFunnel] = useState(null)
+  const [rev, setRev] = useState(null)
+  const [rf, setRf] = useState({ frm: daysAgoISO(30), to: todayISO(), group: 'course' })
 
+  const loadRev = () => api.revenueReport(rf).then(setRev).catch((e) => t.err(e.message))
   useEffect(() => {
     api.quota().then(setQuota).catch(() => {})
     api.insight().then(setInsight).catch((e) => t.err(e.message))
     api.statsHistory(30).then((d) => setHistory([...d.days].reverse())).catch(() => {})
     api.followStats(14).then(setFollows).catch(() => {})
     api.funnel().then(setFunnel).catch(() => {})
+    loadRev()
   }, []) // eslint-disable-line
 
   if (!insight) return <Spinner />
@@ -36,6 +43,46 @@ export default function Stats() {
               value={q.type === 'limited' ? q.value?.toLocaleString() : q.type}
               sub={quota?.totalUsage != null ? quota.totalUsage.toLocaleString() : null} />
       </div>
+
+      <section className="card">
+        <div className="row spread"><h3>รายงานรายได้ (จากสลิปที่ยืนยัน)</h3></div>
+        <div className="row wrap" style={{ gap: 6, alignItems: 'center' }}>
+          <input type="date" value={rf.frm} onChange={(e) => setRf({ ...rf, frm: e.target.value })} />
+          <span className="muted">–</span>
+          <input type="date" value={rf.to} onChange={(e) => setRf({ ...rf, to: e.target.value })} />
+          <select value={rf.group} onChange={(e) => setRf({ ...rf, group: e.target.value })}>
+            <option value="course">ตามหลักสูตร</option><option value="bank">ตามธนาคาร</option>
+            <option value="month">ตามเดือน</option><option value="day">ตามวัน</option>
+          </select>
+          <button className="sm" onClick={loadRev}>ดู</button>
+          <button className="sm" onClick={async () => {
+            try {
+              const csv = await api.get('/reports/revenue?' + new URLSearchParams({ ...rf, format: 'csv' }))
+              const text = typeof csv === 'string' ? csv : (csv.detail || JSON.stringify(csv))
+              const a = document.createElement('a')
+              a.href = URL.createObjectURL(new Blob([text], { type: 'text/csv;charset=utf-8' }))
+              a.download = `revenue-${rf.group}.csv`; a.click()
+            } catch (e) { t.err(e.message) }
+          }}>⬇ CSV</button>
+        </div>
+        {rev && (
+          <>
+            <div className="stat" style={{ margin: '8px 0' }}>
+              <div><b>฿{rev.total?.toLocaleString()}</b><span className="muted"> รวม</span></div>
+              <div><b>{rev.count}</b><span className="muted"> รายการ</span></div>
+            </div>
+            <table>
+              <thead><tr><th>{rf.group === 'course' ? 'หลักสูตร' : rf.group === 'bank' ? 'ธนาคาร' : 'ช่วงเวลา'}</th><th>จำนวน</th><th>ยอดเงิน</th></tr></thead>
+              <tbody>
+                {rev.rows.map((r) => (
+                  <tr key={r.key}><td>{r.key}</td><td>{r.count}</td><td>฿{r.amount.toLocaleString()}</td></tr>
+                ))}
+                {!rev.rows.length && <tr><td colSpan={3} className="muted">ไม่มีข้อมูลในช่วงนี้</td></tr>}
+              </tbody>
+            </table>
+          </>
+        )}
+      </section>
 
       {funnel && (
         <div className="grid two">

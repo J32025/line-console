@@ -357,6 +357,12 @@ function People({ d, a }) {
         </Card>
       </div>
 
+      {u.pipeline?.some((p) => p.count > 0) && (
+        <Card title="Pipeline ลูกค้า" sub="ตั้งสถานะได้ในหน้ารายละเอียดผู้ใช้">
+          <BarList rows={u.pipeline.filter((p) => p.count > 0)} labelKey="label" valueKey="count" color={CAT} />
+        </Card>
+      )}
+
       <div className="grid two">
         <Card title="แหล่งที่มาผู้ใช้">
           <BarList rows={u.source_breakdown} labelKey="source" valueKey="count" color={CAT} />

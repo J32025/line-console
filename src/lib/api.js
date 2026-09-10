@@ -106,6 +106,18 @@ export const api = {
   reconcile: () => req('GET', '/reconcile'),
   reconcileMarkPaid: (ids) => req('POST', '/reconcile/mark-paid', { ids }),
 
+  classes: (qs = {}) => req('GET', '/classes?' + new URLSearchParams(qs)),
+  saveClass: (payload) => req('POST', '/classes', payload),
+  delClass: (id) => req('DELETE', `/classes/${id}`),
+  classDetail: (id) => req('GET', `/classes/${id}`),
+  classAssign: (id, payload) => req('POST', `/classes/${id}/assign`, payload),
+  classAttendance: (id, payload) => req('POST', `/classes/${id}/attendance`, payload),
+  classMessage: (id, text) => req('POST', `/classes/${id}/message`, { text }),
+  revenueReport: (qs = {}) => req('GET', '/reports/revenue?' + new URLSearchParams(qs)),
+  revenueReportUrl: (qs = {}) => '/api/reports/revenue?' + new URLSearchParams({ ...qs, format: 'csv' }),
+  userExport: (uid) => req('GET', `/users/${uid}/export`),
+  userForget: (uid, confirm) => req('POST', `/users/${uid}/forget`, { confirm }),
+
   tasks: (qs = {}) => req('GET', '/tasks?' + new URLSearchParams(qs)),
   tasksSummary: () => req('GET', '/tasks/summary'),
   createTask: (payload) => req('POST', '/tasks', payload),
