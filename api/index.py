@@ -1366,16 +1366,18 @@ async def _handle_gemini_replies(events: list) -> set:
         full_ctx = (ctx + ("\n\n" + kb if kb else "")).strip()
         answer = await _gemini_answer(question, menu_temp[rid], context=full_ctx,
                                       history=history, uid=uid, user_facts=user_facts)
+        gemini_ok = bool(answer)
         if not answer:
-            continue
+            # AI ตอบไม่ได้ (quota/error) -> อย่าปล่อยเงียบ: ข้อความค้างไว้ + ให้แอดมินเห็น
+            answer = "ได้รับข้อความแล้วครับ 🙏 เดี๋ยวแอดมินมาตอบให้นะครับ"
         code, _ = await line.reply(e["replyToken"], [{"type": "text", "text": answer[:4900]}])
         if code == 200:
             handled.add(uid)
             out_msgs.append({"line_user_id": uid, "direction": "out", "by": "gemini",
                              "msg_type": "text", "text": answer,
                              "payload": {"question": question, "model": GEMINI_MODEL}})
-            # Gemini เรียก escalate_to_admin -> bump unread + tag ให้แอดมินเห็น
-            if uid in _gemini_escalations:
+            # Gemini เรียก escalate_to_admin หรือ AI ตอบไม่ได้ -> bump unread + tag ให้แอดมินเห็น
+            if uid in _gemini_escalations or not gemini_ok:
                 try:
                     ex = await supa.select("line_users", params={
                         "select": "unread,tags", "line_user_id": f"eq.{uid}", "limit": "1"})
@@ -1385,8 +1387,8 @@ async def _handle_gemini_replies(events: list) -> set:
                         "tags": sorted(set(cur.get("tags") or []) | {"รอแอดมิน"}),
                         "updated_at": NOW(),
                     }, {"line_user_id": f"eq.{uid}"})
-                    await alert_admin("🙋 ลูกค้าขอคุยกับแอดมิน",
-                                      f"{user_facts or uid[:12]}\n{_gemini_escalations[uid]}",
+                    reason = _gemini_escalations.get(uid) or f"AI ตอบไม่ได้: {question[:80]}"
+                    await alert_admin("🙋 ลูกค้ารอแอดมิน", f"{user_facts or uid[:12]}\n{reason}",
                                       throttle_key=f"esc_{uid}")
                 except Exception as ex2:
                     print("escalation error:", ex2)
