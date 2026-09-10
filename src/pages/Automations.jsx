@@ -7,7 +7,14 @@ import MessagePreview from '../components/MessagePreview.jsx'
 import TemplateGallery from '../components/TemplateGallery.jsx'
 
 const newStep = () => ({ delayHours: 24, delayMinutes: 0, messages: [blank('text')] })
-const EMPTY = { name: '', enabled: true, trigger: 'follow', steps: [newStep()] }
+const EMPTY = { name: '', enabled: true, trigger: 'follow', triggerConfig: {}, steps: [newStep()] }
+const TRIGGERS = {
+  follow: 'มีคนเพิ่มเพื่อน',
+  slip_verified: 'สลิปโอนเงินยืนยันแล้ว',
+  tag_added: 'ถูกใส่ tag',
+  inactive: 'ไม่ทักแชทมานาน',
+}
+const trigLabel = (t) => TRIGGERS[t] || t
 
 export default function Automations() {
   const t = useToast()
@@ -47,13 +54,18 @@ export default function Automations() {
             {list.map((a) => (
               <tr key={a.id}>
                 <td><input type="checkbox" checked={a.enabled}
-                           onChange={() => api.saveAutomation({ ...a, enabled: !a.enabled }).then(load)} /></td>
+                           onChange={() => api.saveAutomation({ ...a, triggerConfig: a.trigger_config || {}, enabled: !a.enabled }).then(load)} /></td>
                 <td>{a.name}</td>
-                <td className="sm">{a.trigger === 'follow' ? 'เพิ่มเพื่อน' : a.trigger}</td>
+                <td className="sm">
+                  {trigLabel(a.trigger)}
+                  {a.trigger_config?.course && <span className="chip xs"> {a.trigger_config.course}</span>}
+                  {a.trigger_config?.tag && <span className="chip xs"> {a.trigger_config.tag}</span>}
+                  {a.trigger_config?.days && <span className="muted xs"> {a.trigger_config.days} วัน</span>}
+                </td>
                 <td>{(a.steps || []).length} ข้อความ</td>
                 <td>{a.runs || 0}</td>
                 <td className="row">
-                  <button className="xs" onClick={() => setForm({ ...a, steps: a.steps?.length ? a.steps : [newStep()] })}>แก้ไข</button>
+                  <button className="xs" onClick={() => setForm({ ...a, triggerConfig: a.trigger_config || {}, steps: a.steps?.length ? a.steps : [newStep()] })}>แก้ไข</button>
                   <button className="xs danger" onClick={() => confirm('ลบโฟลว์นี้?') && api.delAutomation(a.id).then(() => { t.ok('ลบแล้ว'); load() })}>ลบ</button>
                 </td>
               </tr>
@@ -72,9 +84,34 @@ export default function Automations() {
             <label className="sm">ชื่อ</label>
             <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
             <label className="sm">เริ่มเมื่อ</label>
-            <select value={form.trigger} onChange={(e) => setForm({ ...form, trigger: e.target.value })}>
-              <option value="follow">มีคนเพิ่มเพื่อน</option>
+            <select value={form.trigger}
+                    onChange={(e) => setForm({ ...form, trigger: e.target.value, triggerConfig: {} })}>
+              {Object.entries(TRIGGERS).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
             </select>
+
+            {form.trigger === 'slip_verified' && (
+              <>
+                <label className="sm">เฉพาะหลักสูตร (เว้นว่าง = ทุกหลักสูตร)</label>
+                <input placeholder="FC / IC / PC / AC" value={form.triggerConfig.course || ''}
+                       onChange={(e) => setForm({ ...form, triggerConfig: { ...form.triggerConfig, course: e.target.value.trim().toUpperCase() || undefined } })} />
+              </>
+            )}
+            {form.trigger === 'tag_added' && (
+              <>
+                <label className="sm">เมื่อถูกใส่ tag นี้ *</label>
+                <input placeholder="เช่น paid-FC" value={form.triggerConfig.tag || ''}
+                       onChange={(e) => setForm({ ...form, triggerConfig: { ...form.triggerConfig, tag: e.target.value.trim() } })} />
+              </>
+            )}
+            {form.trigger === 'inactive' && (
+              <>
+                <label className="sm">ไม่ทักแชทกี่วัน</label>
+                <input type="number" style={{ width: 90 }} value={form.triggerConfig.days || 14}
+                       onChange={(e) => setForm({ ...form, triggerConfig: { ...form.triggerConfig, days: +e.target.value || 14 } })} />
+                <p className="muted xs">เช็คทุก 5 นาที · คนที่หายไปเกิน (วัน+30) จะไม่ถูกดึง · แต่ละคนเข้าโฟลว์ครั้งเดียว</p>
+              </>
+            )}
+
             <label className="row"><input type="checkbox" checked={form.enabled} onChange={(e) => setForm({ ...form, enabled: e.target.checked })} /> เปิดใช้</label>
 
             {form.steps.map((s, i) => (
@@ -89,7 +126,7 @@ export default function Automations() {
                          onChange={(e) => setStep(i, { delayHours: +e.target.value })} /> ชม.
                   <input type="number" style={{ width: 60 }} value={s.delayMinutes}
                          onChange={(e) => setStep(i, { delayMinutes: +e.target.value })} /> นาที
-                  <span className="muted xs">{i === 0 ? '(นับจากเพิ่มเพื่อน)' : '(นับจากขั้นก่อนหน้า)'}</span>
+                  <span className="muted xs">{i === 0 ? `(นับจาก "${trigLabel(form.trigger)}")` : '(นับจากขั้นก่อนหน้า)'}</span>
                 </div>
                 <div className="row spread" style={{ marginTop: 6 }}>
                   <span className="sm">ข้อความ ({s.messages.length}/5)</span>

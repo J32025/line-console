@@ -726,6 +726,10 @@ async def _handle_slips(img_events: list):
         # ตอบ user ตามผลตรวจอัตโนมัติ
         if status == "verified":
             await line.push(uid, [{"type": "text", "text": f"✅ ตรวจสอบสลิปเรียบร้อยแล้ว\nยอด {amount} บาท · หลักสูตร {exp_course}\nขอบคุณครับ 🙏"}])
+            try:
+                await _enroll_automations("slip_verified", [uid], {"course": exp_course})
+            except Exception as ex:
+                print("slip_verified enroll error:", ex)
         elif status == "rejected":
             await line.push(uid, [{"type": "text", "text": "สลิปนี้เคยส่งเข้ามาแล้วครับ หากต้องการสอบถามเพิ่มเติมพิมพ์ 'ติดต่อแอดมิน'"}])
 
@@ -737,13 +741,22 @@ async def _handle_slips(img_events: list):
         await alert_admin(f"{emoji} สลิป: {status}", detail, throttle_key=f"slip_{mid}")
 
 
-async def _enroll_automations(trigger: str, uids: list[str]):
+async def _enroll_automations(trigger: str, uids: list[str], ctx: dict | None = None):
+    ctx = ctx or {}
     autos = await supa.select("automations", params={
-        "select": "id,steps", "enabled": "eq.true", "trigger": f"eq.{trigger}"})
-    if not autos:
+        "select": "id,steps,trigger_config", "enabled": "eq.true", "trigger": f"eq.{trigger}"})
+    if not autos or not uids:
         return
     rows = []
     for a in autos:
+        cfg = a.get("trigger_config") or {}
+        # กรองตาม trigger_config
+        if trigger == "slip_verified" and cfg.get("course"):
+            if str(cfg["course"]).upper() != str(ctx.get("course") or "").upper():
+                continue
+        if trigger == "tag_added" and cfg.get("tag"):
+            if cfg["tag"] not in (ctx.get("tags") or []):
+                continue
         steps = a.get("steps") or []
         if not steps:
             continue
@@ -2071,6 +2084,7 @@ async def users_bulk_tag(req: Request, admin=Depends(current_admin)):
         raise HTTPException(400, "ไม่มีปลายทาง")
 
     n = 0
+    newly: dict[str, list] = {}
     for i in range(0, len(uids), 400):
         chunk = uids[i:i + 400]
         rows = await supa.select("line_users", params={
@@ -2081,9 +2095,16 @@ async def users_bulk_tag(req: Request, admin=Depends(current_admin)):
             new = (cur | set(add)) - remove
             if new != cur:
                 patch.append({"line_user_id": r["line_user_id"], "tags": sorted(new), "updated_at": NOW()})
+                for tg in (set(add) - cur):
+                    newly.setdefault(tg, []).append(r["line_user_id"])
         if patch:
             await supa.upsert("line_users", patch, on_conflict="line_user_id")
             n += len(patch)
+    for tg, tg_uids in newly.items():
+        try:
+            await _enroll_automations("tag_added", tg_uids, {"tags": [tg]})
+        except Exception as e:
+            print("tag_added enroll error:", e)
     await supa.log_operation(admin["userId"], "users.bulk_tag", {"count": len(uids), "add": add, "remove": list(remove)}, {"changed": n})
     return {"ok": True, "target": len(uids), "changed": n}
 
@@ -2989,9 +3010,35 @@ async def cron_snapshot_stats(request: Request):
     return {"ok": True, "date": date, "followers": followers.get("followers")}
 
 
+async def _enroll_inactive_automations():
+    """automation trigger=inactive — หา user ที่ไม่ทักมานานตาม trigger_config.days แล้ว enroll
+    (dedup ด้วย unique constraint automation_runs) — เรียกจาก cron run-automations"""
+    autos = await supa.select("automations", params={
+        "select": "id,trigger_config", "enabled": "eq.true", "trigger": "eq.inactive"})
+    for a in autos:
+        cfg = a.get("trigger_config") or {}
+        try:
+            days = max(1, int(cfg.get("days", 14)))
+        except (TypeError, ValueError):
+            days = 14
+        cutoff = _iso_ago(days=days)
+        floor = _iso_ago(days=days + 30)  # ไม่ backfill คนที่หายไปนานมาก
+        rows = await supa.select("line_users", params={
+            "select": "line_user_id", "is_following": "eq.true",
+            "and": f"(last_message_at.lt.{cutoff},last_message_at.gt.{floor})",
+            "limit": "400"})
+        uids = [r["line_user_id"] for r in rows]
+        if uids:
+            await _enroll_automations("inactive", uids)
+
+
 @app.api_route("/api/cron/run-automations", methods=["GET", "POST"])
 async def cron_run_automations(request: Request):
     _check_cron_key(request)
+    try:
+        await _enroll_inactive_automations()
+    except Exception as e:
+        print("inactive enroll error:", e)
     due = await supa.select("automation_runs", params={
         "select": "*", "status": "eq.pending", "run_at": f"lte.{NOW()}",
         "order": "run_at.asc", "limit": "200"})
@@ -3501,14 +3548,24 @@ async def update_slip(sid: int, req: Request, admin=Depends(current_admin)):
         patch["reviewed_by"] = admin["userId"]
         patch["reviewed_at"] = NOW()
     await supa.update("slips", patch, {"id": f"eq.{sid}"})
+    row = None
+    if b.get("replyUser") or b.get("status") == "verified":
+        r = await supa.select("slips", params={
+            "id": f"eq.{sid}", "select": "line_user_id,expected_course", "limit": "1"})
+        row = r[0] if r else None
     # ตอบ user ถ้าขอ
-    if b.get("replyUser"):
-        rows = await supa.select("slips", params={"id": f"eq.{sid}", "select": "line_user_id", "limit": "1"})
-        if rows:
-            msg = ("✅ ตรวจสอบสลิปเรียบร้อยแล้ว ขอบคุณครับ 🙏"
-                   if b["status"] == "verified" else
-                   "สลิปที่ส่งมายังตรวจสอบไม่ผ่าน รบกวนส่งใหม่หรือติดต่อแอดมินครับ 🙏")
-            await line.push(rows[0]["line_user_id"], [{"type": "text", "text": b.get("replyText") or msg}])
+    if b.get("replyUser") and row:
+        msg = ("✅ ตรวจสอบสลิปเรียบร้อยแล้ว ขอบคุณครับ 🙏"
+               if b["status"] == "verified" else
+               "สลิปที่ส่งมายังตรวจสอบไม่ผ่าน รบกวนส่งใหม่หรือติดต่อแอดมินครับ 🙏")
+        await line.push(row["line_user_id"], [{"type": "text", "text": b.get("replyText") or msg}])
+    # เข้า automation trigger=slip_verified (แอดมินกดผ่านเอง)
+    if b.get("status") == "verified" and row:
+        try:
+            await _enroll_automations("slip_verified", [row["line_user_id"]],
+                                      {"course": row.get("expected_course")})
+        except Exception as e:
+            print("slip_verified enroll error:", e)
     return {"ok": True}
 
 
