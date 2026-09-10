@@ -728,6 +728,7 @@ async def _handle_slips(img_events: list):
             await line.push(uid, [{"type": "text", "text": f"✅ ตรวจสอบสลิปเรียบร้อยแล้ว\nยอด {amount} บาท · หลักสูตร {exp_course}\nขอบคุณครับ 🙏"}])
             try:
                 await _enroll_automations("slip_verified", [uid], {"course": exp_course})
+                await _mark_registration_paid(uid, exp_course)
             except Exception as ex:
                 print("slip_verified enroll error:", ex)
         elif status == "rejected":
@@ -739,6 +740,19 @@ async def _handle_slips(img_events: list):
         emoji = {"verified": "✅", "rejected": "⛔", "review": "⚠️"}.get(status, "🧾")
         detail = f"จาก: {name}\n" + (auto_note + "\n" if auto_note else "") + f"เปิดดู: {APP_URL}/slips"
         await alert_admin(f"{emoji} สลิป: {status}", detail, throttle_key=f"slip_{mid}")
+
+
+async def _mark_registration_paid(uid: str, course_hint: str | None = None):
+    """สลิป verified -> mark registration ของ user คนนั้นเป็นจ่ายแล้ว (match คอร์ส FC->FC70*)"""
+    if not uid:
+        return
+    try:
+        params = {"line_user_id": f"eq.{uid}", "paid": "eq.false"}
+        if course_hint:
+            params["course"] = f"like.{course_hint.upper()}*"
+        await supa.update("registrations", {"paid": True, "updated_at": NOW()}, params)
+    except Exception as e:
+        print("mark registration paid error:", e)
 
 
 async def _enroll_automations(trigger: str, uids: list[str], ctx: dict | None = None):
@@ -3564,6 +3578,7 @@ async def update_slip(sid: int, req: Request, admin=Depends(current_admin)):
         try:
             await _enroll_automations("slip_verified", [row["line_user_id"]],
                                       {"course": row.get("expected_course")})
+            await _mark_registration_paid(row["line_user_id"], row.get("expected_course"))
         except Exception as e:
             print("slip_verified enroll error:", e)
     return {"ok": True}
@@ -3589,6 +3604,236 @@ async def save_pay_account(req: Request, admin=Depends(current_admin)):
 async def del_pay_account(aid: int, admin=Depends(current_admin)):
     await supa.delete("payment_accounts", {"id": f"eq.{aid}"})
     return {"ok": True}
+
+
+# ============================================================
+# REGISTRATIONS (รายชื่อผู้ลงทะเบียนเรียน)
+# ============================================================
+def _norm_course(raw: str) -> str | None:
+    s = (raw or "").strip()
+    if not s:
+        return None
+    su = s.upper().replace(" ", "")
+    base = next((c for c in ("FC", "IC", "PC", "AC") if su.startswith(c)), None)
+    if not base:
+        return s[:24]
+    code = base + "70"
+    if any(x in s for x in ("รุ่น 2", "รุ่น2", "รุ่น๒", "รุ่นที่2", "รุ่นที่ 2")):
+        return code + "-2"
+    if any(x in s for x in ("รุ่น 1", "รุ่น1", "รุ่น๑", "รุ่นที่1", "รุ่นที่ 1")):
+        return code + "-1"
+    return code
+
+
+_REG_COLS = {
+    "timestamp": "form_ts", "regid": "reg_id", "uid": "line_user_id", "name": "name",
+    "tel": "tel", "สังกัด": "org", "หลักสูตร": "course_raw", "email": "email", "job": "job",
+    "file": "slip_url", "ผ่าน": "passed",
+}
+
+
+@app.post("/api/registrations/import")
+async def registrations_import(req: Request, admin=Depends(current_admin)):
+    """วางข้อความ TSV จากฟอร์มลงทะเบียน -> upsert registrations + tag line_users ตามคอร์ส"""
+    b = await req.json()
+    text = b.get("text") or ""
+    tag_users = b.get("tagUsers", True)
+    lines = [ln for ln in text.replace("\r\n", "\n").split("\n") if ln.strip()]
+    if len(lines) < 2:
+        raise HTTPException(400, "ไม่พบข้อมูล (วางทั้งหัวตารางและแถวข้อมูล)")
+
+    header = [h.strip().lower() for h in lines[0].split("\t")]
+    idx = {}
+    for i, h in enumerate(header):
+        for key, col in _REG_COLS.items():
+            if h == key or h == key.lower():
+                idx[col] = i
+    if "line_user_id" not in idx:
+        raise HTTPException(400, "ไม่พบคอลัมน์ UID ในหัวตาราง")
+    # หา col "จ่าย" แยก (ชื่อซ้ำกับ substring)
+    paid_i = next((i for i, h in enumerate(header) if h in ("จ่าย", "จ่ายแล้ว")), None)
+    status_i = next((i for i, h in enumerate(header) if h == "status"), None)
+
+    regs, seen = [], set()
+    for ln in lines[1:]:
+        f = ln.split("\t")
+        uid = (f[idx["line_user_id"]].strip() if idx["line_user_id"] < len(f) else "")
+        if not re.fullmatch(r"U[0-9a-f]{32}", uid):
+            continue
+        course_raw = (f[idx["course_raw"]].strip() if "course_raw" in idx and idx["course_raw"] < len(f) else "")
+        course = _norm_course(course_raw)
+        k = (uid, course)
+        if k in seen:
+            continue
+        seen.add(k)
+        row = {"line_user_id": uid, "course": course, "course_raw": course_raw, "source": "import",
+               "updated_at": NOW()}
+        for col, i in idx.items():
+            if col in ("line_user_id", "course_raw"):
+                continue
+            row[col] = (f[i].strip() if i < len(f) else "") or None
+        if paid_i is not None and paid_i < len(f):
+            row["paid"] = "จ่าย" in (f[paid_i] or "")
+        if status_i is not None and status_i < len(f):
+            st = (f[status_i] or "").strip()
+            row["approved"] = True if st in ("อนุมัติ", "ผ่าน") else (False if st == "ไม่อนุมัติ" else None)
+        regs.append(row)
+
+    if not regs:
+        raise HTTPException(400, "ไม่พบแถวที่มี UID ถูกต้อง (U + 32 hex)")
+
+    # upsert registrations
+    up_new = up_upd = 0
+    for i in range(0, len(regs), 300):
+        chunk = regs[i:i + 300]
+        r = await supa.upsert("registrations", chunk, on_conflict="line_user_id,course")
+        up_new += len(r or [])
+    up_upd = len(regs) - up_new  # ประมาณ
+
+    # tag line_users ตามคอร์ส + สถานะจ่าย
+    users_touched = 0
+    if tag_users:
+        by_uid: dict[str, dict] = {}
+        for rr in regs:
+            u = by_uid.setdefault(rr["line_user_id"], {"courses": set(), "paid": False})
+            if rr.get("course"):
+                u["courses"].add(rr["course"])
+            if rr.get("paid"):
+                u["paid"] = True
+        uids = list(by_uid.keys())
+        for i in range(0, len(uids), 300):
+            chunk = uids[i:i + 300]
+            existing = {x["line_user_id"]: x for x in await supa.select("line_users", params={
+                "select": "line_user_id,tags,is_following", "line_user_id": f"in.({','.join(chunk)})", "limit": "500"})}
+            patch = []
+            for uid in chunk:
+                info = by_uid[uid]
+                cur = set((existing.get(uid) or {}).get("tags") or [])
+                new = set(cur) | {"ลงทะเบียน"} | info["courses"]
+                if info["paid"]:
+                    new.add("จ่ายแล้ว")
+                row = {"line_user_id": uid, "tags": sorted(new), "updated_at": NOW()}
+                if uid not in existing:
+                    row["source"] = "registration"
+                    row["is_following"] = True
+                if new != cur or uid not in existing:
+                    patch.append(row)
+            if patch:
+                await supa.upsert("line_users", patch, on_conflict="line_user_id")
+                users_touched += len(patch)
+
+    from collections import Counter
+    by_course = dict(Counter(r.get("course") or "?" for r in regs))
+    await supa.log_operation(admin["userId"], "registrations.import",
+                             {"parsed": len(lines) - 1}, {"valid": len(regs), "users": users_touched})
+    return {"parsed": len(lines) - 1, "valid": len(regs), "by_course": by_course,
+            "paid": sum(1 for r in regs if r.get("paid")), "users_tagged": users_touched}
+
+
+@app.get("/api/registrations")
+async def registrations_list(admin=Depends(current_admin), course: str = "", paid: str = "",
+                             q: str = "", limit: int = 100, offset: int = 0):
+    params = {"select": "*", "order": "created_at.desc",
+              "limit": str(min(limit, 500)), "offset": str(max(offset, 0))}
+    if course:
+        params["course"] = f"eq.{course}"
+    if paid in ("true", "false"):
+        params["paid"] = f"eq.{paid}"
+    if q:
+        params["or"] = f"(name.ilike.*{q}*,tel.ilike.*{q}*,email.ilike.*{q}*,org.ilike.*{q}*,line_user_id.ilike.*{q}*)"
+    rows = await supa.select("registrations", params=params)
+    cnt_params = {k: v for k, v in params.items() if k in ("course", "paid", "or")}
+    total = await supa.count("registrations", cnt_params)
+    return {"registrations": rows, "total": total, "limit": limit, "offset": offset}
+
+
+@app.get("/api/registrations/summary")
+async def registrations_summary(admin=Depends(current_admin)):
+    rows = await supa.select_all("registrations", params={"select": "course,paid,approved,line_user_id"})
+    from collections import Counter
+    courses: dict[str, dict] = {}
+    for r in rows:
+        c = r.get("course") or "?"
+        d = courses.setdefault(c, {"course": c, "count": 0, "paid": 0, "unpaid": 0})
+        d["count"] += 1
+        if r.get("paid"):
+            d["paid"] += 1
+        else:
+            d["unpaid"] += 1
+    return {
+        "total": len(rows),
+        "paid": sum(1 for r in rows if r.get("paid")),
+        "people": len({r["line_user_id"] for r in rows if r.get("line_user_id")}),
+        "by_course": sorted(courses.values(), key=lambda x: -x["count"]),
+    }
+
+
+@app.get("/api/registrations/{rid}")
+async def registration_detail(rid: int, admin=Depends(current_admin)):
+    rows = await supa.select("registrations", params={"id": f"eq.{rid}", "select": "*", "limit": "1"})
+    if not rows:
+        raise HTTPException(404, "ไม่พบ")
+    reg = rows[0]
+    uid = reg.get("line_user_id")
+    user, slips_rows, other_regs = None, [], []
+    if uid:
+        u = await supa.select("line_users", params={
+            "select": "line_user_id,display_name,picture_url,is_following,tags,last_message_at",
+            "line_user_id": f"eq.{uid}", "limit": "1"})
+        user = u[0] if u else None
+        slips_rows = await supa.select("slips", params={
+            "select": "id,status,amount,expected_course,created_at,media_url", "line_user_id": f"eq.{uid}",
+            "order": "created_at.desc", "limit": "10"})
+        other_regs = await supa.select("registrations", params={
+            "select": "id,course,paid,created_at", "line_user_id": f"eq.{uid}",
+            "id": f"neq.{rid}", "limit": "10"})
+    return {"registration": reg, "user": user, "slips": slips_rows, "other_registrations": other_regs}
+
+
+@app.patch("/api/registrations/{rid}")
+async def registration_update(rid: int, req: Request, admin=Depends(current_admin)):
+    b = await req.json()
+    patch = {k: b[k] for k in ("paid", "approved", "note", "name", "tel", "org", "email", "course") if k in b}
+    patch["updated_at"] = NOW()
+    await supa.update("registrations", patch, {"id": f"eq.{rid}"})
+    # sync tag จ่ายแล้ว
+    if b.get("paid") is True:
+        r = await supa.select("registrations", params={"id": f"eq.{rid}", "select": "line_user_id", "limit": "1"})
+        if r and r[0].get("line_user_id"):
+            u = await supa.select("line_users", params={
+                "select": "tags", "line_user_id": f"eq.{r[0]['line_user_id']}", "limit": "1"})
+            cur = set((u[0].get("tags") if u else []) or [])
+            if "จ่ายแล้ว" not in cur:
+                await supa.update("line_users", {"tags": sorted(cur | {"จ่ายแล้ว"}), "updated_at": NOW()},
+                                  {"line_user_id": f"eq.{r[0]['line_user_id']}"})
+    return {"ok": True}
+
+
+@app.post("/api/registrations/message")
+async def registrations_message(req: Request, admin=Depends(current_admin)):
+    """ส่งข้อความหาผู้ลงทะเบียนตาม filter (course / paid)"""
+    b = await req.json()
+    params = {"select": "line_user_id"}
+    if b.get("course"):
+        params["course"] = f"eq.{b['course']}"
+    if b.get("paid") in ("true", "false", True, False):
+        params["paid"] = f"eq.{str(b['paid']).lower()}"
+    rows = await supa.select_all("registrations", params=params)
+    uids = list({r["line_user_id"] for r in rows if r.get("line_user_id")})
+    if not uids:
+        raise HTTPException(400, "ไม่มีปลายทาง")
+    msgs = _normalize_messages(b.get("messages", []))
+    sent = failed = 0
+    for i in range(0, len(uids), 500):
+        code, _txt, _rid = await line.multicast(uids[i:i + 500], msgs)
+        if code == 200:
+            sent += len(uids[i:i + 500])
+        else:
+            failed += len(uids[i:i + 500])
+    await supa.insert("broadcasts", {
+        "actor": admin["userId"], "kind": "multicast", "target_count": len(uids),
+        "messages": msgs, "status": "sent" if failed == 0 else "failed"})
+    return {"ok": failed == 0, "target": len(uids), "sent": sent, "failed": failed}
 
 
 @app.get("/api/settings")

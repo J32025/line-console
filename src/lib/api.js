@@ -91,6 +91,13 @@ export const api = {
   addAdmin: (payload) => req('POST', '/admins', payload),
   delAdmin: (uid) => req('DELETE', `/admins/${uid}`),
 
+  registrations: (qs = {}) => req('GET', '/registrations?' + new URLSearchParams(qs)),
+  registrationsSummary: () => req('GET', '/registrations/summary'),
+  registration: (id) => req('GET', `/registrations/${id}`),
+  updateRegistration: (id, patch) => req('PATCH', `/registrations/${id}`, patch),
+  importRegistrations: (payload) => req('POST', '/registrations/import', payload),
+  messageRegistrations: (payload) => req('POST', '/registrations/message', payload),
+
   slips: (status = '') => req('GET', '/slips' + (status ? `?status=${status}` : '')),
   updateSlip: (id, payload) => req('POST', `/slips/${id}`, payload),
   payAccounts: () => req('GET', '/payment-accounts'),

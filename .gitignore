@@ -10,3 +10,9 @@ __pycache__
 *.log
 
 .vercel
+
+# personal data files (never commit)
+ลงทะเบียนแล้ว.txt
+*_userids*.txt
+*.roster.txt
+_liff_keys/
