@@ -60,6 +60,11 @@ export default function Registrations() {
       <div className="row spread wrap" style={{ alignItems: 'center' }}>
         <h1 style={{ margin: 0 }}>ผู้ลงทะเบียนเรียน</h1>
         <div className="row">
+          <button className="sm" disabled={busy === 'retag'} onClick={async () => {
+            setBusy('retag')
+            try { const r = await api.retagRegistrations(); t.ok(`tag แล้ว ${r.users_tagged} คน`); loadSum() }
+            catch (e) { t.err(e.message) } finally { setBusy('') }
+          }}>{busy === 'retag' && <InlineSpinner />}ซิงค์ tag</button>
           <button className="sm primary" onClick={() => setImp({ text: '' })}>+ นำเข้ารายชื่อ</button>
         </div>
       </div>

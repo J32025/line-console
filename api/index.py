@@ -2965,6 +2965,61 @@ async def _make_backup():
     return {"day": day, "size_kb": size_kb, "rows": {k: (len(v) if isinstance(v, list) else 0) for k, v in dump.items()}}
 
 
+async def _retag_from_registrations() -> dict:
+    """อ่าน registrations ทั้งหมด -> tag line_users (คอร์ส + ลงทะเบียน + จ่ายแล้ว)"""
+    regs = await supa.select_all("registrations", params={"select": "line_user_id,course,paid"})
+    by_uid: dict[str, dict] = {}
+    for r in regs:
+        if not r.get("line_user_id"):
+            continue
+        u = by_uid.setdefault(r["line_user_id"], {"courses": set(), "paid": False})
+        if r.get("course"):
+            u["courses"].add(r["course"])
+        if r.get("paid"):
+            u["paid"] = True
+    uids = list(by_uid)
+    touched = 0
+    for i in range(0, len(uids), 80):
+        chunk = uids[i:i + 80]
+        try:
+            existing = {x["line_user_id"]: x for x in await supa.select("line_users", params={
+                "select": "line_user_id,tags", "line_user_id": f"in.({','.join(chunk)})", "limit": "200"})}
+            patch = []
+            for uid in chunk:
+                info = by_uid[uid]
+                cur = set((existing.get(uid) or {}).get("tags") or [])
+                new = set(cur) | {"ลงทะเบียน"} | info["courses"]
+                if info["paid"]:
+                    new.add("จ่ายแล้ว")
+                row = {"line_user_id": uid, "tags": sorted(new), "updated_at": NOW()}
+                if uid not in existing:
+                    row["source"] = "registration"
+                    row["is_following"] = True
+                if new != cur or uid not in existing:
+                    patch.append(row)
+            if patch:
+                await supa.upsert("line_users", patch, on_conflict="line_user_id")
+                touched += len(patch)
+        except Exception as e:
+            print("retag chunk error:", e)
+    return {"registrations": len(regs), "people": len(uids), "users_tagged": touched}
+
+
+@app.api_route("/api/cron/registrations-retag", methods=["GET", "POST"])
+async def cron_registrations_retag(request: Request):
+    _check_cron_key(request)
+    res = await _retag_from_registrations()
+    await supa.log_operation("cron", "registrations.retag", None, res)
+    return {"ok": True, **res}
+
+
+@app.post("/api/registrations/retag")
+async def registrations_retag(admin=Depends(current_admin)):
+    res = await _retag_from_registrations()
+    await supa.log_operation(admin["userId"], "registrations.retag", None, res)
+    return {"ok": True, **res}
+
+
 @app.api_route("/api/cron/backup", methods=["GET", "POST"])
 async def cron_backup(request: Request):
     _check_cron_key(request)
