@@ -184,7 +184,7 @@ async def health(deep: int = 0, test_gemini: int = 0, test_uid: str = ""):
     # เช็คว่า migration 0002/0003/0004 รันครบใน DB ไหม
     checks["schema"] = {}
     for tb in ("slips", "payment_accounts", "postback_actions", "app_settings",
-               "richmenu_history", "registrations"):
+               "richmenu_history", "registrations", "webhook_jobs"):
         try:
             n = await supa.count(tb)
             checks["schema"][tb] = f"ok ({n} rows)"
@@ -475,15 +475,66 @@ async def webhook(request: Request):
         except Exception as e:
             print("automation enroll error:", e)
 
-    # ---- สลิปโอนเงิน: เก็บรูป + ตรวจ + แจ้งแอดมิน ----
+    # ---- สลิปโอนเงิน: เข้าคิว webhook_jobs แล้วประมวลผลนอก request (webhook ตอบเร็ว ไม่ timeout) ----
     img_events = [e for e in events if e.get("type") == "message"
                   and e.get("message", {}).get("type") in ("image", "file")]
     if img_events:
+        queued = False
         try:
-            await asyncio.wait_for(_handle_slips(img_events), timeout=25)
-        except BaseException as e:
-            print("slip handler error:", repr(e))
+            await supa.insert("webhook_jobs", {"kind": "slips", "payload": {"events": img_events}})
+            queued = True
+        except Exception as e:
+            print("webhook_jobs insert failed, processing inline:", e)
+        if queued:
+            await _fire_and_forget("/api/internal/run-jobs")  # กระตุ้นให้รันทันที (cron เป็น backup)
+        else:
+            try:
+                await asyncio.wait_for(_handle_slips(img_events), timeout=25)
+            except BaseException as e:
+                print("slip handler error:", repr(e))
     return {"ok": True}
+
+
+async def _fire_and_forget(path: str):
+    """ยิง request ไปที่ตัวเอง โดยไม่รอผล — ให้ invocation ใหม่ทำงานหนักแทน (budget 60s ของตัวเอง)"""
+    url = f"{APP_URL}{path}" + ("?" if "?" not in path else "&") + f"key={CRON_SECRET}"
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(2.0, connect=2.0)) as c:
+            await c.post(url)
+    except Exception:
+        pass  # ไม่รอผล — ถ้าไม่ถึงก็มี cron 5 นาที drain ให้
+
+
+async def _run_webhook_jobs(limit: int = 15) -> dict:
+    try:
+        jobs = await supa.select("webhook_jobs", params={
+            "select": "*", "status": "eq.pending", "order": "created_at.asc", "limit": str(limit)})
+    except Exception as e:
+        return {"error": str(e)[:120], "ran": 0}
+    done = failed = 0
+    for j in jobs:
+        await supa.update("webhook_jobs", {"attempts": (j.get("attempts") or 0) + 1},
+                          {"id": f"eq.{j['id']}"})
+        try:
+            if j["kind"] == "slips":
+                evs = (j.get("payload") or {}).get("events") or []
+                await asyncio.wait_for(_handle_slips(evs), timeout=45)
+            await supa.update("webhook_jobs", {"status": "done", "processed_at": NOW()},
+                              {"id": f"eq.{j['id']}"})
+            done += 1
+        except Exception as e:
+            st = "failed" if (j.get("attempts") or 0) + 1 >= 3 else "pending"
+            await supa.update("webhook_jobs", {"status": st, "error": str(e)[:200]},
+                              {"id": f"eq.{j['id']}"})
+            failed += 1
+    return {"ran": len(jobs), "done": done, "failed": failed}
+
+
+@app.api_route("/api/internal/run-jobs", methods=["GET", "POST"])
+@app.api_route("/api/cron/run-jobs", methods=["GET", "POST"])
+async def run_jobs_endpoint(request: Request):
+    _check_cron_key(request)
+    return {"ok": True, **await _run_webhook_jobs()}
 
 
 async def _get_setting(key: str, default=None):
@@ -3105,6 +3156,10 @@ async def _enroll_inactive_automations():
 @app.api_route("/api/cron/run-automations", methods=["GET", "POST"])
 async def cron_run_automations(request: Request):
     _check_cron_key(request)
+    try:
+        await _run_webhook_jobs(limit=10)  # backup drain (เผื่อ fire-and-forget ไม่ถึง)
+    except Exception as e:
+        print("webhook jobs drain error:", e)
     try:
         await _enroll_inactive_automations()
     except Exception as e:
