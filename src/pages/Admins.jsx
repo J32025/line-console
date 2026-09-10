@@ -112,7 +112,7 @@ export default function Admins({ me }) {
             {busy === 'backup' && <InlineSpinner />}สำรองเดี๋ยวนี้
           </button>
         </div>
-        <p className="muted xs">สำรองอัตโนมัติทุกวัน + Supabase มี backup รายวันของตัวเองด้วย (7 วัน) · เก็บในระบบ 21 วันล่าสุด</p>
+        <p className="muted xs">สำรองอัตโนมัติทุกวัน (21 ตาราง) → เก็บใน DB + **สำเนาใน Supabase Storage** (แยกกัน DB ล่มก็ยังมี) · เก็บ 30 วันล่าสุด</p>
         <table>
           <thead><tr><th>วันที่</th><th>ขนาด</th><th>เมื่อ</th><th></th></tr></thead>
           <tbody>
@@ -121,9 +121,12 @@ export default function Admins({ me }) {
                 <td>{b.day}</td>
                 <td>{b.size_kb} KB</td>
                 <td className="muted xs">{new Date(b.created_at).toLocaleString('th-TH')}</td>
-                <td><button className="xs" onClick={() => downloadBackup(b)} disabled={busy === 'dl' + b.id}>
-                  {busy === 'dl' + b.id && <InlineSpinner />}ดาวน์โหลด JSON
-                </button></td>
+                <td className="row">
+                  <button className="xs" onClick={() => downloadBackup(b)} disabled={busy === 'dl' + b.id}>
+                    {busy === 'dl' + b.id && <InlineSpinner />}JSON
+                  </button>
+                  {b.storage_url && <a className="xs" href={b.storage_url} target="_blank" rel="noreferrer">Storage ↗</a>}
+                </td>
               </tr>
             ))}
             {!backups.length && <tr><td colSpan={4} className="muted center">ยังไม่มี — กด "สำรองเดี๋ยวนี้"</td></tr>}

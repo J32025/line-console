@@ -5,6 +5,7 @@ import { api } from './lib/api.js'
 import { ToastProvider } from './lib/ui.jsx'
 import { ProgressProvider, TopLoader } from './lib/progress.jsx'
 import Dashboard from './pages/Dashboard.jsx'
+import Search from './pages/Search.jsx'
 import RichMenus from './pages/RichMenus.jsx'
 import RichMenuHistory from './pages/RichMenuHistory.jsx'
 import Messaging from './pages/Messaging.jsx'
@@ -27,6 +28,7 @@ import Admins from './pages/Admins.jsx'
 
 const NAV = [
   ['/', 'แดชบอร์ด', '🏠'],
+  ['/search', 'ค้นหา', '🔍'],
   ['/inbox', 'กล่องข้อความ', '💬'],
   ['/slips', 'สลิปโอนเงิน', '🧾'],
   ['/registrations', 'ผู้ลงทะเบียน', '📝'],
@@ -122,6 +124,7 @@ export default function App() {
           <main>
             <Routes>
               <Route path="/" element={<Dashboard />} />
+              <Route path="/search" element={<Search />} />
               <Route path="/richmenus" element={<RichMenus />} />
               <Route path="/richmenus/history" element={<RichMenuHistory />} />
               <Route path="/messaging" element={<Messaging />} />

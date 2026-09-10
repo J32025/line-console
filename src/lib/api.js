@@ -33,6 +33,7 @@ export const api = {
   del: (p) => req('DELETE', p),
 
   me: () => req('GET', '/me'),
+  search: (q) => req('GET', '/search?q=' + encodeURIComponent(q)),
   dashboard: (range = 30) => req('GET', `/dashboard?range=${range}`),
   dashboardAnalytics: (range = 30) => req('GET', `/dashboard/analytics?range=${range}`),
 

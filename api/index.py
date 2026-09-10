@@ -297,6 +297,27 @@ async def me(admin=Depends(current_admin)):
     return admin
 
 
+@app.get("/api/search")
+async def global_search(admin=Depends(current_admin), q: str = ""):
+    q = (q or "").strip()
+    if len(q) < 2:
+        return {"users": [], "registrations": [], "tasks": []}
+    like = f"*{q}*"
+    users = await supa.select("line_users", params={
+        "select": "line_user_id,display_name,picture_url,tags,stage,is_following",
+        "or": f"(display_name.ilike.{like},line_user_id.ilike.{like},note.ilike.{like})", "limit": "20"})
+    regs = await supa.select("registrations", params={
+        "select": "id,line_user_id,name,tel,email,org,course_raw,paid",
+        "or": f"(name.ilike.{like},tel.ilike.{like},email.ilike.{like},org.ilike.{like})", "limit": "20"})
+    tasks = []
+    try:
+        tasks = await supa.select("tasks", params={
+            "select": "id,title,status,line_user_id,due_at", "title": f"ilike.{like}", "limit": "20"})
+    except Exception:
+        pass
+    return {"users": users, "registrations": regs, "tasks": tasks}
+
+
 # ============================================================
 # webhook — รับ event จาก LINE (ไม่ต้อง auth, verify signature)
 # ============================================================
@@ -843,8 +864,11 @@ async def _handle_slips(img_events: list):
             try:
                 await _enroll_automations("slip_verified", [uid], {"course": exp_course})
                 await _mark_registration_paid(uid, exp_course)
+                await _send_receipt(uid, {"id": slip_id, "amount": amount, "course": exp_course,
+                                          "bank": (ocr or {}).get("receiver_bank"), "ref": ref,
+                                          "date": (ocr or {}).get("date")})
             except Exception as ex:
-                print("slip_verified enroll error:", ex)
+                print("slip_verified post error:", ex)
         elif status == "rejected":
             await line.push(uid, [{"type": "text", "text": "สลิปนี้เคยส่งเข้ามาแล้วครับ หากต้องการสอบถามเพิ่มเติมพิมพ์ 'ติดต่อแอดมิน'"}])
 
@@ -854,6 +878,41 @@ async def _handle_slips(img_events: list):
         emoji = {"verified": "✅", "rejected": "⛔", "review": "⚠️"}.get(status, "🧾")
         detail = f"จาก: {name}\n" + (auto_note + "\n" if auto_note else "") + f"เปิดดู: {APP_URL}/slips"
         await alert_admin(f"{emoji} สลิป: {status}", detail, throttle_key=f"slip_{mid}")
+
+
+async def _send_receipt(uid: str, s: dict):
+    """ส่งใบเสร็จให้ลูกค้าหลังสลิป verified (ปิดได้ด้วย setting send_receipt=false)"""
+    try:
+        if await _get_setting("send_receipt", True) is False:
+            return
+    except Exception:
+        pass
+    acc = None
+    try:
+        c = str(s.get("course") or "")[:2].upper()
+        accts = await supa.select("payment_accounts", params={"select": "*", "active": "eq.true"})
+        acc = next((a for a in accts if str(a.get("course") or "").upper().startswith(c)), None)
+    except Exception:
+        pass
+    org = ""
+    try:
+        org = str(await _get_setting("receipt_org", "") or "")
+    except Exception:
+        pass
+    lines = ["📄 ใบเสร็จรับเงิน" + (f" — {org}" if org else ""),
+             f"เลขที่: R{s.get('id') or '-'}",
+             f"วันที่: {str(s.get('date') or dt.date.today().isoformat())[:10]}",
+             f"หลักสูตร: {s.get('course') or '-'}",
+             f"จำนวนเงิน: {s.get('amount') or '-'} บาท"]
+    if acc:
+        lines.append(f"ชำระเข้า: {acc.get('bank')} {acc.get('account_no')} ({acc.get('account_name')})")
+    if s.get("ref"):
+        lines.append(f"อ้างอิง: {s['ref']}")
+    lines.append("\nขอบคุณที่ชำระเงินครับ 🙏 เก็บข้อความนี้ไว้เป็นหลักฐาน")
+    try:
+        await line.push(uid, [{"type": "text", "text": "\n".join(lines)}])
+    except Exception as e:
+        print("receipt push error:", e)
 
 
 async def _mark_registration_paid(uid: str, course_hint: str | None = None):
@@ -3503,8 +3562,11 @@ def _check_cron_key(request: Request):
             raise HTTPException(403, "bad cron key")
 
 
-BACKUP_TABLES = ("admins", "line_users", "auto_replies", "segments",
-                 "message_templates", "rich_menus", "scheduled_jobs")
+BACKUP_TABLES = ("admins", "line_users", "auto_replies", "segments", "message_templates",
+                 "rich_menus", "scheduled_jobs", "registrations", "slips", "payment_accounts",
+                 "postback_actions", "automations", "app_settings", "liff_apps",
+                 "tasks", "classes", "attendance", "contact_notes", "kb_articles",
+                 "richmenu_history", "follow_history")
 
 
 async def _make_backup():
@@ -3515,14 +3577,25 @@ async def _make_backup():
             dump[tb] = await supa.select_all(tb, params={"select": "*"})
         except Exception as e:
             dump[tb] = {"error": str(e)}
-    size_kb = len(json.dumps(dump)) // 1024
+    blob = json.dumps(dump, ensure_ascii=False).encode()
+    size_kb = len(blob) // 1024
+    # เก็บสำเนาไว้ที่ Storage ด้วย (แยกจาก DB — DB ล่มก็ยังมี)
+    ext_url = None
+    try:
+        ext_url = await supa.storage_upload("media", f"backups/{day}.json", blob, "application/json")
+    except Exception as e:
+        print("backup storage upload error:", e)
     await supa.upsert("backups", {"day": day, "tables": dump, "size_kb": size_kb},
                       on_conflict="day")
-    # เก็บ 21 วันล่าสุด
-    old = await supa.select("backups", params={"select": "id", "order": "day.desc", "limit": "50"})
-    for r in old[21:]:
+    old = await supa.select("backups", params={"select": "id,day", "order": "day.desc", "limit": "60"})
+    for r in old[30:]:
         await supa.delete("backups", {"id": f"eq.{r['id']}"})
-    return {"day": day, "size_kb": size_kb, "rows": {k: (len(v) if isinstance(v, list) else 0) for k, v in dump.items()}}
+        try:
+            await supa.storage_delete("media", f"backups/{r['day']}.json")
+        except Exception:
+            pass
+    return {"day": day, "size_kb": size_kb, "storage_url": ext_url,
+            "rows": {k: (len(v) if isinstance(v, list) else 0) for k, v in dump.items()}}
 
 
 async def _retag_from_registrations() -> dict:
@@ -3601,8 +3674,12 @@ async def backup_now(admin=Depends(current_admin)):
 
 @app.get("/api/backup/list")
 async def backup_list(admin=Depends(current_admin)):
-    return {"backups": await supa.select("backups", params={
-        "select": "id,day,size_kb,created_at", "order": "day.desc", "limit": "30"})}
+    rows = await supa.select("backups", params={
+        "select": "id,day,size_kb,created_at", "order": "day.desc", "limit": "30"})
+    base = f"{SUPABASE_URL}/storage/v1/object/public/media/backups/"
+    for r in rows:
+        r["storage_url"] = base + f"{r['day']}.json"
+    return {"backups": rows}
 
 
 @app.get("/api/backup/{bid}")
@@ -3638,6 +3715,95 @@ async def cron_snapshot_stats(request: Request):
     }, on_conflict="day")
     await supa.log_operation("cron", "stats.snapshot", {"date": date}, followers)
     return {"ok": True, "date": date, "followers": followers.get("followers")}
+
+
+async def _cron_last_run(action_like: str) -> str | None:
+    rows = await supa.select("operations", params={
+        "select": "created_at", "action": f"like.{action_like}",
+        "order": "created_at.desc", "limit": "1"})
+    return rows[0]["created_at"] if rows else None
+
+
+@app.api_route("/api/cron/heartbeat", methods=["GET", "POST"])
+async def cron_heartbeat(request: Request):
+    """เช็คว่า cron จำเป็นยังทำงานอยู่ไหม — แจ้งแอดมินถ้าเงียบเกินกำหนด"""
+    _check_cron_key(request)
+    checks = {
+        "richmenu.sync": 2 * 3600,
+        "automation.run": 2 * 3600,
+        "stats.snapshot": 30 * 3600,
+        "backup": 30 * 3600,
+    }
+    stale = []
+    for act, limit in checks.items():
+        last = await _cron_last_run(f"*{act}*")
+        if not last:
+            stale.append(f"{act}: ไม่เคยรัน")
+            continue
+        age = (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(last)).total_seconds()
+        if age > limit:
+            stale.append(f"{act}: {int(age // 3600)} ชม.ที่แล้ว")
+    if stale:
+        await alert_admin("⚠️ Cron ไม่ทำงาน", "\n".join(stale), throttle_key="cron_stale")
+    await supa.log_operation("cron", "heartbeat", None, {"stale": stale})
+    return {"ok": not stale, "stale": stale}
+
+
+@app.api_route("/api/cron/daily-digest", methods=["GET", "POST"])
+async def cron_daily_digest(request: Request):
+    """สรุปประจำวันส่งเข้า LINE แอดมิน"""
+    _check_cron_key(request)
+    y0 = (dt.date.today() - dt.timedelta(days=1)).isoformat()
+    t0 = dt.date.today().isoformat()
+
+    async def _cnt(tb, extra=None):
+        p = {"and": f"(created_at.gte.{y0},created_at.lt.{t0})"}
+        if extra:
+            p.update(extra)
+        try:
+            return await supa.count(tb, p)
+        except Exception:
+            return 0
+
+    new_follow = await _cnt("follow_history", {"action": "eq.follow"})
+    unfollow = await _cnt("follow_history", {"action": "eq.unfollow"})
+    new_reg = await _cnt("registrations")
+    msg_in = await _cnt("messages", {"direction": "eq.in"})
+    slip_new = await supa.count("slips", {"status": "eq.new"})
+    slip_review = await supa.count("slips", {"status": "eq.review"})
+    tasks_overdue = 0
+    try:
+        tasks_overdue = await supa.count("tasks", {"status": "eq.open", "due_at": f"lt.{NOW()}"})
+    except Exception:
+        pass
+    # รายได้เมื่อวาน
+    rev = 0.0
+    try:
+        for s in await supa.select("slips", params={
+                "select": "amount,reviewed_at,created_at", "status": "eq.verified",
+                "and": f"(reviewed_at.gte.{y0},reviewed_at.lt.{t0})", "limit": "500"}):
+            rev += float(s.get("amount") or 0)
+    except Exception:
+        pass
+
+    lines = [f"📊 สรุปวันที่ {y0}",
+             f"👥 เพิ่มเพื่อน {new_follow} · เลิกติดตาม {unfollow}",
+             f"📝 สมัครใหม่ {new_reg}",
+             f"💬 ข้อความเข้า {msg_in}",
+             f"🧾 สลิปรอตรวจ {slip_new + slip_review} · ยืนยันแล้ว ฿{round(rev):,}"]
+    if tasks_overdue:
+        lines.append(f"⏰ งานเกินกำหนด {tasks_overdue}")
+    lines.append(f"\nเปิดดู: {APP_URL}")
+    text = "\n".join(lines)
+    sent = 0
+    for uid in ALERT_USER_IDS:
+        try:
+            code, *_ = await line.push(uid, [{"type": "text", "text": text}])
+            sent += (code == 200)
+        except Exception:
+            pass
+    await supa.log_operation("cron", "daily.digest", None, {"sent": sent})
+    return {"ok": True, "sent": sent, "preview": text}
 
 
 async def _enroll_inactive_automations():
@@ -4190,7 +4356,7 @@ async def update_slip(sid: int, req: Request, admin=Depends(current_admin)):
     row = None
     if b.get("replyUser") or b.get("status") == "verified":
         r = await supa.select("slips", params={
-            "id": f"eq.{sid}", "select": "line_user_id,expected_course", "limit": "1"})
+            "id": f"eq.{sid}", "select": "line_user_id,expected_course,amount,bank,ref,slip_date", "limit": "1"})
         row = r[0] if r else None
     # ตอบ user ถ้าขอ
     if b.get("replyUser") and row:
@@ -4204,6 +4370,10 @@ async def update_slip(sid: int, req: Request, admin=Depends(current_admin)):
             await _enroll_automations("slip_verified", [row["line_user_id"]],
                                       {"course": row.get("expected_course")})
             await _mark_registration_paid(row["line_user_id"], row.get("expected_course"))
+            await _send_receipt(row["line_user_id"], {
+                "id": sid, "amount": b.get("amount") or row.get("amount"),
+                "course": row.get("expected_course"), "bank": row.get("bank"),
+                "ref": row.get("ref"), "date": row.get("slip_date")})
         except Exception as e:
             print("slip_verified enroll error:", e)
     return {"ok": True}
