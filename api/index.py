@@ -277,8 +277,16 @@ async def health(deep: int = 0, test_gemini: int = 0, test_uid: str = "", test_a
             checks["gemini"]["ask_q"] = test_ask
             checks["gemini"]["ask_kb_hit"] = bool(kb)
             checks["gemini"]["ask_answer"] = ans
+            if ans is None:
+                # debug: ยิงตรงดูว่า model คืนอะไร
+                async with httpx.AsyncClient(timeout=25) as c:
+                    dr = await c.post(
+                        f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}",
+                        json={"contents": [{"role": "user", "parts": [{"text": test_ask}]}],
+                              "generationConfig": {"maxOutputTokens": 8192}})
+                checks["gemini"]["ask_debug"] = dr.text[:800]
         except Exception as e:
-            checks["gemini"]["ask_error"] = str(e)
+            checks["gemini"]["ask_error"] = repr(e)
 
     out["checks"] = checks
     return out
@@ -1194,36 +1202,56 @@ async def _gemini_answer(question: str, temperature: float = 0.7, context: str =
     body = {
         "contents": contents,
         "systemInstruction": {"parts": [{"text": sys_text}]},
-        "generationConfig": {"maxOutputTokens": 2048,
-                             "temperature": max(0.0, min(2.0, temperature if temperature is not None else 0.7))},
+        "generationConfig": {
+            "maxOutputTokens": 8192,   # thinking model — เผื่อ thinking + คำตอบ
+            "temperature": max(0.0, min(2.0, temperature if temperature is not None else 0.7)),
+        },
     }
     if uid:
         body["tools"] = _GEMINI_TOOLS
 
+    def _text_of(cand):
+        parts = (cand.get("content") or {}).get("parts") or []
+        return "".join(p.get("text", "") for p in parts if isinstance(p, dict)).strip()
+
     try:
-        async with httpx.AsyncClient(timeout=22) as c:
-            for _round in range(3):
+        async with httpx.AsyncClient(timeout=25) as c:
+            last_text = ""
+            for _round in range(5):
                 r = await c.post(url, json=body)
                 j = r.json()
                 if r.status_code != 200:
-                    print("gemini http error:", r.status_code, str(j)[:300])
+                    print("gemini http error:", r.status_code, str(j)[:400])
                     return None
                 cand = (j.get("candidates") or [{}])[0]
                 parts = (cand.get("content") or {}).get("parts") or []
+                txt = _text_of(cand)
+                if txt:
+                    last_text = txt
                 calls = [p["functionCall"] for p in parts if isinstance(p, dict) and p.get("functionCall")]
                 if not calls:
-                    text = "".join(p.get("text", "") for p in parts if isinstance(p, dict)).strip()
-                    return text or None
-                # รัน tool แล้วส่งผลกลับ
+                    if txt:
+                        return txt
+                    # จบแต่ไม่มีข้อความ (thinking กินหมด / MAX_TOKENS) -> ลองอีกรอบไม่ใช้ tool
+                    break
                 body["contents"].append({"role": "model", "parts": parts})
                 fresp = []
                 for fc in calls:
                     res = await _gemini_tool_exec(fc.get("name", ""), fc.get("args") or {}, uid or "")
                     fresp.append({"functionResponse": {"name": fc.get("name", ""), "response": {"result": res}}})
                 body["contents"].append({"role": "user", "parts": fresp})
+
+            if last_text:
+                return last_text
+            # รอบสุดท้าย: บังคับให้ตอบเป็นข้อความ ไม่มี tool
+            body.pop("tools", None)
+            body["contents"].append({"role": "user", "parts": [{"text": "สรุปคำตอบเป็นข้อความสั้น ๆ ให้ลูกค้าเลย"}]})
+            r = await c.post(url, json=body)
+            if r.status_code == 200:
+                return _text_of((r.json().get("candidates") or [{}])[0]) or None
         return None
     except Exception as e:
-        print("gemini error:", e)
+        print("gemini error:", repr(e))
         return None
 
 
