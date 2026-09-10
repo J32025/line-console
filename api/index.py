@@ -3682,17 +3682,15 @@ async def registrations_import(req: Request, admin=Depends(current_admin)):
 
     if not regs:
         raise HTTPException(400, "ไม่พบแถวที่มี UID ถูกต้อง (U + 32 hex)")
+    if len(regs) > 2000:
+        raise HTTPException(400, "เกิน 2000 แถว/ครั้ง — แบ่งไฟล์เป็นหลายส่วน")
 
-    # upsert registrations
-    up_new = up_upd = 0
-    for i in range(0, len(regs), 300):
-        chunk = regs[i:i + 300]
-        r = await supa.upsert("registrations", chunk, on_conflict="line_user_id,course")
-        up_new += len(r or [])
-    up_upd = len(regs) - up_new  # ประมาณ
+    # 1) upsert registrations (สำคัญสุด)
+    for i in range(0, len(regs), 200):
+        await supa.upsert("registrations", regs[i:i + 200], on_conflict="line_user_id,course")
 
-    # tag line_users ตามคอร์ส + สถานะจ่าย
-    users_touched = 0
+    # 2) tag line_users — best effort, chunk เล็ก (URL in.() ยาวไป PostgREST ปฏิเสธ)
+    users_touched, tag_err = 0, None
     if tag_users:
         by_uid: dict[str, dict] = {}
         for rr in regs:
@@ -3702,33 +3700,40 @@ async def registrations_import(req: Request, admin=Depends(current_admin)):
             if rr.get("paid"):
                 u["paid"] = True
         uids = list(by_uid.keys())
-        for i in range(0, len(uids), 300):
-            chunk = uids[i:i + 300]
-            existing = {x["line_user_id"]: x for x in await supa.select("line_users", params={
-                "select": "line_user_id,tags,is_following", "line_user_id": f"in.({','.join(chunk)})", "limit": "500"})}
-            patch = []
-            for uid in chunk:
-                info = by_uid[uid]
-                cur = set((existing.get(uid) or {}).get("tags") or [])
-                new = set(cur) | {"ลงทะเบียน"} | info["courses"]
-                if info["paid"]:
-                    new.add("จ่ายแล้ว")
-                row = {"line_user_id": uid, "tags": sorted(new), "updated_at": NOW()}
-                if uid not in existing:
-                    row["source"] = "registration"
-                    row["is_following"] = True
-                if new != cur or uid not in existing:
-                    patch.append(row)
-            if patch:
-                await supa.upsert("line_users", patch, on_conflict="line_user_id")
-                users_touched += len(patch)
+        for i in range(0, len(uids), 80):
+            chunk = uids[i:i + 80]
+            try:
+                existing = {x["line_user_id"]: x for x in await supa.select("line_users", params={
+                    "select": "line_user_id,tags", "line_user_id": f"in.({','.join(chunk)})", "limit": "200"})}
+                patch = []
+                for uid in chunk:
+                    info = by_uid[uid]
+                    cur = set((existing.get(uid) or {}).get("tags") or [])
+                    new = set(cur) | {"ลงทะเบียน"} | info["courses"]
+                    if info["paid"]:
+                        new.add("จ่ายแล้ว")
+                    row = {"line_user_id": uid, "tags": sorted(new), "updated_at": NOW()}
+                    if uid not in existing:
+                        row["source"] = "registration"
+                        row["is_following"] = True
+                    if new != cur or uid not in existing:
+                        patch.append(row)
+                if patch:
+                    await supa.upsert("line_users", patch, on_conflict="line_user_id")
+                    users_touched += len(patch)
+            except Exception as e:
+                tag_err = str(e)[:120]
 
     from collections import Counter
     by_course = dict(Counter(r.get("course") or "?" for r in regs))
-    await supa.log_operation(admin["userId"], "registrations.import",
-                             {"parsed": len(lines) - 1}, {"valid": len(regs), "users": users_touched})
+    try:
+        await supa.log_operation(admin["userId"], "registrations.import",
+                                 {"parsed": len(lines) - 1}, {"valid": len(regs), "users": users_touched})
+    except Exception:
+        pass
     return {"parsed": len(lines) - 1, "valid": len(regs), "by_course": by_course,
-            "paid": sum(1 for r in regs if r.get("paid")), "users_tagged": users_touched}
+            "paid": sum(1 for r in regs if r.get("paid")), "users_tagged": users_touched,
+            "tag_error": tag_err}
 
 
 @app.get("/api/registrations")
