@@ -149,7 +149,7 @@ async def link_delete(code: str, admin=Depends(current_admin)):
 
 
 @app.get("/api/health")
-async def health(deep: int = 0, test_gemini: int = 0, test_uid: str = ""):
+async def health(deep: int = 0, test_gemini: int = 0, test_uid: str = "", test_ask: str = ""):
     out = {"ok": True, "time": NOW(),
            "commit": (os.environ.get("VERCEL_GIT_COMMIT_SHA") or "?")[:7],
            "deployed_at": os.environ.get("VERCEL_DEPLOYMENT_ID", "?")}
@@ -266,6 +266,16 @@ async def health(deep: int = 0, test_gemini: int = 0, test_uid: str = ""):
             checks["gemini"]["live_test_body"] = gr.text[:1000]
         except Exception as e:
             checks["gemini"]["live_test_error"] = str(e)
+
+    if test_ask:
+        try:
+            ctx = await _gemini_context()
+            ans = await _gemini_answer(test_ask, context=ctx, uid=(test_uid or None),
+                                       user_facts="(ทดสอบระบบ)")
+            checks["gemini"]["ask_q"] = test_ask
+            checks["gemini"]["ask_answer"] = ans
+        except Exception as e:
+            checks["gemini"]["ask_error"] = str(e)
 
     out["checks"] = checks
     return out
@@ -465,7 +475,7 @@ async def webhook(request: Request):
                          and e.get("source", {}).get("userId") in gemini_uids
                          and e.get("source", {}).get("userId") not in replied_uids]
             if g_targets:
-                await asyncio.wait_for(_handle_gemini_replies(g_targets), timeout=15)
+                await asyncio.wait_for(_handle_gemini_replies(g_targets), timeout=28)
         except BaseException as e:  # noqa: BLE001
             print("gemini reply error:", repr(e))
 
@@ -969,38 +979,120 @@ async def _gemini_context() -> str:
     return text
 
 
-async def _gemini_answer(question: str, temperature: float = 0.7, context: str = "") -> str | None:
-    """เรียก Gemini API ตอบคำถามอิสระ — คืน None ถ้า error/ไม่ได้ตั้ง key (เงียบไว้ ไม่ตอบอะไร)"""
+_GEMINI_TOOLS = [{"functionDeclarations": [
+    {
+        "name": "get_my_account",
+        "description": "ดูข้อมูลการลงทะเบียนเรียนและการชำระเงินของผู้ใช้ที่กำลังคุยอยู่ "
+                       "(หลักสูตรที่ลงทะเบียน, จ่ายแล้ว/ยัง, สถานะสลิปล่าสุด)",
+        "parameters": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "get_course_details",
+        "description": "ดูรายละเอียดหลักสูตร: ราคา ราคาเต็ม ธนาคาร เลขบัญชี ชื่อบัญชีสำหรับโอนเงิน",
+        "parameters": {"type": "object", "properties": {
+            "course": {"type": "string", "description": "รหัสหลักสูตร เช่น FC IC PC AC"}}, "required": ["course"]},
+    },
+    {
+        "name": "escalate_to_admin",
+        "description": "เรียกแอดมินมาช่วย — ใช้เมื่อผู้ใช้ต้องการคุยกับคน, ร้องเรียน, หรือคำถามที่ต้องให้คนตัดสินใจ",
+        "parameters": {"type": "object", "properties": {
+            "reason": {"type": "string", "description": "สรุปสั้น ๆ ว่าผู้ใช้ต้องการอะไร"}}, "required": ["reason"]},
+    },
+]}]
+
+_gemini_escalations: dict = {}   # uid -> reason (อ่านหลัง reply เพื่อ bump unread/tag)
+
+
+async def _gemini_tool_exec(name: str, args: dict, uid: str) -> dict:
+    try:
+        if name == "get_my_account":
+            regs = await supa.select("registrations", params={
+                "line_user_id": f"eq.{uid}", "select": "course,course_raw,paid,approved"})
+            slips = await supa.select("slips", params={
+                "line_user_id": f"eq.{uid}", "select": "status,amount,expected_course,auto_note,created_at",
+                "order": "created_at.desc", "limit": "3"})
+            if not regs and not slips:
+                return {"note": "ยังไม่พบข้อมูลการลงทะเบียนของผู้ใช้คนนี้ในระบบ"}
+            return {
+                "registrations": [{"course": r.get("course_raw") or r.get("course"),
+                                   "paid": bool(r.get("paid")),
+                                   "approved": r.get("approved")} for r in regs],
+                "recent_slips": [{"status": s.get("status"), "amount": s.get("amount"),
+                                  "course": s.get("expected_course"), "note": s.get("auto_note"),
+                                  "date": (s.get("created_at") or "")[:16]} for s in slips],
+            }
+        if name == "get_course_details":
+            c = re.sub(r"[^A-Za-z]", "", str(args.get("course") or "")).upper()[:2]
+            accts = await supa.select("payment_accounts", params={"select": "*", "active": "eq.true"})
+            m = next((a for a in accts if str(a.get("course") or "").upper().startswith(c)), None)
+            if not m:
+                return {"error": f"ไม่พบหลักสูตร {args.get('course')}"}
+            return {"course": m["course"], "price": m.get("price"), "full_price": m.get("full_price"),
+                    "bank": m.get("bank"), "account_no": m.get("account_no"), "account_name": m.get("account_name")}
+        if name == "escalate_to_admin":
+            _gemini_escalations[uid] = str(args.get("reason") or "ผู้ใช้ขอคุยกับแอดมิน")[:200]
+            return {"ok": True, "message": "แจ้งแอดมินแล้ว จะรีบติดต่อกลับ"}
+    except Exception as e:
+        return {"error": str(e)[:120]}
+    return {"error": "unknown tool"}
+
+
+async def _gemini_answer(question: str, temperature: float = 0.7, context: str = "",
+                         history: list | None = None, uid: str | None = None,
+                         user_facts: str = "") -> str | None:
+    """ตอบด้วย Gemini + ประวัติการคุย + เครื่องมือดูข้อมูลบัญชี/หลักสูตร — คืน None ถ้า error/ว่าง"""
     if not GEMINI_API_KEY or not question.strip():
         return None
     url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
            f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}")
-    sys_text = ("คุณเป็นผู้ช่วยของเพจติวสอบ ตอบคำถามสมาชิกทางไลน์ เป็นภาษาไทย กระชับ สุภาพ เป็นกันเอง "
-                "ไม่เกิน 4 ประโยค ใช้ 'ข้อมูลอ้างอิง' ด้านล่างเป็นหลักในการตอบ "
-                "ถ้าคำถามไม่เกี่ยวกับข้อมูลอ้างอิงหรือไม่แน่ใจ ให้บอกว่าไม่แน่ใจ และแนะนำให้พิมพ์ 'ติดต่อแอดมิน'")
+    sys_text = (
+        "คุณเป็นผู้ช่วยของเพจติวสอบ ตอบสมาชิกทางไลน์ เป็นภาษาไทย เป็นกันเอง กระชับ ไม่เกิน 4-5 ประโยค "
+        "ห้ามขึ้นต้นว่า 'สวัสดีครับ/ค่ะ' ทุกครั้ง (คุยต่อเนื่องอยู่) "
+        "เมื่อผู้ใช้ถามเรื่องการลงทะเบียน/การจ่ายเงิน/สลิปของตัวเอง ให้เรียก get_my_account ก่อนตอบ "
+        "เมื่อถามราคา/บัญชีโอนเงินของหลักสูตร ให้เรียก get_course_details "
+        "ถ้าผู้ใช้ขอคุยกับคน/ร้องเรียน/เรื่องที่ต้องให้คนตัดสิน ให้เรียก escalate_to_admin "
+        "ถ้าไม่มีข้อมูลและไม่ใช่เรื่องที่เครื่องมือช่วยได้ ให้บอกตรง ๆ ว่าไม่แน่ใจ แนะนำพิมพ์ 'ติดต่อแอดมิน'")
+    if user_facts:
+        sys_text += f"\n\nข้อมูลผู้ใช้ที่กำลังคุย: {user_facts}"
     if context:
         sys_text += "\n\n=== ข้อมูลอ้างอิง ===\n" + context
+
+    contents: list = []
+    for m in (history or [])[-8:]:
+        contents.append({"role": m["role"], "parts": [{"text": m["text"][:800]}]})
+    contents.append({"role": "user", "parts": [{"text": question[:2000]}]})
+
     body = {
-        "contents": [{"role": "user", "parts": [{"text": question[:2000]}]}],
+        "contents": contents,
         "systemInstruction": {"parts": [{"text": sys_text}]},
-        "generationConfig": {
-            # gemini-3.x flash เป็น thinking model — thinking กิน output tokens ด้วย
-            # ต้องเผื่อ budget ให้พอ ไม่งั้นได้ข้อความว่าง (thinking กินหมด)
-            "maxOutputTokens": 2048,
-            "temperature": max(0.0, min(2.0, temperature if temperature is not None else 0.7)),
-        },
+        "generationConfig": {"maxOutputTokens": 2048,
+                             "temperature": max(0.0, min(2.0, temperature if temperature is not None else 0.7))},
     }
+    if uid:
+        body["tools"] = _GEMINI_TOOLS
+
     try:
-        async with httpx.AsyncClient(timeout=20) as c:
-            r = await c.post(url, json=body)
-        j = r.json()
-        if r.status_code != 200:
-            print("gemini http error:", r.status_code, str(j)[:300])
-            return None
-        cand = (j.get("candidates") or [{}])[0]
-        parts = (cand.get("content") or {}).get("parts") or []
-        text = "".join(p.get("text", "") for p in parts).strip()
-        return text or None
+        async with httpx.AsyncClient(timeout=22) as c:
+            for _round in range(3):
+                r = await c.post(url, json=body)
+                j = r.json()
+                if r.status_code != 200:
+                    print("gemini http error:", r.status_code, str(j)[:300])
+                    return None
+                cand = (j.get("candidates") or [{}])[0]
+                parts = (cand.get("content") or {}).get("parts") or []
+                calls = [p["functionCall"] for p in parts if isinstance(p, dict) and p.get("functionCall")]
+                if not calls:
+                    text = "".join(p.get("text", "") for p in parts if isinstance(p, dict)).strip()
+                    return text or None
+                # รัน tool แล้วส่งผลกลับ
+                body["contents"].append({"role": "model", "parts": parts})
+                fresp = []
+                for fc in calls:
+                    res = await _gemini_tool_exec(fc.get("name", ""), fc.get("args") or {}, uid or "")
+                    fresp.append({"functionResponse": {"name": fc.get("name", ""), "response": {"result": res}}})
+                body["contents"].append({"role": "user", "parts": fresp})
+        return None
     except Exception as e:
         print("gemini error:", e)
         return None
@@ -1065,6 +1157,7 @@ async def _handle_gemini_replies(events: list) -> set:
         return set()
 
     ctx = await _gemini_context()
+    _gemini_escalations.clear()
     handled: set = set()
     out_msgs = []
     for e in text_events:
@@ -1080,16 +1173,61 @@ async def _handle_gemini_replies(events: list) -> set:
         if rid not in menu_temp:
             continue
         question = e["message"].get("text") or ""
-        answer = await _gemini_answer(question, menu_temp[rid], context=ctx)
+
+        # ประวัติการคุย 8 ข้อความล่าสุด (in=user, out=model) + ข้อมูลผู้ใช้
+        history, user_facts = [], ""
+        try:
+            recent = await supa.select("messages", params={
+                "select": "direction,by,text,msg_type", "line_user_id": f"eq.{uid}",
+                "order": "created_at.desc", "limit": "9"})
+            for m in reversed(recent):
+                txt = (m.get("text") or "").strip()
+                if not txt or m.get("msg_type") not in (None, "text"):
+                    continue
+                role = "user" if m.get("direction") == "in" else "model"
+                if role == "model" and m.get("by") == "gemini" and txt == "":
+                    continue
+                history.append({"role": role, "text": txt})
+            history = history[:-1] if history and history[-1]["role"] == "user" and history[-1]["text"] == question.strip() else history
+            prof = await line.get_profile(uid)
+            regs = await supa.select("registrations", params={
+                "line_user_id": f"eq.{uid}", "select": "course_raw,course,paid", "limit": "10"})
+            facts = []
+            if prof and prof.get("displayName"):
+                facts.append(f"ชื่อ LINE: {prof['displayName']}")
+            if regs:
+                facts.append("ลงทะเบียน: " + ", ".join(
+                    f"{r.get('course_raw') or r.get('course')}({'จ่ายแล้ว' if r.get('paid') else 'ค้างจ่าย'})" for r in regs))
+            user_facts = " · ".join(facts)
+        except Exception as ex:
+            print("gemini history/facts error:", ex)
+
+        answer = await _gemini_answer(question, menu_temp[rid], context=ctx,
+                                      history=history, uid=uid, user_facts=user_facts)
         if not answer:
-            continue  # Gemini ตอบไม่ได้/error -> เงียบไว้ก่อน ไม่ตอบอะไร (ตามที่ตกลง)
+            continue
         code, _ = await line.reply(e["replyToken"], [{"type": "text", "text": answer[:4900]}])
         if code == 200:
             handled.add(uid)
             out_msgs.append({"line_user_id": uid, "direction": "out", "by": "gemini",
                              "msg_type": "text", "text": answer,
-                             "payload": {"question": question, "model": GEMINI_MODEL,
-                                         "temperature": menu_temp[rid]}})
+                             "payload": {"question": question, "model": GEMINI_MODEL}})
+            # Gemini เรียก escalate_to_admin -> bump unread + tag ให้แอดมินเห็น
+            if uid in _gemini_escalations:
+                try:
+                    ex = await supa.select("line_users", params={
+                        "select": "unread,tags", "line_user_id": f"eq.{uid}", "limit": "1"})
+                    cur = ex[0] if ex else {}
+                    await supa.update("line_users", {
+                        "unread": (cur.get("unread") or 0) + 1,
+                        "tags": sorted(set(cur.get("tags") or []) | {"รอแอดมิน"}),
+                        "updated_at": NOW(),
+                    }, {"line_user_id": f"eq.{uid}"})
+                    await alert_admin("🙋 ลูกค้าขอคุยกับแอดมิน",
+                                      f"{user_facts or uid[:12]}\n{_gemini_escalations[uid]}",
+                                      throttle_key=f"esc_{uid}")
+                except Exception as ex2:
+                    print("escalation error:", ex2)
     if out_msgs:
         try:
             await supa.insert("messages", out_msgs)
