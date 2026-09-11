@@ -147,6 +147,7 @@ export const api = {
   kb: () => req('GET', '/kb'),
   saveKb: (payload) => req('POST', '/kb', payload),
   delKb: (id) => req('DELETE', `/kb/${id}`),
+  kbGaps: (days = 14) => req('GET', `/kb/gaps?days=${days}`),
 
   postbacks: () => req('GET', '/postbacks'),
   savePostback: (payload) => req('POST', '/postbacks', payload),

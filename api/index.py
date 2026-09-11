@@ -1111,12 +1111,41 @@ def _tok(s: str) -> set:
     return set(w for w in re.findall(r"[ก-๙a-zA-Z0-9]{2,}", (s or "").lower()))
 
 
+# คำพ้องความหมายที่ลูกค้ามักใช้ต่างจากคำในคลังความรู้ — ขยายฝั่งคำถามก่อนให้คะแนน
+# ช่วยให้ "เท่าไหร่/กี่บาท" เจอบทความที่เขียนว่า "ราคา" ได้ แม้คำไม่ตรงเป๊ะ
+_SYN_GROUPS = [
+    {"ราคา", "เท่าไหร่", "เท่าไร", "ค่าเรียน", "ค่าลงทะเบียน", "กี่บาท", "ค่าใช้จ่าย", "แพง", "ถูก"},
+    {"โอน", "จ่าย", "ชำระ", "จ่ายเงิน", "ชำระเงิน", "โอนเงิน", "โอนแล้ว"},
+    {"เรียน", "คอร์ส", "หลักสูตร", "คลาส", "รุ่น"},
+    {"สมัคร", "ลงทะเบียน", "ลงชื่อ", "สมัครเรียน", "สมัครติว"},
+    {"ผ่อน", "แบ่งจ่าย", "แบ่งชำระ", "ผ่อนชำระ", "ผ่อนได้ไหม"},
+    {"ยกเลิก", "เลิก", "ขอคืนเงิน", "คืนเงิน", "ไม่เรียนแล้ว", "ไม่เอาแล้ว"},
+    {"ซูม", "zoom", "ลิงก์เรียน", "ลิงค์เรียน", "ห้องเรียน", "ห้องซูม"},
+    {"เอกสาร", "pdf", "ไฟล์", "สรุป", "ชีท", "เนื้อหา"},
+    {"เริ่มเรียน", "เปิดเรียน", "วันเริ่ม", "วันที่เริ่ม", "ตารางเรียน", "ตาราง", "เมื่อไหร่", "วันไหน"},
+    {"สลิป", "หลักฐานโอน", "ใบเสร็จ", "receipt", "สลิปโอน"},
+    {"ที่อยู่", "สถานที่", "ที่ไหน", "location", "เรียนที่ไหน"},
+    {"ผล", "ประกาศผล", "ผลสอบ", "ติดไหม", "ผ่านไหม"},
+]
+_SYN_MAP: dict = {}
+for _grp in _SYN_GROUPS:
+    for _w in _grp:
+        _SYN_MAP.setdefault(_w, set()).update(_grp)
+
+
+def _expand_syn(tokens: set) -> set:
+    out = set(tokens)
+    for t in tokens:
+        out |= _SYN_MAP.get(t, set())
+    return out
+
+
 async def _gemini_retrieve(question: str, k: int = 6) -> str:
-    """ดึงบทความ KB/FAQ ที่เกี่ยวกับคำถามนี้มากสุด k อัน"""
+    """ดึงบทความ KB/FAQ ที่เกี่ยวกับคำถามนี้มากสุด k อัน (ขยายคำพ้องความหมายฝั่งคำถามก่อนให้คะแนน)"""
     items = await _gemini_kb_items()
     if not items:
         return ""
-    qt = _tok(question)
+    qt = _expand_syn(_tok(question))
     scored = []
     for it in items:
         body_t = _tok(it["body"])
@@ -1171,6 +1200,15 @@ _GEMINI_TOOLS = [{"functionDeclarations": [
 ]}]
 
 _gemini_escalations: dict = {}   # uid -> reason (อ่านหลัง reply เพื่อ bump unread/tag)
+
+# คำที่บ่งชี้ว่าควรส่งต่อคนโดยไม่พึ่งดุลพินิจโมเดลอย่างเดียว (safety net ธุรกิจ)
+_URGENT_KW = ("ร้องเรียน", "ไม่พอใจ", "โกง", "หลอกลวง", "ฟ้อง", "แจ้งความ", "แจ้งจับ", "ทนาย",
+              "ขอเงินคืน", "คืนเงิน", "เร่งด่วน", "ด่วนมาก", "ผิดพลาดร้ายแรง", "เสียหาย")
+
+
+def _is_urgent(text: str) -> bool:
+    low = (text or "").lower()
+    return any(k in low for k in _URGENT_KW)
 
 
 async def _gemini_tool_exec(name: str, args: dict, uid: str) -> dict:
@@ -1245,10 +1283,14 @@ async def _gemini_answer(question: str, temperature: float = 0.7, context: str =
     sys_text = (
         "คุณเป็นผู้ช่วยของเพจติวสอบ ตอบสมาชิกทางไลน์ เป็นภาษาไทย เป็นกันเอง กระชับ ไม่เกิน 4-5 ประโยค "
         "ห้ามขึ้นต้นว่า 'สวัสดีครับ/ค่ะ' ทุกครั้ง (คุยต่อเนื่องอยู่) "
-        "เมื่อผู้ใช้ถามเรื่องการลงทะเบียน/การจ่ายเงิน/สลิปของตัวเอง ให้เรียก get_my_account ก่อนตอบ "
+        "ห้ามใช้ markdown เช่น **ตัวหนา** #หัวข้อ หรือ bullet ที่ขึ้นต้นด้วย * เพราะไลน์แสดงตัวอักษรดิบ ให้เขียนเป็นประโยคปกติหรือขึ้นบรรทัดใหม่แทน "
+        "ตอบตามข้อมูลอ้างอิง/ผลลัพธ์จากเครื่องมือเท่านั้น ห้ามเดาราคา วันที่ หรือสถานะที่ไม่มีในข้อมูลที่ได้รับ "
+        "เมื่อผู้ใช้ถามเรื่องการลงทะเบียน/การจ่ายเงิน/สลิปของตัวเอง ให้เรียก get_my_account ก่อนตอบเสมอ "
+        "ถ้าเครื่องมือบอกว่ายังไม่พบข้อมูล ให้ขอชื่อ-เบอร์โทรที่ใช้ตอนสมัครเพื่อส่งต่อแอดมินตรวจสอบ ห้ามเดาว่าจ่ายแล้วหรือยัง "
         "เมื่อถามราคา/บัญชีโอนเงินของหลักสูตร ให้เรียก get_course_details "
-        "ถ้าผู้ใช้ขอคุยกับคน/ร้องเรียน/เรื่องที่ต้องให้คนตัดสิน ให้เรียก escalate_to_admin "
-        "ถ้าไม่มีข้อมูลและไม่ใช่เรื่องที่เครื่องมือช่วยได้ ให้บอกตรง ๆ ว่าไม่แน่ใจ แนะนำพิมพ์ 'ติดต่อแอดมิน'")
+        "เมื่อถามวันเริ่มเรียน/ตารางเรียน/ลิงก์ซูมของคลาส ให้เรียก get_class_info "
+        "ถ้าผู้ใช้ขอคุยกับคน/ร้องเรียน/แสดงความไม่พอใจ/เรื่องเร่งด่วน/เรื่องที่ต้องให้คนตัดสิน ให้เรียก escalate_to_admin ทันทีโดยไม่ต้องพยายามแก้ปัญหาเอง "
+        "ถ้าไม่มีข้อมูลและเครื่องมือช่วยไม่ได้ ให้บอกตรง ๆ ว่าไม่แน่ใจ แนะนำพิมพ์ 'ติดต่อแอดมิน' ห้ามแต่งคำตอบขึ้นเอง")
     if user_facts:
         sys_text += f"\n\nข้อมูลผู้ใช้ที่กำลังคุย: {user_facts}"
     if context:
@@ -1423,6 +1465,13 @@ async def _handle_gemini_replies(events: list) -> set:
             kb = await _gemini_retrieve(question)
         except Exception:
             kb = ""
+        if not kb:
+            # ไม่เจอบทความ/FAQ ที่เกี่ยวข้องเลย -> บันทึกไว้ให้แอดมินเห็นว่าควรเพิ่มความรู้เรื่องอะไร
+            try:
+                await supa.insert("operations", {"actor": "gemini", "action": "gemini.kb_gap",
+                                                 "params": {"q": question[:200]}, "status": "ok"})
+            except Exception:
+                pass
         full_ctx = (ctx + ("\n\n" + kb if kb else "")).strip()
         answer = await _gemini_answer(question, menu_temp[rid], context=full_ctx,
                                       history=history, uid=uid, user_facts=user_facts)
@@ -1430,6 +1479,9 @@ async def _handle_gemini_replies(events: list) -> set:
         if not answer:
             # AI ตอบไม่ได้ (quota/error) -> อย่าปล่อยเงียบ: ข้อความค้างไว้ + ให้แอดมินเห็น
             answer = "ได้รับข้อความแล้วครับ 🙏 เดี๋ยวแอดมินมาตอบให้นะครับ"
+        if _is_urgent(question) and uid not in _gemini_escalations:
+            # safety net: ข้อความมีลักษณะร้องเรียน/เร่งด่วน -> ส่งต่อแอดมินเสมอ ไม่ปล่อยให้โมเดลตัดสินใจเองอย่างเดียว
+            _gemini_escalations[uid] = f"ข้อความอาจร้องเรียน/เร่งด่วน: {question[:100]}"
         code, _ = await line.reply(e["replyToken"], [{"type": "text", "text": answer[:4900]}])
         if code == 200:
             handled.add(uid)
@@ -1998,6 +2050,33 @@ async def kb_delete(aid: int, admin=Depends(current_admin)):
     await supa.delete("kb_articles", {"id": f"eq.{aid}"})
     _gemini_kb_cache["items"] = None
     return {"ok": True}
+
+
+@app.get("/api/kb/gaps")
+async def kb_gaps(admin=Depends(current_admin), days: int = 14):
+    """คำถามที่ Gemini ตอบแล้วแต่ไม่เจอบทความ/FAQ ที่เกี่ยวข้องเลยในคลังความรู้ (gemini.kb_gap log)
+    ใช้ดูว่าควรเพิ่มบทความอะไรเข้า /kb"""
+    days = max(3, min(days, 60))
+    since = _iso_ago(days=days)
+    try:
+        rows = await supa.select_all("operations", params={
+            "select": "params,created_at", "action": "eq.gemini.kb_gap",
+            "created_at": f"gte.{since}"})
+    except Exception:
+        rows = []
+    from collections import Counter
+    texts = [re.sub(r"\s+", " ", str((r.get("params") or {}).get("q") or "").strip()) for r in rows]
+    texts = [t for t in texts if t]
+    exact = Counter(t.lower() for t in texts)
+    top_questions = [{"text": k, "count": v} for k, v in exact.most_common(40)]
+    words = Counter()
+    for t in texts:
+        for w in re.findall(r"[ก-๙a-zA-Z]{2,}", t.lower()):
+            if w not in _GAP_STOP and len(w) >= 2:
+                words[w] += 1
+    top_keywords = [{"word": w, "count": c} for w, c in words.most_common(30) if c >= 2]
+    return {"days": days, "total": len(texts),
+            "top_questions": top_questions, "top_keywords": top_keywords, "samples": texts[:60]}
 
 
 @app.get("/api/insights/gaps")

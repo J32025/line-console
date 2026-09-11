@@ -10,9 +10,18 @@ export default function KB() {
   const [hint, setHint] = useState('')
   const [form, setForm] = useState(null)
   const [busy, setBusy] = useState(false)
+  const [gaps, setGaps] = useState(null)
+  const [showGaps, setShowGaps] = useState(false)
 
   const load = () => api.kb().then((d) => { setList(d.articles); if (d.schema_missing) setHint(d.hint) }).catch((e) => t.err(e.message))
   useEffect(() => { load() }, [])
+  useEffect(() => {
+    if (showGaps && !gaps) api.kbGaps(14).then(setGaps).catch((e) => t.err(e.message))
+  }, [showGaps]) // eslint-disable-line
+
+  const articleFromQuestion = (q) => setForm({
+    ...EMPTY, title: q.length > 60 ? q.slice(0, 60) + '…' : q, keywords: q,
+  })
 
   const save = async () => {
     if (!form.title.trim() || !form.body.trim()) return t.err('ใส่หัวข้อ + เนื้อหา')
@@ -37,6 +46,48 @@ export default function KB() {
       </p>
 
       {hint && <p className="err">{hint}</p>}
+
+      <section className="card">
+        <div className="row spread">
+          <h3>🤖 คำถามที่ AI ยังตอบไม่ได้ดี</h3>
+          <button className="sm" onClick={() => setShowGaps((v) => !v)}>{showGaps ? 'ซ่อน' : 'วิเคราะห์ 14 วัน'}</button>
+        </div>
+        {showGaps && (!gaps ? <Spinner /> : (
+          <>
+            <p className="muted sm">
+              คำถามที่ Gemini ตอบไปแล้ว แต่ <b>ไม่เจอบทความ/FAQ ที่เกี่ยวข้องเลย</b> ({gaps.total.toLocaleString()} ครั้งใน {gaps.days} วัน) — เพิ่มบทความให้ AI ฉลาดขึ้น
+            </p>
+            <div className="grid two">
+              <div>
+                <h4 className="sm">คำถามซ้ำบ่อย</h4>
+                <table>
+                  <tbody>
+                    {gaps.top_questions.slice(0, 15).map((q, i) => (
+                      <tr key={i}>
+                        <td>{q.text}</td>
+                        <td className="muted">{q.count}×</td>
+                        <td><button className="xs primary" onClick={() => articleFromQuestion(q.text)}>สร้างบทความ</button></td>
+                      </tr>
+                    ))}
+                    {!gaps.top_questions.length && <tr><td className="muted">ยังไม่มีข้อมูลพอ</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+              <div>
+                <h4 className="sm">คำที่โผล่บ่อย</h4>
+                <div className="row wrap" style={{ gap: 5 }}>
+                  {gaps.top_keywords.map((k, i) => (
+                    <button key={i} className="xs" onClick={() => articleFromQuestion(k.word)}>
+                      {k.word} <span className="muted">{k.count}</span>
+                    </button>
+                  ))}
+                  {!gaps.top_keywords.length && <span className="muted sm">—</span>}
+                </div>
+              </div>
+            </div>
+          </>
+        ))}
+      </section>
 
       {!list ? <Spinner /> : list.length === 0 && !hint ? (
         <p className="muted card center">ยังไม่มีบทความ — กด "+ บทความ" เพิ่มความรู้ให้ AI</p>
