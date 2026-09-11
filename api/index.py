@@ -5,6 +5,7 @@ LINE Console API — FastAPI บน Vercel Python runtime
 import asyncio
 import base64
 import datetime as dt
+import gzip
 import hashlib
 import hmac
 import json
@@ -3577,13 +3578,18 @@ async def _make_backup():
             dump[tb] = await supa.select_all(tb, params={"select": "*"})
         except Exception as e:
             dump[tb] = {"error": str(e)}
-    blob = json.dumps(dump, ensure_ascii=False).encode()
-    size_kb = len(blob) // 1024
-    # เก็บสำเนาไว้ที่ Storage ด้วย (แยกจาก DB — DB ล่มก็ยังมี)
+    raw = json.dumps(dump, ensure_ascii=False).encode()
+    size_kb = len(raw) // 1024
+    blob = gzip.compress(raw, 6)
+    # เก็บสำเนาไว้ที่ Storage ด้วย (แยกจาก DB — DB ล่มก็ยังกู้ได้)
     ext_url = None
+    storage_err = None
     try:
-        ext_url = await supa.storage_upload("media", f"backups/{day}.json", blob, "application/json")
+        await supa.storage_ensure_bucket("db-backups", public=False)
+        await supa.storage_upload("db-backups", f"{day}.json.gz", blob, "application/gzip")
+        ext_url = await supa.storage_sign_url("db-backups", f"{day}.json.gz", 7 * 86400)
     except Exception as e:
+        storage_err = str(e)
         print("backup storage upload error:", e)
     await supa.upsert("backups", {"day": day, "tables": dump, "size_kb": size_kb},
                       on_conflict="day")
@@ -3591,10 +3597,11 @@ async def _make_backup():
     for r in old[30:]:
         await supa.delete("backups", {"id": f"eq.{r['id']}"})
         try:
-            await supa.storage_delete("media", f"backups/{r['day']}.json")
+            await supa.storage_delete("db-backups", f"{r['day']}.json.gz")
         except Exception:
             pass
-    return {"day": day, "size_kb": size_kb, "storage_url": ext_url,
+    return {"day": day, "size_kb": size_kb, "gz_kb": len(blob) // 1024,
+            "storage": bool(ext_url), "storage_url": ext_url, "storage_err": storage_err,
             "rows": {k: (len(v) if isinstance(v, list) else 0) for k, v in dump.items()}}
 
 
@@ -3676,9 +3683,12 @@ async def backup_now(admin=Depends(current_admin)):
 async def backup_list(admin=Depends(current_admin)):
     rows = await supa.select("backups", params={
         "select": "id,day,size_kb,created_at", "order": "day.desc", "limit": "30"})
-    base = f"{SUPABASE_URL}/storage/v1/object/public/media/backups/"
     for r in rows:
-        r["storage_url"] = base + f"{r['day']}.json"
+        try:
+            r["storage_url"] = await supa.storage_sign_url(
+                "db-backups", f"{r['day']}.json.gz", 7 * 86400)
+        except Exception:
+            r["storage_url"] = None
     return {"backups": rows}
 
 
@@ -3843,6 +3853,7 @@ async def cron_run_automations(request: Request):
         "select": "*", "status": "eq.pending", "run_at": f"lte.{NOW()}",
         "order": "run_at.asc", "limit": "200"})
     if not due:
+        await supa.log_operation("cron", "automation.run", None, {"ran": 0})  # heartbeat
         return {"ok": True, "ran": 0}
     autos = {a["id"]: a for a in await supa.select("automations", params={"select": "*"})}
     sent = failed = 0

@@ -141,6 +141,33 @@ async def storage_delete(bucket: str, path: str):
         r.raise_for_status()
 
 
+async def storage_ensure_bucket(name: str, *, public: bool = False,
+                                allowed_mime_types: list | None = None) -> None:
+    """สร้าง bucket ถ้ายังไม่มี (idempotent) — service_role เท่านั้น"""
+    async with httpx.AsyncClient(timeout=30) as c:
+        r = await c.get(f"{SUPABASE_URL}/storage/v1/bucket/{name}", headers=_headers())
+        if r.status_code == 200:
+            return
+        body = {"name": name, "id": name, "public": public}
+        if allowed_mime_types:
+            body["allowed_mime_types"] = allowed_mime_types
+        r = await c.post(f"{SUPABASE_URL}/storage/v1/bucket", headers=_headers(), json=body)
+        if r.status_code not in (200, 201) and "already exists" not in r.text.lower():
+            r.raise_for_status()
+
+
+async def storage_sign_url(bucket: str, path: str, expires_in: int = 3600) -> str:
+    """สร้าง signed URL สำหรับไฟล์ใน private bucket"""
+    async with httpx.AsyncClient(timeout=30) as c:
+        r = await c.post(
+            f"{SUPABASE_URL}/storage/v1/object/sign/{bucket}/{path}",
+            headers=_headers(), json={"expiresIn": expires_in},
+        )
+        r.raise_for_status()
+        signed = r.json().get("signedURL") or r.json().get("signedUrl") or ""
+    return f"{SUPABASE_URL}/storage/v1{signed}" if signed.startswith("/") else signed
+
+
 async def log_operation(actor: str | None, action: str, params=None, result=None, status="ok"):
     try:
         await insert("operations", {
