@@ -4,6 +4,7 @@ LINE Console API — FastAPI บน Vercel Python runtime
 """
 import asyncio
 import base64
+import copy
 import datetime as dt
 import gzip
 import hashlib
@@ -187,7 +188,7 @@ async def health(deep: int = 0, test_gemini: int = 0, test_uid: str = "", test_a
     checks["schema"] = {}
     for tb in ("slips", "payment_accounts", "postback_actions", "app_settings",
                "richmenu_history", "registrations", "webhook_jobs", "tasks",
-               "contact_notes", "classes", "attendance", "kb_articles"):
+               "contact_notes", "classes", "attendance", "kb_articles", "postback_clicks"):
         try:
             n = await supa.count(tb)
             checks["schema"][tb] = f"ok ({n} rows)"
@@ -349,6 +350,7 @@ async def webhook(request: Request):
         await asyncio.gather(*[line.start_loading(u, 20) for u in loading_uids], return_exceptions=True)
     rows_ev, user_patches, follow_rows, in_msgs = [], {}, [], []
     follow_uids, unfollow_uids = [], []
+    bc_clicks = []   # คลิก postback ที่มาจาก broadcast (มีรหัสแนบท้าย data)
 
     for ev in events:
         et = ev.get("type")
@@ -356,6 +358,14 @@ async def webhook(request: Request):
         uid = src.get("userId")
         msg = ev.get("message", {})
         pb = ev.get("postback", {})
+        if et == "postback" and pb.get("data"):
+            # แกะรหัส broadcast ที่แนบท้าย data ออกก่อน (ถ้ามี) แล้วแทนที่ด้วย data สะอาด
+            # -> downstream (postback_actions/auto_reply matching, events log) เห็นแต่ data เดิมเป๊ะ ไม่กระทบ match
+            clean, bcid = _split_postback_data(pb["data"])
+            if bcid:
+                pb["data"] = clean
+                if uid:
+                    bc_clicks.append({"broadcast_id": bcid, "line_user_id": uid, "data": clean})
         ts_ms = ev.get("timestamp")
         event_ts = dt.datetime.fromtimestamp(ts_ms / 1000, dt.timezone.utc).isoformat() if ts_ms else NOW()
         dc = ev.get("deliveryContext", {})
@@ -419,6 +429,11 @@ async def webhook(request: Request):
             await supa.insert("messages", in_msgs)
         if follow_rows:
             await supa.insert("follow_history", follow_rows)  # noqa
+        if bc_clicks:
+            try:
+                await supa.insert("postback_clicks", bc_clicks)
+            except Exception as e:
+                print("postback click log error (migration 0012 รันหรือยัง?):", e)
 
         # increment unread สำหรับคนที่ทักเข้ามา
         for uid in {m["line_user_id"] for m in in_msgs}:
@@ -3155,6 +3170,74 @@ def _normalize_messages(raw):
     return out
 
 
+# ============================================================
+# broadcast postback click tracking — รู้ว่าใคร (userId) คลิกปุ่ม postback ที่มาจาก broadcast ไหน
+# วิธีทำ: แนบรหัส broadcast ต่อท้าย data ด้วยตัวคั่นที่มองไม่เห็น (\x1f) ตอนส่ง
+# แล้วแกะออกตอนรับ postback event กลับมา (ก่อนเข้ากฎ postback_actions/auto_reply เดิม)
+# เพื่อไม่ให้กระทบการ match แบบ exact/prefix ของ data เดิมที่แอดมินตั้งไว้
+# ============================================================
+_BC_TAG_SEP = "\x1f"
+
+
+def _walk_actions(node, fn):
+    """เดินทุก dict/list หา key 'type'=='postback' เรียก fn(node) ให้ (ใช้กับทั้ง template.actions/columns และ flex ที่ซ้อนลึก)"""
+    if isinstance(node, dict):
+        if node.get("type") == "postback":
+            fn(node)
+        for v in node.values():
+            _walk_actions(v, fn)
+    elif isinstance(node, list):
+        for v in node:
+            _walk_actions(v, fn)
+
+
+def _has_postback_action(messages: list) -> bool:
+    found = []
+    _walk_actions(messages, lambda a: found.append(a))
+    return bool(found)
+
+
+def _tag_broadcast_postbacks(messages: list, broadcast_id) -> list:
+    """คืนสำเนาข้อความที่แนบรหัส broadcast ไว้ในทุกปุ่ม postback"""
+    if not broadcast_id:
+        return messages
+    msgs = copy.deepcopy(messages)
+
+    def _tag(a):
+        d = a.get("data")
+        if d and _BC_TAG_SEP not in d:
+            a["data"] = f"{d}{_BC_TAG_SEP}bc{broadcast_id}"
+    _walk_actions(msgs, _tag)
+    return msgs
+
+
+def _split_postback_data(data: str):
+    """แยก postback data จริงออกจากรหัส broadcast ที่แนบท้าย (ถ้ามี) -> (clean_data, broadcast_id|None)"""
+    if data and _BC_TAG_SEP in data:
+        clean, _, tag = data.rpartition(_BC_TAG_SEP)
+        if tag.startswith("bc") and tag[2:].isdigit():
+            return clean, int(tag[2:])
+    return data, None
+
+
+async def _broadcast_begin(actor: str | None, kind: str, messages: list, target_count: int | None) -> tuple[int, list]:
+    """สร้างแถว broadcasts (status=sending) ก่อนส่งจริง -> คืน (id, ข้อความที่แนบรหัส postback แล้ว)"""
+    row = (await supa.insert("broadcasts", {
+        "actor": actor, "kind": kind, "target_count": target_count,
+        "messages": messages, "status": "sending",
+    }))[0]
+    bid = row["id"]
+    return bid, _tag_broadcast_postbacks(messages, bid)
+
+
+async def _broadcast_finish(bid: int, *, status: str, line_request_id: str | None = None,
+                            error: str | None = None, target_count: int | None = None) -> None:
+    patch = {"status": status, "line_request_id": line_request_id, "error": error}
+    if target_count is not None:
+        patch["target_count"] = target_count
+    await supa.update("broadcasts", patch, {"id": f"eq.{bid}"})
+
+
 @app.post("/api/message/recipients-preview")
 async def recipients_preview(req: Request, admin=Depends(current_admin)):
     """นับปลายทาง + ตัวอย่าง 12 คน (รูป+ชื่อ) ก่อนกดส่งจริง"""
@@ -3226,6 +3309,43 @@ async def get_broadcast(bid: int, admin=Depends(current_admin)):
     return rows[0]
 
 
+@app.get("/api/broadcasts/{bid}/clicks")
+async def broadcast_clicks(bid: int, admin=Depends(current_admin)):
+    """ใครคลิกปุ่ม postback ใน broadcast นี้บ้าง (userId + ชื่อ + ข้อมูลปุ่มที่กด + เวลา)"""
+    try:
+        rows = await supa.select_all("postback_clicks", params={
+            "select": "line_user_id,data,clicked_at", "broadcast_id": f"eq.{bid}",
+            "order": "clicked_at.desc"})
+    except Exception as e:
+        return {"schema_missing": True, "hint": f"ยังไม่ได้รัน migration 0012_postback_clicks.sql — {e}",
+                "clicks": [], "unique_users": 0, "by_data": []}
+    uids = list({r["line_user_id"] for r in rows if r.get("line_user_id")})
+    names = {}
+    for i in range(0, len(uids), 80):
+        chunk = uids[i:i + 80]
+        try:
+            for u in await supa.select("line_users", params={
+                    "select": "line_user_id,display_name,picture_url,tags",
+                    "line_user_id": f"in.({','.join(chunk)})", "limit": "80"}):
+                names[u["line_user_id"]] = u
+        except Exception:
+            pass
+    by_data: dict = {}
+    for r in rows:
+        by_data.setdefault(r.get("data") or "(ไม่ระบุ)", 0)
+        by_data[r.get("data") or "(ไม่ระบุ)"] += 1
+    for r in rows:
+        u = names.get(r["line_user_id"], {})
+        r["display_name"] = u.get("display_name")
+        r["picture_url"] = u.get("picture_url")
+        r["tags"] = u.get("tags")
+    return {
+        "total_clicks": len(rows), "unique_users": len(uids),
+        "by_data": sorted([{"data": k, "count": v} for k, v in by_data.items()], key=lambda x: -x["count"]),
+        "clicks": rows[:500],
+    }
+
+
 @app.post("/api/message/validate")
 async def msg_validate(req: Request, admin=Depends(current_admin)):
     b = await req.json()
@@ -3250,22 +3370,18 @@ async def msg_push(req: Request, admin=Depends(current_admin)):
     to = b.get("to")
     nd = bool(b.get("notificationDisabled"))
     msgs = _normalize_messages(b.get("messages", []))
+    kind, cnt = ("multicast", len(to)) if isinstance(to, list) and len(to) > 1 else ("push", 1)
+    bid, msgs = await _broadcast_begin(admin["userId"], kind, msgs, cnt)
     if isinstance(to, list):
         if len(to) == 1:
             code, txt, rid = await line.push(to[0], msgs, nd)
-            kind, cnt = "push", 1
         else:
             code, txt, rid = await line.multicast(to, msgs, nd)
-            kind, cnt = "multicast", len(to)
     else:
         code, txt, rid = await line.push(to, msgs, nd)
-        kind, cnt = "push", 1
     status = "sent" if code == 200 else "failed"
-    await supa.insert("broadcasts", {
-        "actor": admin["userId"], "kind": kind, "target_count": cnt,
-        "messages": msgs, "line_request_id": rid, "status": status,
-        "error": None if status == "sent" else txt[:300],
-    })
+    await _broadcast_finish(bid, status=status, line_request_id=rid,
+                            error=None if status == "sent" else txt[:300])
     if code != 200:
         raise HTTPException(400, txt)
     return {"ok": True, "requestId": rid, "sent": cnt}
@@ -3298,6 +3414,7 @@ async def msg_bulk(req: Request, admin=Depends(current_admin)):
     nd = bool(b.get("notificationDisabled"))
     chunks = [uids[i:i + 500] for i in range(0, len(uids), 500)]
 
+    bid, msgs = await _broadcast_begin(admin["userId"], "multicast", msgs, len(uids))
     sem = asyncio.Semaphore(5)
     res = {"total": len(uids), "sent": 0, "failed": 0, "batches": len(chunks),
            "ok_batches": 0, "errors": [], "duplicate": len(raw) - len(uids) - len(invalid),
@@ -3320,12 +3437,9 @@ async def msg_bulk(req: Request, admin=Depends(current_admin)):
     await asyncio.gather(*[one(i, c) for i, c in enumerate(chunks)])
 
     status = "sent" if res["failed"] == 0 else ("partial" if res["sent"] else "failed")
-    await supa.insert("broadcasts", {
-        "actor": admin["userId"], "kind": "multicast", "target_count": len(uids),
-        "messages": msgs, "line_request_id": last_rid[0],
-        "status": "sent" if status == "sent" else "failed",
-        "error": None if status == "sent" else f"{res['failed']} ล้มเหลว",
-    })
+    await _broadcast_finish(bid, status="sent" if status == "sent" else "failed",
+                            line_request_id=last_rid[0],
+                            error=None if status == "sent" else f"{res['failed']} ล้มเหลว")
     await supa.log_operation(admin["userId"], "message.bulk",
                              {"total": len(uids), "batches": len(chunks)}, res, status)
     return res
@@ -3335,14 +3449,12 @@ async def msg_bulk(req: Request, admin=Depends(current_admin)):
 async def msg_broadcast(req: Request, admin=Depends(current_admin)):
     b = await req.json()
     msgs = _normalize_messages(b.get("messages", []))
+    following = await supa.count("line_users", {"is_following": "eq.true"})
+    bid, msgs = await _broadcast_begin(admin["userId"], "broadcast", msgs, following)
     code, txt, rid = await line.broadcast(msgs)
     status = "sent" if code == 200 else "failed"
-    following = await supa.count("line_users", {"is_following": "eq.true"})
-    await supa.insert("broadcasts", {
-        "actor": admin["userId"], "kind": "broadcast", "target_count": following,
-        "messages": msgs, "line_request_id": rid, "status": status,
-        "error": None if status == "sent" else txt[:300],
-    })
+    await _broadcast_finish(bid, status=status, line_request_id=rid,
+                            error=None if status == "sent" else txt[:300])
     if code != 200:
         raise HTTPException(400, txt)
     return {"ok": True, "requestId": rid}
@@ -3363,6 +3475,7 @@ async def msg_multicast_db(req: Request, admin=Depends(current_admin)):
     if not uids:
         raise HTTPException(400, "ไม่มีปลายทาง")
     msgs = _normalize_messages(b.get("messages", []))
+    bid, msgs = await _broadcast_begin(admin["userId"], "multicast", msgs, len(uids))
     last_rid, sent, failed = None, 0, 0
     for i in range(0, len(uids), 500):
         code, txt, rid = await line.multicast(uids[i:i + 500], msgs)
@@ -3371,11 +3484,7 @@ async def msg_multicast_db(req: Request, admin=Depends(current_admin)):
             sent += len(uids[i:i + 500])
         else:
             failed += len(uids[i:i + 500])
-    await supa.insert("broadcasts", {
-        "actor": admin["userId"], "kind": "multicast", "target_count": len(uids),
-        "messages": msgs, "line_request_id": last_rid,
-        "status": "sent" if failed == 0 else "failed",
-    })
+    await _broadcast_finish(bid, status="sent" if failed == 0 else "failed", line_request_id=last_rid)
     return {"ok": failed == 0, "target": len(uids), "sent": sent, "failed": failed}
 
 
@@ -4026,13 +4135,12 @@ async def cron_run_scheduled(request: Request):
         try:
             kind = job["kind"]
             if kind == "broadcast":
-                code, txt, rid = await line.broadcast(_normalize_messages(p.get("messages", [])))
+                sched_msgs = _normalize_messages(p.get("messages", []))
+                sbid, sched_msgs = await _broadcast_begin(job.get("created_by"), "broadcast", sched_msgs, None)
+                code, txt, rid = await line.broadcast(sched_msgs)
                 ok = code == 200
-                await supa.insert("broadcasts", {
-                    "actor": job.get("created_by"), "kind": "broadcast",
-                    "messages": p.get("messages"), "line_request_id": rid,
-                    "status": "sent" if ok else "failed",
-                })
+                await _broadcast_finish(sbid, status="sent" if ok else "failed", line_request_id=rid,
+                                        error=None if ok else txt[:300])
                 res = {"code": code, "requestId": rid}
             elif kind == "richmenu_default":
                 ok, txt = await line.richmenu_set_default(p["richMenuId"])
@@ -4394,13 +4502,11 @@ async def msg_narrowcast(req: Request, admin=Depends(current_admin)):
     recipient = b.get("recipient")  # audience / redelivery object
     limit = b.get("limit")
     filter_ = {"demographic": demo} if demo else None
+    bid, msgs = await _broadcast_begin(admin["userId"], "narrowcast", msgs, None)
     code, txt, rid = await line.narrowcast(msgs, recipient=recipient, filter_=filter_, limit=limit)
     status = "sent" if code in (200, 202) else "failed"
-    await supa.insert("broadcasts", {
-        "actor": admin["userId"], "kind": "narrowcast", "target_count": None,
-        "messages": msgs, "line_request_id": rid, "status": status,
-        "error": None if status == "sent" else txt[:300],
-    })
+    await _broadcast_finish(bid, status=status, line_request_id=rid,
+                            error=None if status == "sent" else txt[:300])
     if code not in (200, 202):
         raise HTTPException(400, txt)
     return {"ok": True, "requestId": rid}
@@ -5231,6 +5337,7 @@ async def registrations_message(req: Request, admin=Depends(current_admin)):
     if not uids:
         raise HTTPException(400, "ไม่มีปลายทาง")
     msgs = _normalize_messages(b.get("messages", []))
+    bid, msgs = await _broadcast_begin(admin["userId"], "multicast", msgs, len(uids))
     sent = failed = 0
     for i in range(0, len(uids), 500):
         code, _txt, _rid = await line.multicast(uids[i:i + 500], msgs)
@@ -5238,9 +5345,7 @@ async def registrations_message(req: Request, admin=Depends(current_admin)):
             sent += len(uids[i:i + 500])
         else:
             failed += len(uids[i:i + 500])
-    await supa.insert("broadcasts", {
-        "actor": admin["userId"], "kind": "multicast", "target_count": len(uids),
-        "messages": msgs, "status": "sent" if failed == 0 else "failed"})
+    await _broadcast_finish(bid, status="sent" if failed == 0 else "failed")
     return {"ok": failed == 0, "target": len(uids), "sent": sent, "failed": failed}
 
 

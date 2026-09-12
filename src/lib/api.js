@@ -84,6 +84,7 @@ export const api = {
   broadcast: (payload) => req('POST', '/message/broadcast', payload),
   multicastDb: (payload) => req('POST', '/message/multicast-from-db', payload),
   broadcastHistory: () => req('GET', '/broadcasts'),
+  broadcastClicks: (bid) => req('GET', `/broadcasts/${bid}/clicks`),
 
   quota: () => req('GET', '/stats/quota'),
   insight: (date) => req('GET', '/stats/insight' + (date ? `?date=${date}` : '')),

@@ -35,6 +35,7 @@ export default function Messaging() {
   const [preview, setPreview] = useState(null) // {count, sample}
   const [ncProgress, setNcProgress] = useState(null)
   const [gallery, setGallery] = useState(false)
+  const [clickView, setClickView] = useState(null) // {bid, loading, data}
 
   const loadHistory = () => api.broadcastHistory().then((d) => setHistory(d.broadcasts)).catch(() => {})
   const loadScheduled = () => api.scheduled().then((d) => setScheduled(d.jobs)).catch(() => {})
@@ -75,6 +76,31 @@ export default function Messaging() {
     if (tpl) setMessages(tpl.messages)
   }
   const resend = (b) => { setMessages(b.messages); t.info('โหลดข้อความจากประวัติแล้ว', 'ok'); window.scrollTo(0, 0) }
+
+  const hasPostback = (msgs) => {
+    const walk = (n) => {
+      if (Array.isArray(n)) return n.some(walk)
+      if (n && typeof n === 'object') return n.type === 'postback' || Object.values(n).some(walk)
+      return false
+    }
+    return walk(msgs || [])
+  }
+
+  const openClicks = async (bid) => {
+    setClickView({ bid, loading: true, data: null })
+    try {
+      const d = await api.broadcastClicks(bid)
+      setClickView({ bid, loading: false, data: d })
+    } catch (e) { t.err(e.message); setClickView(null) }
+  }
+
+  const messageClickers = () => {
+    const uids = [...new Set((clickView?.data?.clicks || []).map((c) => c.line_user_id))]
+    if (!uids.length) return
+    setMode('push'); setTo(uids.join('\n')); setClickView(null)
+    t.info(`ใส่รายชื่อคนที่คลิก ${uids.length} คนในช่อง "ส่งหา userId" แล้ว — แก้ข้อความแล้วกดส่งได้เลย`, 'ok')
+    window.scrollTo(0, 0)
+  }
 
   const doSchedule = async () => {
     if (!schedAt) return t.err('เลือกเวลาก่อน')
@@ -425,13 +451,58 @@ export default function Messaging() {
                   <td className="muted xs">{(b.messages || []).map((m) => m.type).join(', ')}</td>
                   <td><span className={`chip ${b.status}`}>{b.status}</span></td>
                   <td className="muted sm">{new Date(b.created_at).toLocaleString('th-TH')}</td>
-                  <td><button className="xs" onClick={() => resend(b)}>ใช้ซ้ำ</button></td>
+                  <td className="row" style={{ gap: 4 }}>
+                    <button className="xs" onClick={() => resend(b)}>ใช้ซ้ำ</button>
+                    {hasPostback(b.messages) && <button className="xs" onClick={() => openClicks(b.id)}>👆 คนคลิก</button>}
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
       </section>
+
+      {clickView && (
+        <div className="modal-bg" onClick={() => setClickView(null)}>
+          <div className="modal" style={{ maxWidth: 560 }} onClick={(e) => e.stopPropagation()}>
+            <div className="row spread"><h3>👆 คนที่คลิกปุ่ม postback</h3><button className="xs" onClick={() => setClickView(null)}>✕</button></div>
+            {clickView.loading ? <InlineSpinner /> : clickView.data?.schema_missing ? (
+              <p className="err">{clickView.data.hint}</p>
+            ) : !clickView.data?.total_clicks ? (
+              <p className="muted center">ยังไม่มีใครคลิกปุ่มนี้</p>
+            ) : (
+              <>
+                <p className="muted sm">
+                  คลิกทั้งหมด <b>{clickView.data.total_clicks}</b> ครั้ง · คนไม่ซ้ำ <b>{clickView.data.unique_users}</b> คน
+                </p>
+                {clickView.data.by_data.length > 1 && (
+                  <div className="row wrap" style={{ gap: 4, marginBottom: 8 }}>
+                    {clickView.data.by_data.map((d, i) => (
+                      <span key={i} className="chip xs">{d.data} × {d.count}</span>
+                    ))}
+                  </div>
+                )}
+                <div className="table-scroll" style={{ maxHeight: 320 }}>
+                  <table>
+                    <tbody>
+                      {clickView.data.clicks.map((c, i) => (
+                        <tr key={i}>
+                          <td>{c.display_name || c.line_user_id.slice(0, 10) + '…'}</td>
+                          <td className="muted xs">{c.data}</td>
+                          <td className="muted sm">{new Date(c.clicked_at).toLocaleString('th-TH')}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <button className="primary" style={{ marginTop: 8 }} onClick={messageClickers}>
+                  ✈️ ส่งข้อความหาคนที่คลิก ({clickView.data.unique_users} คน)
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      )}
 
       {gallery && (
         <TemplateGallery
