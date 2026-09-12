@@ -209,13 +209,18 @@ async def health(deep: int = 0, test_gemini: int = 0, test_uid: str = "", test_a
                                   headers={"Authorization": f"Bearer {EASYSLIP_TOKEN}"})
             _j = _r.json()
             if _r.status_code == 200:
-                _q = (_j.get("data") or {}).get("quota") or {}
-                _used, _max = _q.get("used"), _q.get("max", _q.get("limit"))
+                _q = (_j.get("data") or {}).get("quota") or _j.get("data") or {}
+                _used = _q.get("usedQuota", _q.get("used"))
+                _max = _q.get("maxQuota", _q.get("max", _q.get("limit")))
+                _remain = _q.get("remainingQuota")
                 if _used is None and _max is None:
-                    # EasySlip เปลี่ยนชื่อ field ไป — โชว์ raw ไว้เผื่อดูเอง แทนที่จะขึ้น ?/? เฉยๆ
-                    checks["easyslip"] = f"ok — quota (raw): {str(_q or _j.get('data'))[:150]}"
+                    # เผื่อ EasySlip เปลี่ยนชื่อ field อีก — โชว์ raw ไว้ดูเอง แทนที่จะขึ้น ?/? เฉยๆ
+                    checks["easyslip"] = f"ok — quota (raw): {str(_q)[:150]}"
                 else:
-                    checks["easyslip"] = f"ok — quota {_used}/{_max}"
+                    prefix = "⚠️ QUOTA หมด — " if _remain == 0 else "ok — "
+                    reset_at = _q.get("expiredAt")
+                    suffix = f" (รีเซ็ต {reset_at})" if reset_at else ""
+                    checks["easyslip"] = f"{prefix}quota ใช้ {_used}/{_max}{suffix}"
             else:
                 checks["easyslip"] = f"token error {_r.status_code}: {str(_j)[:120]}"
         except Exception as e:
