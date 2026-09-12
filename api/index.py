@@ -210,7 +210,12 @@ async def health(deep: int = 0, test_gemini: int = 0, test_uid: str = "", test_a
             _j = _r.json()
             if _r.status_code == 200:
                 _q = (_j.get("data") or {}).get("quota") or {}
-                checks["easyslip"] = f"ok — quota {_q.get('used', '?')}/{_q.get('max', _q.get('limit', '?'))}"
+                _used, _max = _q.get("used"), _q.get("max", _q.get("limit"))
+                if _used is None and _max is None:
+                    # EasySlip เปลี่ยนชื่อ field ไป — โชว์ raw ไว้เผื่อดูเอง แทนที่จะขึ้น ?/? เฉยๆ
+                    checks["easyslip"] = f"ok — quota (raw): {str(_q or _j.get('data'))[:150]}"
+                else:
+                    checks["easyslip"] = f"ok — quota {_used}/{_max}"
             else:
                 checks["easyslip"] = f"token error {_r.status_code}: {str(_j)[:120]}"
         except Exception as e:
@@ -814,15 +819,18 @@ async def _handle_slips(img_events: list):
 
         # ============ ตอนนี้ค่อยอ่านสลิป (ช้า) แล้ว update row ============
         ocr = await _easyslip_verify(content) if content else None
-        if not ocr:
-            # ยังไม่มีผล -> ใช้ Gemini อ่าน (ถ้ายังไม่ได้เรียกใน gate)
+        easyslip_err = ocr.get("error") if ocr and not ocr.get("verified") else None
+        if not ocr or easyslip_err:
+            # EasySlip อ่านไม่ได้ หรือ error (เช่น quota_exceeded/rate_limit) -> ใช้ Gemini อ่านแทน
+            # (ถ้ายังไม่ได้เรียกใน gate) กันไม่ให้ตกไป "ตรวจสลิปไม่ผ่าน" เฉยๆ ทั้งที่ยังพอเดาข้อมูลได้
             if gclass is None and content:
                 gclass = await _gemini_classify_slip(content, ctype)
             if gclass and gclass.get("is_slip"):
                 ocr = {"verified": False, "amount": gclass.get("amount"),
                        "receiver_acc": gclass.get("receiver_account"), "receiver_bank": gclass.get("bank"),
                        "ref": gclass.get("ref"), "date": gclass.get("date"),
-                       "source": "gemini", "confidence": gclass.get("confidence")}
+                       "source": "gemini", "confidence": gclass.get("confidence"),
+                       "easyslip_error": easyslip_err}
 
         status, matched, auto_note, dup_ref = "new", None, None, None
         amount = ocr.get("amount") if ocr else None
@@ -854,7 +862,8 @@ async def _handle_slips(img_events: list):
                     status, auto_note = "review", f"ยอดไม่ตรง: โอน {amount} / ราคา {acc['price']} ({acc['course']})"
         elif status != "rejected" and ocr and ocr.get("source") == "gemini":
             conf_pct = round((ocr.get("confidence") or 0) * 100)
-            status, auto_note = "review", f"🤖 Gemini เดาว่าอาจเป็นสลิป (มั่นใจ {conf_pct}%) — ยังไม่ตรวจยอด/ธนาคารจริง รบกวนแอดมินเช็คเอง"
+            extra = f" (EasySlip: {ocr.get('easyslip_error')})" if ocr.get("easyslip_error") else ""
+            status, auto_note = "review", f"🤖 Gemini เดาว่าอาจเป็นสลิป (มั่นใจ {conf_pct}%){extra} — ยังไม่ตรวจยอด/ธนาคารจริง รบกวนแอดมินเช็คเอง"
         elif status != "rejected" and ocr and not ocr.get("verified"):
             status, auto_note = "review", f"ตรวจสลิปไม่ผ่าน: {ocr.get('error')}"
         elif status != "rejected" and EASYSLIP_TOKEN:
