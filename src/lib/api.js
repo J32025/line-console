@@ -36,6 +36,7 @@ export const api = {
   search: (q) => req('GET', '/search?q=' + encodeURIComponent(q)),
   dashboard: (range = 30) => req('GET', `/dashboard?range=${range}`),
   dashboardAnalytics: (range = 30) => req('GET', `/dashboard/analytics?range=${range}`),
+  behaviorAnalytics: (days = 30) => req('GET', `/analytics/behavior?days=${days}`),
 
   richmenus: () => req('GET', '/richmenus'),
   richmenuUsage: () => req('GET', '/richmenu/usage'),

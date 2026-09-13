@@ -3053,6 +3053,151 @@ async def pipeline(admin=Depends(current_admin)):
             "unstaged": counts["_none"]}
 
 
+def _parse_ts(s):
+    try:
+        return dt.datetime.fromisoformat(s) if s else None
+    except Exception:
+        return None
+
+
+@app.get("/api/analytics/behavior")
+async def analytics_behavior(admin=Depends(current_admin), days: int = 30):
+    """วิเคราะห์พฤติกรรม follow/unfollow โดยละเอียด — ใครหลุด เมื่อไหร่ อยู่เมนูไหน แท็ก/สถานะอะไร
+    เกี่ยวกับ broadcast ล่าสุดไหม และข้อความสุดท้ายก่อนเลิกติดตามคืออะไร"""
+    days = max(7, min(days, 180))
+    since = _iso_ago(days=days)
+
+    fh = await supa.select_all("follow_history", params={
+        "select": "line_user_id,action,is_unblocked,event_ts",
+        "event_ts": f"gte.{since}", "order": "event_ts.asc"})
+
+    # ---- 1) เทรนด์รายวัน ----
+    daily: dict[str, dict] = {}
+    for r in fh:
+        k = (r.get("event_ts") or "")[:10]
+        if not k:
+            continue
+        d = daily.setdefault(k, {"day": k, "follow": 0, "unfollow": 0, "unblock": 0})
+        if r["action"] == "follow":
+            d["follow"] += 1
+            if r.get("is_unblocked"):
+                d["unblock"] += 1
+        elif r["action"] == "unfollow":
+            d["unfollow"] += 1
+    trend = sorted(daily.values(), key=lambda x: x["day"])
+
+    unfollow_events = [r for r in fh if r["action"] == "unfollow" and r.get("line_user_id")]
+    unfollow_uids = list({r["line_user_id"] for r in unfollow_events})
+
+    # ---- 2) ข้อมูลผู้ใช้ที่เลิกติดตาม (เมนู/แท็ก/สถานะ/แหล่งที่มา/วันที่เริ่มติดตาม) ----
+    users_by_uid: dict[str, dict] = {}
+    for i in range(0, len(unfollow_uids), 80):
+        chunk = unfollow_uids[i:i + 80]
+        try:
+            for u in await supa.select("line_users", params={
+                    "select": "line_user_id,tags,stage,source,first_followed_at,followed_at,"
+                              "rich_menu_name,current_rich_menu_id,follow_count,block_count",
+                    "line_user_id": f"in.({','.join(chunk)})", "limit": "80"}):
+                users_by_uid[u["line_user_id"]] = u
+        except Exception as e:
+            print("behavior analytics user chunk error:", e)
+
+    from collections import Counter
+    time_buckets = Counter()
+    menu_ct: Counter = Counter()
+    tag_ct: Counter = Counter()
+    stage_ct: Counter = Counter()
+    source_ct: Counter = Counter()
+    repeat_unfollowers = 0
+
+    for ev in unfollow_events:
+        u = users_by_uid.get(ev["line_user_id"], {})
+        ff = _parse_ts(u.get("first_followed_at") or u.get("followed_at"))
+        et = _parse_ts(ev.get("event_ts"))
+        if ff and et:
+            delta = (et - ff).total_seconds()
+            if delta < 3600:
+                time_buckets["ภายใน 1 ชม. หลังเพิ่มเพื่อน"] += 1
+            elif delta < 86400:
+                time_buckets["ภายใน 1 วัน"] += 1
+            elif delta < 7 * 86400:
+                time_buckets["ภายใน 1 สัปดาห์"] += 1
+            elif delta < 30 * 86400:
+                time_buckets["ภายใน 1 เดือน"] += 1
+            else:
+                time_buckets["นานกว่า 1 เดือน"] += 1
+        menu_ct[u.get("rich_menu_name") or "(ไม่มีเมนู)"] += 1
+        stage_ct[_STAGE_LABEL.get(u.get("stage"), u.get("stage") or "(ไม่มีสถานะ)")] += 1
+        source_ct[u.get("source") or "(ไม่ทราบ)"] += 1
+        tags = u.get("tags") or []
+        if not tags:
+            tag_ct["(ไม่มีแท็ก)"] += 1
+        for tg in tags:
+            tag_ct[tg] += 1
+        if (u.get("block_count") or 0) > 1:
+            repeat_unfollowers += 1
+
+    # ---- 3) ตัวอย่างล่าสุด: ข้อความก่อนเลิกติดตาม ----
+    samples = []
+    for ev in sorted(unfollow_events, key=lambda x: x.get("event_ts") or "", reverse=True)[:20]:
+        uid = ev["line_user_id"]
+        u = users_by_uid.get(uid, {})
+        try:
+            msgs = await supa.select("messages", params={
+                "select": "direction,text,msg_type,created_at", "line_user_id": f"eq.{uid}",
+                "order": "created_at.desc", "limit": "3"})
+        except Exception:
+            msgs = []
+        samples.append({
+            "line_user_id": uid, "unfollowed_at": ev.get("event_ts"),
+            "tags": u.get("tags") or [], "stage": u.get("stage"),
+            "rich_menu": u.get("rich_menu_name"),
+            "last_messages": [{"dir": m["direction"], "text": (m.get("text") or f"[{m.get('msg_type')}]")[:150],
+                               "at": m["created_at"]} for m in reversed(msgs)],
+        })
+
+    # ---- 4) เทียบกับ broadcast ที่เพิ่งส่งไป — เลิกติดตามภายใน 72 ชม. หลังส่งกี่คน ----
+    broadcast_impact = []
+    try:
+        bcs = await supa.select("broadcasts", params={
+            "select": "id,kind,created_at,target_count", "created_at": f"gte.{since}",
+            "order": "created_at.desc", "limit": "30"})
+        for bc in bcs:
+            bt = _parse_ts(bc.get("created_at"))
+            if not bt:
+                continue
+            window_end = bt + dt.timedelta(hours=72)
+            cnt = sum(1 for ev in unfollow_events
+                     if (et := _parse_ts(ev.get("event_ts"))) and bt <= et <= window_end)
+            if cnt:
+                broadcast_impact.append({
+                    "broadcast_id": bc["id"], "kind": bc.get("kind"), "sent_at": bc["created_at"],
+                    "target_count": bc.get("target_count"), "unfollowed_within_72h": cnt,
+                    "pct": round(cnt / bc["target_count"] * 100, 1) if bc.get("target_count") else None,
+                })
+        broadcast_impact.sort(key=lambda x: -x["unfollowed_within_72h"])
+    except Exception as e:
+        print("behavior analytics broadcast error:", e)
+
+    total_follow = sum(d["follow"] for d in trend)
+    total_unfollow = sum(d["unfollow"] for d in trend)
+    return {
+        "days": days,
+        "trend": trend,
+        "totals": {"follow": total_follow, "unfollow": total_unfollow,
+                   "net": total_follow - total_unfollow,
+                   "churn_rate_pct": round(total_unfollow / total_follow * 100, 1) if total_follow else None,
+                   "repeat_unfollowers": repeat_unfollowers},
+        "time_to_unfollow": [{"bucket": k, "count": v} for k, v in time_buckets.items()],
+        "by_rich_menu": sorted([{"menu": k, "count": v} for k, v in menu_ct.items()], key=lambda x: -x["count"])[:10],
+        "by_tag": sorted([{"tag": k, "count": v} for k, v in tag_ct.items()], key=lambda x: -x["count"])[:15],
+        "by_stage": sorted([{"stage": k, "count": v} for k, v in stage_ct.items()], key=lambda x: -x["count"]),
+        "by_source": sorted([{"source": k, "count": v} for k, v in source_ct.items()], key=lambda x: -x["count"]),
+        "broadcast_impact": broadcast_impact[:10],
+        "recent_samples": samples,
+    }
+
+
 @app.get("/api/users/{uid}/timeline")
 async def user_timeline(uid: str, admin=Depends(current_admin)):
     """รวมทุกกิจกรรมของลูกค้าคนนี้ เรียงตามเวลา"""
