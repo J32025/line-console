@@ -2848,30 +2848,79 @@ async def sync_followers(admin=Depends(current_admin)):
 # ============================================================
 @app.get("/api/inbox")
 async def inbox_list(admin=Depends(current_admin), limit: int = 40, offset: int = 0,
-                     filter: str = "all"):
+                     filter: str = "all", q: str = "", tag: str = "", stage: str = "",
+                     menu: str = "", assigned: str = "", following: str = "",
+                     consent: str = "", sort: str = "recent"):
+    base = {"last_message_at": "not.is.null"}
+
+    # ---- quick preset (แถบปุ่มด้านบน) ----
+    if filter == "unread":
+        base["unread"] = "gt.0"
+    elif filter == "mine":
+        base["assigned_to"] = f"eq.{admin['userId']}"
+    elif filter == "paused":
+        base["auto_reply_paused"] = "eq.true"
+    elif filter == "unfollowed":
+        base["is_following"] = "eq.false"
+
+    # ---- ตัวกรองละเอียด (override preset ได้ถ้าระบุ) ----
+    if q.strip():
+        like = f"*{q.strip()}*"
+        base["or"] = f"(display_name.ilike.{like},line_user_id.ilike.{like},note.ilike.{like})"
+    if tag.strip():
+        base["tags"] = "cs.{" + tag.strip() + "}"
+    if stage:
+        base["stage"] = "is.null" if stage == "none" else f"eq.{stage}"
+    if menu:
+        base["current_rich_menu_id"] = "is.null" if menu == "none" else f"eq.{menu}"
+    if assigned:
+        base["assigned_to"] = "is.null" if assigned == "none" else f"eq.{assigned}"
+    if following in ("true", "false"):
+        base["is_following"] = f"eq.{following}"
+    if consent in ("true", "false"):
+        base["consent"] = f"eq.{consent}"
+    elif consent == "unknown":
+        base["consent"] = "is.null"
+
+    order = {"recent": "last_message_at.desc.nullslast",
+             "oldest": "last_message_at.asc.nullslast",
+             "unread_first": "unread.desc,last_message_at.desc.nullslast"}.get(sort, "last_message_at.desc.nullslast")
     params = {
         "select": "line_user_id,display_name,picture_url,last_message_at,last_message_text,"
-                  "unread,auto_reply_paused,assigned_to,is_following",
-        "order": "last_message_at.desc.nullslast",
-        "limit": str(min(limit, 100)), "offset": str(offset),
-        "last_message_at": "not.is.null",
+                  "unread,auto_reply_paused,assigned_to,is_following,tags,stage,"
+                  "current_rich_menu_id,rich_menu_name,consent",
+        "order": order, "limit": str(min(limit, 100)), "offset": str(offset),
+        **base,
     }
-    if filter == "unread":
-        params["unread"] = "gt.0"
-    elif filter == "mine":
-        params["assigned_to"] = f"eq.{admin['userId']}"
-    elif filter == "paused":
-        params["auto_reply_paused"] = "eq.true"
     rows = await supa.select("line_users", params=params)
+
     total_unread = await supa.count("line_users", {"unread": "gt.0"})
-    return {"conversations": rows, "total_unread": total_unread}
+    counts = await _gather_dict(
+        all=supa.count("line_users", {"last_message_at": "not.is.null"}),
+        unread=supa.count("line_users", {"last_message_at": "not.is.null", "unread": "gt.0"}),
+        mine=supa.count("line_users", {"last_message_at": "not.is.null", "assigned_to": f"eq.{admin['userId']}"}),
+        paused=supa.count("line_users", {"last_message_at": "not.is.null", "auto_reply_paused": "eq.true"}),
+        unfollowed=supa.count("line_users", {"last_message_at": "not.is.null", "is_following": "eq.false"}),
+    )
+    return {"conversations": rows, "total_unread": total_unread,
+            "counts": {k: (v or 0) for k, v in counts.items()}}
+
+
+@app.get("/api/inbox/meta/tags")
+async def inbox_tag_list(admin=Depends(current_admin)):
+    """แท็กทั้งหมดที่มีคนใช้อยู่ (ไว้ทำ autocomplete ในตัวกรอง)"""
+    rows = await supa.select_all("line_users", params={
+        "select": "tags", "tags": "neq.{}", "last_message_at": "not.is.null"})
+    tags = sorted({t for r in rows for t in (r.get("tags") or [])})
+    return {"tags": tags}
 
 
 @app.get("/api/inbox/{uid}")
 async def inbox_thread(uid: str, admin=Depends(current_admin), before: str = "", limit: int = 50):
     urows = await supa.select("line_users", params={
         "select": "line_user_id,display_name,picture_url,status_message,is_following,"
-                  "auto_reply_paused,assigned_to,current_rich_menu_id,rich_menu_name,tags,note,unread",
+                  "auto_reply_paused,assigned_to,current_rich_menu_id,rich_menu_name,tags,note,unread,"
+                  "stage,consent",
         "line_user_id": f"eq.{uid}", "limit": "1"})
     if not urows:
         raise HTTPException(404, "ไม่พบผู้ใช้")

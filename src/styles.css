@@ -253,9 +253,13 @@ pre { background: #0e1a2b; color: #c7d0dc; padding: 12px; border-radius: 9px; ov
 .conv-top { display: flex; justify-content: space-between; gap: 6px; align-items: baseline; }
 .conv-last { font-size: .78rem; color: var(--muted); }
 .conv-badge { background: var(--danger); color: #fff; border-radius: 99px; font-size: .68rem; font-weight: 700; min-width: 18px; height: 18px; display: flex; align-items: center; justify-content: center; padding: 0 5px; }
+.conv-unfollowed { opacity: .6; }
+.inbox-filters { display: grid; grid-template-columns: 1fr; gap: 6px; padding: 8px; margin-bottom: 8px; background: var(--panel); border-radius: 9px; }
+.inbox-filters select, .inbox-filters input { width: 100%; }
 
 .inbox-thread { display: flex; flex-direction: column; height: 100%; padding: 0; overflow: hidden; }
-.thread-head { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--border); }
+.thread-head { display: flex; align-items: center; gap: 8px; padding: 12px 14px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.thread-head select { max-width: 130px; }
 .thread-head img { width: 38px; height: 38px; border-radius: 50%; object-fit: cover; }
 .thread-body { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 8px; background: var(--panel-2); }
 .tmsg { display: flex; }

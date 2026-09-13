@@ -11,6 +11,11 @@ __pycache__
 
 .vercel
 
+# scratch files from manual curl/testing (never commit)
+health*.json
+reg.html
+reg2.html
+
 # personal data files (never commit)
 ลงทะเบียนแล้ว.txt
 *_userids*.txt

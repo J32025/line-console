@@ -168,8 +168,10 @@ export const api = {
   resolveTarget: (payload) => req('POST', '/target/resolve', payload),
 
   inbox: (qs = {}) => req('GET', '/inbox?' + new URLSearchParams(qs)),
+  inboxTags: () => req('GET', '/inbox/meta/tags'),
   thread: (uid, qs = {}) => req('GET', `/inbox/${uid}?` + new URLSearchParams(qs)),
   threadRead: (uid) => req('POST', `/inbox/${uid}/read`),
   threadPause: (uid, paused) => req('POST', `/inbox/${uid}/pause`, { paused }),
+  threadAssign: (uid, to) => req('POST', `/inbox/${uid}/assign`, { to }),
   threadSend: (uid, messages) => req('POST', `/inbox/${uid}/send`, { messages }),
 }
