@@ -34,7 +34,7 @@ export default function Admins({ me }) {
       setRegMenuMap(d.settings.reg_richmenu_map || {})
     }).catch(() => {})
     api.payAccounts().then((d) => setAccts(d.accounts)).catch(() => {})
-    api.richmenus().then((d) => setMenuList(d.menus || [])).catch(() => {})
+    api.richmenuUsage().then((d) => setMenuList((d.items || []).filter((m) => m.richMenuId))).catch(() => {})
   }
   const addAcct = async () => {
     try {
@@ -197,7 +197,11 @@ export default function Admins({ me }) {
             <select style={{ flex: 1 }} value={regMenuMap[c] || ''}
                     onChange={(e) => setRegMenuMap({ ...regMenuMap, [c]: e.target.value })}>
               <option value="">— ไม่สลับ —</option>
-              {menuList.map((m) => <option key={m.richMenuId} value={m.richMenuId}>{m.name}</option>)}
+              {menuList.map((m) => (
+                <option key={m.richMenuId} value={m.richMenuId}>
+                  {m.name} ({m.count.toLocaleString()} คน) — {m.richMenuId}
+                </option>
+              ))}
             </select>
           </div>
         ))}
