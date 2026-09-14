@@ -16,6 +16,8 @@ export default function Admins({ me }) {
   const [gctx, setGctx] = useState('')
   const [regNext, setRegNext] = useState('')
   const [regCourses, setRegCourses] = useState('')
+  const [regMenuMap, setRegMenuMap] = useState({})
+  const [menuList, setMenuList] = useState([])
   const [accts, setAccts] = useState([])
   const [na, setNa] = useState({ course: '', bank: '', account_no: '', account_name: '', price: '', full_price: '' })
   const [busy, setBusy] = useState('')
@@ -29,8 +31,10 @@ export default function Admins({ me }) {
       setSettings(d.settings); setGctx(d.settings.gemini_context || '')
       setRegNext(d.settings.reg_next_url || '')
       setRegCourses(Array.isArray(d.settings.reg_courses) ? d.settings.reg_courses.join(', ') : (d.settings.reg_courses || ''))
+      setRegMenuMap(d.settings.reg_richmenu_map || {})
     }).catch(() => {})
     api.payAccounts().then((d) => setAccts(d.accounts)).catch(() => {})
+    api.richmenus().then((d) => setMenuList(d.menus || [])).catch(() => {})
   }
   const addAcct = async () => {
     try {
@@ -184,6 +188,28 @@ export default function Admins({ me }) {
             t.ok('บันทึกแล้ว')
           } catch (e) { t.err(e.message) } finally { setBusy('') }
         }}>บันทึก</button>
+
+        <h4 className="sm" style={{ marginTop: 16 }}>สลับ Rich Menu อัตโนมัติหลังลงทะเบียนสำเร็จ</h4>
+        <p className="muted xs">เลือกเมนูที่จะสลับให้ตามหลักสูตรที่เลือกตอนลงทะเบียน — เว้นว่าง = ไม่สลับเมนูให้หลักสูตรนั้น</p>
+        {regCourses.split(',').map((s) => s.trim()).filter(Boolean).map((c) => (
+          <div key={c} className="row" style={{ gap: 8, alignItems: 'center', marginBottom: 6 }}>
+            <b style={{ width: 90 }}>{c}</b>
+            <select style={{ flex: 1 }} value={regMenuMap[c] || ''}
+                    onChange={(e) => setRegMenuMap({ ...regMenuMap, [c]: e.target.value })}>
+              <option value="">— ไม่สลับ —</option>
+              {menuList.map((m) => <option key={m.richMenuId} value={m.richMenuId}>{m.name}</option>)}
+            </select>
+          </div>
+        ))}
+        {!regCourses.trim() && <p className="muted xs">ใส่รายชื่อหลักสูตรด้านบนก่อน แล้วกดบันทึก จะมาตั้งเมนูตรงนี้ต่อได้</p>}
+        <button className="primary sm" disabled={busy === 'regmenu'} onClick={async () => {
+          setBusy('regmenu')
+          try {
+            const clean = Object.fromEntries(Object.entries(regMenuMap).filter(([, v]) => v))
+            await api.setSetting('reg_richmenu_map', clean)
+            t.ok('บันทึกแล้ว')
+          } catch (e) { t.err(e.message) } finally { setBusy('') }
+        }}>บันทึกการสลับเมนู</button>
       </section>
 
       <section className="card">
