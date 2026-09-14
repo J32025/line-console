@@ -2846,11 +2846,67 @@ async def sync_followers(admin=Depends(current_admin)):
 # ============================================================
 # INBOX (แชต + human takeover)
 # ============================================================
+_INBOX_SELECT = ("line_user_id,display_name,picture_url,last_message_at,last_message_text,"
+                 "unread,auto_reply_paused,assigned_to,is_following,tags,stage,"
+                 "current_rich_menu_id,rich_menu_name,consent")
+
+
+async def _inbox_slip_counts() -> dict[str, int]:
+    """นับสลิปค้างตรวจ (new/review) ต่อ userId — ใช้ทั้งจัดลำดับคิวและ badge บนแถวแชท"""
+    rows = await supa.select_all("slips", params={
+        "select": "line_user_id", "status": "in.(new,review)"})
+    counts: dict[str, int] = {}
+    for r in rows:
+        uid = r.get("line_user_id")
+        if uid:
+            counts[uid] = counts.get(uid, 0) + 1
+    return counts
+
+
 @app.get("/api/inbox")
 async def inbox_list(admin=Depends(current_admin), limit: int = 40, offset: int = 0,
                      filter: str = "all", q: str = "", tag: str = "", stage: str = "",
                      menu: str = "", assigned: str = "", following: str = "",
                      consent: str = "", sort: str = "recent"):
+    slip_counts = await _inbox_slip_counts()  # uid -> จำนวนสลิปค้างตรวจ (ใช้ทั้ง badge และคิวสลิป)
+
+    # ---- preset พิเศษ: คิวสลิปรอตรวจ — เรียงตามสลิปล่าสุดก่อน ไม่ใช่ข้อความล่าสุด ----
+    if filter == "slips":
+        try:
+            slip_rows = await supa.select_all("slips", params={
+                "select": "line_user_id,created_at", "status": "in.(new,review)",
+                "order": "created_at.desc"})
+        except Exception:
+            slip_rows = []
+        seen, slip_uids = set(), []
+        for r in slip_rows:
+            uid = r.get("line_user_id")
+            if uid and uid not in seen:
+                seen.add(uid); slip_uids.append(uid)
+        page_uids = slip_uids[offset:offset + limit]
+        rows = []
+        if page_uids:
+            by_uid: dict[str, dict] = {}
+            for i in range(0, len(page_uids), 80):
+                chunk = page_uids[i:i + 80]
+                for u in await supa.select("line_users", params={
+                        "select": _INBOX_SELECT, "line_user_id": f"in.({','.join(chunk)})", "limit": "80"}):
+                    by_uid[u["line_user_id"]] = u
+            rows = [by_uid[u] for u in page_uids if u in by_uid]
+        for r in rows:
+            r["slip_pending"] = slip_counts.get(r["line_user_id"], 0)
+        total_unread = await supa.count("line_users", {"unread": "gt.0"})
+        counts = await _gather_dict(
+            all=supa.count("line_users", {"last_message_at": "not.is.null"}),
+            unread=supa.count("line_users", {"last_message_at": "not.is.null", "unread": "gt.0"}),
+            mine=supa.count("line_users", {"last_message_at": "not.is.null", "assigned_to": f"eq.{admin['userId']}"}),
+            paused=supa.count("line_users", {"last_message_at": "not.is.null", "auto_reply_paused": "eq.true"}),
+            unfollowed=supa.count("line_users", {"last_message_at": "not.is.null", "is_following": "eq.false"}),
+        )
+        counts = {k: (v or 0) for k, v in counts.items()}
+        counts["slips"] = len(slip_uids)
+        return {"conversations": rows, "total_unread": total_unread, "counts": counts}
+
     base = {"last_message_at": "not.is.null"}
 
     # ---- quick preset (แถบปุ่มด้านบน) ----
@@ -2886,13 +2942,13 @@ async def inbox_list(admin=Depends(current_admin), limit: int = 40, offset: int 
              "oldest": "last_message_at.asc.nullslast",
              "unread_first": "unread.desc,last_message_at.desc.nullslast"}.get(sort, "last_message_at.desc.nullslast")
     params = {
-        "select": "line_user_id,display_name,picture_url,last_message_at,last_message_text,"
-                  "unread,auto_reply_paused,assigned_to,is_following,tags,stage,"
-                  "current_rich_menu_id,rich_menu_name,consent",
+        "select": _INBOX_SELECT,
         "order": order, "limit": str(min(limit, 100)), "offset": str(offset),
         **base,
     }
     rows = await supa.select("line_users", params=params)
+    for r in rows:
+        r["slip_pending"] = slip_counts.get(r["line_user_id"], 0)
 
     total_unread = await supa.count("line_users", {"unread": "gt.0"})
     counts = await _gather_dict(
@@ -2902,8 +2958,9 @@ async def inbox_list(admin=Depends(current_admin), limit: int = 40, offset: int 
         paused=supa.count("line_users", {"last_message_at": "not.is.null", "auto_reply_paused": "eq.true"}),
         unfollowed=supa.count("line_users", {"last_message_at": "not.is.null", "is_following": "eq.false"}),
     )
-    return {"conversations": rows, "total_unread": total_unread,
-            "counts": {k: (v or 0) for k, v in counts.items()}}
+    counts = {k: (v or 0) for k, v in counts.items()}
+    counts["slips"] = len(slip_counts)
+    return {"conversations": rows, "total_unread": total_unread, "counts": counts}
 
 
 @app.get("/api/inbox/meta/tags")

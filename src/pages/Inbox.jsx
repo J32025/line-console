@@ -4,6 +4,7 @@ import { useToast, InlineSpinner, SkeletonRows } from '../lib/ui.jsx'
 import MessagePreview from '../components/MessagePreview.jsx'
 
 const PRESETS = [
+  ['slips', '🧾 ส่งสลิป'],
   ['all', 'ทั้งหมด'],
   ['unread', 'ยังไม่อ่าน'],
   ['mine', 'ของฉัน'],
@@ -216,6 +217,7 @@ export default function Inbox() {
                       <span className="muted xs">{fmtShort(c.last_message_at)}</span>
                     </div>
                     <div className="conv-last ellipsis">
+                      {c.slip_pending > 0 && <span className="chip partial" style={{ marginRight: 4 }} title="มีสลิปรอตรวจ">🧾 รอตรวจ{c.slip_pending > 1 ? ` x${c.slip_pending}` : ''}</span>}
                       {c.auto_reply_paused && <span className="chip" style={{ marginRight: 4 }}>คุยเอง</span>}
                       {!c.is_following && <span className="chip failed" style={{ marginRight: 4 }}>เลิกติดตาม</span>}
                       {c.last_message_text}
