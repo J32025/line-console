@@ -5518,10 +5518,18 @@ async def reconcile_mark_paid(req: Request, admin=Depends(current_admin)):
     return {"ok": True, "marked": len(ids)}
 
 
+_REG_PRICES_DEFAULT = {"FC": 1499, "IC": 1999, "PC": 999}
+
+
+def _course_base(course: str) -> str:
+    """ตัดตัวเลข/รุ่นออก เหลือแค่รหัสหลักสูตรฐาน — FC70->FC, PC70-2->PC, VIP->VIP"""
+    m = re.match(r"[A-Za-zก-๙]+", course or "")
+    return (m.group(0).upper() if m else (course or "?"))
+
+
 @app.get("/api/registrations/summary")
 async def registrations_summary(admin=Depends(current_admin)):
     rows = await supa.select_all("registrations", params={"select": "course,paid,approved,line_user_id"})
-    from collections import Counter
     courses: dict[str, dict] = {}
     for r in rows:
         c = r.get("course") or "?"
@@ -5531,11 +5539,40 @@ async def registrations_summary(admin=Depends(current_admin)):
             d["paid"] += 1
         else:
             d["unpaid"] += 1
+
+    # ---- สรุปรายได้ตามหลักสูตรฐาน (FC/IC/PC ฯลฯ) — ราคาปรับได้ผ่าน setting reg_course_prices ----
+    prices = await _get_setting("reg_course_prices", None) or _REG_PRICES_DEFAULT
+    base_paid: dict[str, int] = {}
+    for r in rows:
+        if not r.get("paid"):
+            continue
+        base = _course_base(r.get("course") or "?")
+        base_paid[base] = base_paid.get(base, 0) + 1
+
+    rev_by_course, other = [], []
+    total_revenue = 0
+    for base, cnt in sorted(base_paid.items(), key=lambda x: -x[1]):
+        if base in prices:
+            price = prices[base]
+            revenue = cnt * price
+            total_revenue += revenue
+            rev_by_course.append({"course": base, "paid": cnt, "price": price, "revenue": revenue})
+        else:
+            other.append({"course": base, "paid": cnt})
+
     return {
         "total": len(rows),
         "paid": sum(1 for r in rows if r.get("paid")),
         "people": len({r["line_user_id"] for r in rows if r.get("line_user_id")}),
         "by_course": sorted(courses.values(), key=lambda x: -x["count"]),
+        "revenue": {
+            "prices": prices,
+            "by_course": rev_by_course,
+            "total_revenue": total_revenue,
+            "total_paid_counted": sum(c["paid"] for c in rev_by_course),
+            "other": other,
+            "other_paid": sum(o["paid"] for o in other),
+        },
     }
 
 

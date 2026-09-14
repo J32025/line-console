@@ -1,9 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api } from '../lib/api.js'
 import { Spinner, InlineSpinner, Stat, useToast } from '../lib/ui.jsx'
-
-const nf = (n) => (n == null ? '–' : Number(n).toLocaleString('th-TH'))
-const baht = (n) => (n == null ? '–' : '฿' + Number(n).toLocaleString('th-TH'))
+import { nf, baht, Card, BarList } from '../components/Charts.jsx'
 
 export default function Registrations() {
   const t = useToast()
@@ -18,6 +16,7 @@ export default function Registrations() {
   const [detail, setDetail] = useState(null)
   const [view, setView] = useState('list')   // list | reconcile
   const [rec, setRec] = useState(null)
+  const [editPrices, setEditPrices] = useState(null) // {FC:1499, IC:1999, PC:999, ...} ระหว่างแก้
   const LIMIT = 100
 
   const loadSum = () => api.registrationsSummary().then(setSum).catch((e) => t.err(e.message))
@@ -59,6 +58,14 @@ export default function Registrations() {
       loadSum()
     } catch (e) { t.err(e.message) }
   }
+  const savePrices = async () => {
+    setBusy('prices')
+    try {
+      const clean = Object.fromEntries(Object.entries(editPrices).map(([k, v]) => [k, Number(v) || 0]))
+      await api.setSetting('reg_course_prices', clean)
+      t.ok('บันทึกราคาแล้ว'); setEditPrices(null); loadSum()
+    } catch (e) { t.err(e.message) } finally { setBusy('') }
+  }
 
   return (
     <div>
@@ -90,6 +97,28 @@ export default function Registrations() {
               <Stat key={c.course} label={c.course} value={nf(c.count)} sub={`จ่าย ${nf(c.paid)} · ค้าง ${nf(c.unpaid)}`} />
             ))}
           </div>
+
+          {sum.revenue && (
+            <Card title="💰 สรุปรายได้ (นับเฉพาะจ่ายแล้ว)"
+                  sub="จำนวนคนที่จ่ายแล้ว × ราคาต่อหลักสูตร — ไม่รวมหลักสูตรที่ยังไม่ตั้งราคา"
+                  right={<button className="xs" onClick={() => setEditPrices({ ...sum.revenue.prices })}>✎ แก้ราคา</button>}>
+              <div className="grid stats">
+                <Stat label="รายได้รวม" value={baht(sum.revenue.total_revenue)}
+                      sub={`${nf(sum.revenue.total_paid_counted)} คน`} />
+                {sum.revenue.by_course.map((c) => (
+                  <Stat key={c.course} label={c.course} value={baht(c.revenue)}
+                        sub={`${nf(c.paid)} คน × ${baht(c.price)}`} />
+                ))}
+              </div>
+              <BarList rows={sum.revenue.by_course} labelKey="course" valueKey="revenue" fmt={baht} />
+              {sum.revenue.other.length > 0 && (
+                <p className="muted xs" style={{ marginTop: 8 }}>
+                  ไม่นับรวมในยอดข้างบน (ยังไม่ตั้งราคา): {sum.revenue.other.map((o) => `${o.course} (จ่ายแล้ว ${o.paid} คน)`).join(', ')}
+                  {' '}<button className="xs" onClick={() => setEditPrices({ ...sum.revenue.prices, ...Object.fromEntries(sum.revenue.other.map((o) => [o.course, 0])) })}>+ ตั้งราคาให้</button>
+                </p>
+              )}
+            </Card>
+          )}
 
           <section className="card">
             <div className="row wrap" style={{ gap: 6, alignItems: 'center' }}>
@@ -161,6 +190,26 @@ export default function Registrations() {
                       placeholder="TIMESTAMP<tab>REGID<tab>UID<tab>NAME ..." style={{ fontFamily: 'monospace', fontSize: 11 }} />
             <button className="primary" disabled={busy === 'import' || !imp.text.trim()} onClick={doImport}>
               {busy === 'import' && <InlineSpinner />}นำเข้า
+            </button>
+          </div>
+        </div>
+      )}
+
+      {editPrices && (
+        <div className="modal-bg" onClick={() => setEditPrices(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="row spread"><h3>ตั้งราคาต่อหลักสูตร</h3><button className="xs" onClick={() => setEditPrices(null)}>✕</button></div>
+            <p className="muted xs">ใช้คำนวณ "สรุปรายได้" จากจำนวนคนที่จ่ายแล้ว (นับตามรหัสหลักสูตรฐาน เช่น PC70-1/PC70-2 รวมเป็น PC)</p>
+            {Object.keys(editPrices).map((k) => (
+              <label key={k} className="row" style={{ gap: 8, alignItems: 'center', marginBottom: 6 }}>
+                <b style={{ width: 60 }}>{k}</b>
+                <input type="number" value={editPrices[k]} style={{ flex: 1 }}
+                       onChange={(e) => setEditPrices({ ...editPrices, [k]: e.target.value })} />
+                <span className="muted xs">บาท</span>
+              </label>
+            ))}
+            <button className="primary" disabled={busy === 'prices'} onClick={savePrices}>
+              {busy === 'prices' && <InlineSpinner />}บันทึก
             </button>
           </div>
         </div>
