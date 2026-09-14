@@ -4938,7 +4938,8 @@ async def public_reg_check(req: Request):
 
 @app.post("/api/public/reg-submit")
 async def public_reg_submit(req: Request):
-    """หน้าลงทะเบียนสมาชิกส่งฟอร์ม -> upsert registration + tag user + แจ้งแอดมิน"""
+    """หน้าลงทะเบียนสมาชิกส่งฟอร์ม -> upsert registration + อัปโหลดรูป (ถ้ามี) + สลับ rich menu
+    ตามคอร์ส (ถ้าตั้ง setting reg_richmenu_map ไว้) + tag user + แจ้งแอดมิน"""
     b = await req.json()
     u = await _verify_member_token(b.get("idToken"))
     if not u:
@@ -4950,9 +4951,30 @@ async def public_reg_submit(req: Request):
     if not name or not tel or not course:
         raise HTTPException(400, "กรอก ชื่อ-นามสกุล / เบอร์โทร / หลักสูตร ให้ครบ")
     _rate_limit(f"reg:{u['userId']}", limit=6, window=300)
+
+    # อัปโหลดรูป (ถ้าแนบมา) — เก็บลง Storage แทนการฝาก base64 ไว้ในแถวข้อมูล
+    photo_url = None
+    if b.get("photoBase64"):
+        try:
+            raw = base64.b64decode(b["photoBase64"])
+            if len(raw) > 8 * 1024 * 1024:
+                raise HTTPException(400, "ไฟล์รูปใหญ่เกิน 8MB")
+            mime = b.get("photoMime") or "image/jpeg"
+            ext = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}.get(mime, "jpg")
+            path = f"registrations/{u['userId']}-{int(time.time())}.{ext}"
+            photo_url = await supa.storage_upload("media", path, raw, mime)
+        except HTTPException:
+            raise
+        except Exception as e:
+            print("reg-submit photo upload error:", e)
+
     row = {"line_user_id": u["userId"], "course": course, "course_raw": course_raw,
            "name": name, "tel": tel, "org": (b.get("org") or "").strip() or None,
-           "email": (b.get("email") or "").strip() or None, "source": "liff", "updated_at": NOW()}
+           "email": (b.get("email") or "").strip() or None,
+           "passed": (b.get("examOrder") or "").strip() or None,
+           "source": "liff", "updated_at": NOW()}
+    if photo_url:
+        row["slip_url"] = photo_url
     await supa.upsert("registrations", row, on_conflict="line_user_id,course")
     try:
         ex = await supa.select("line_users", params={
@@ -4967,6 +4989,16 @@ async def public_reg_submit(req: Request):
             await supa.upsert("line_users", [patch], on_conflict="line_user_id")
     except Exception as e:
         print("reg-submit tag error:", e)
+
+    # สลับ rich menu ตามคอร์ส (ถ้าตั้ง mapping ไว้ใน Admins) — ปิดเงียบถ้าไม่ได้ตั้ง/ล้มเหลว
+    try:
+        rmap = await _get_setting("reg_richmenu_map", None) or {}
+        target_rid = rmap.get(course)
+        if target_rid:
+            await line.user_richmenu_link(u["userId"], target_rid)
+    except Exception as e:
+        print("reg-submit richmenu switch error:", e)
+
     await alert_admin("📝 ลงทะเบียนใหม่ (LIFF)",
                       f"{name}\nหลักสูตร {course} · {b.get('org') or '-'}\nโทร {tel}",
                       throttle_key=f"reg_{u['userId']}_{course}")
