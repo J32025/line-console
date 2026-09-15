@@ -14,6 +14,7 @@ export default function Admins({ me }) {
   const [nf, setNf] = useState({ key: '', label: '', type: 'text', options: '' })
   const [settings, setSettings] = useState({})
   const [gctx, setGctx] = useState('')
+  const [aiLimit, setAiLimit] = useState('')
   const [regNext, setRegNext] = useState('')
   const [regCourses, setRegCourses] = useState('')
   const [regMenuMap, setRegMenuMap] = useState({})
@@ -29,6 +30,7 @@ export default function Admins({ me }) {
     api.fields().then((d) => setFields(d.fields)).catch(() => {})
     api.settings().then((d) => {
       setSettings(d.settings); setGctx(d.settings.gemini_context || '')
+      setAiLimit(d.settings.ai_daily_limit ? String(d.settings.ai_daily_limit) : '')
       setRegNext(d.settings.reg_next_url || '')
       setRegCourses(Array.isArray(d.settings.reg_courses) ? d.settings.reg_courses.join(', ') : (d.settings.reg_courses || ''))
       setRegMenuMap(d.settings.reg_richmenu_map || {})
@@ -219,7 +221,7 @@ export default function Admins({ me }) {
       <section className="card">
         <h3>AI ผู้ช่วย — ข้อมูลให้ AI ใช้ตอบ</h3>
         <p className="muted xs">
-          AI (Claude) ตอบลูกค้าที่อยู่บนเมนูเปิด AI เฉพาะข้อความที่ไม่ตรงกฎไหน โดยใช้: ข้อความนี้ + ราคาคอร์ส/บัญชี + กฎตอบอัตโนมัติ (text/fallback) เป็นข้อมูล
+          AI ตอบลูกค้าที่อยู่บนเมนูเปิด AI เฉพาะข้อความที่ไม่ตรงกฎไหน โดยใช้: ข้อความนี้ + ราคาคอร์ส/บัญชี + กฎตอบอัตโนมัติ (text/fallback) เป็นข้อมูล
           <br />ใส่: ตารางติว · ช่องทางติดต่อ · นโยบายคืนเงิน/เลื่อนคอร์ส · FAQ ที่ยังไม่ได้ทำเป็นกฎ
         </p>
         <textarea rows={8} value={gctx} onChange={(e) => setGctx(e.target.value)}
@@ -230,6 +232,23 @@ export default function Admins({ me }) {
                   try { await api.setSetting('gemini_context', gctx); t.ok('บันทึกแล้ว (มีผลใน ~5 นาที)') }
                   catch (e) { t.err(e.message) } finally { setBusy('') }
                 }}>บันทึก</button>
+
+        <h4 className="sm" style={{ marginTop: 16 }}>โควต้า AI ต่อวัน</h4>
+        <p className="muted xs">
+          กันชนโควต้าฟรีของผู้ให้บริการ AI แบบไม่รู้ตัว — ถ้าตอบไปครบจำนวนนี้ในวันนั้น ระบบจะหยุดยิงเรียก AI เอง (ไม่ต้องรอ error)
+          แล้วตอบลูกค้าเป็น "รอแอดมิน" แทนทันที และแจ้งเตือนแอดมินตอนใกล้เต็ม (80%)
+        </p>
+        <div className="row" style={{ gap: 8, alignItems: 'center' }}>
+          <input type="number" min="0" style={{ width: 120 }} value={aiLimit}
+                 onChange={(e) => setAiLimit(e.target.value)} placeholder="0 = ไม่จำกัด" />
+          <span className="muted xs">ครั้ง/วัน (0 หรือเว้นว่าง = ไม่จำกัด)</span>
+        </div>
+        <button className="primary sm" style={{ marginTop: 8 }} disabled={busy === 'ailimit'}
+                onClick={async () => {
+                  setBusy('ailimit')
+                  try { await api.setSetting('ai_daily_limit', Number(aiLimit) || 0); t.ok('บันทึกแล้ว') }
+                  catch (e) { t.err(e.message) } finally { setBusy('') }
+                }}>บันทึกโควต้า</button>
       </section>
 
       <section className="card">

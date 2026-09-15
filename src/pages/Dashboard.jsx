@@ -174,6 +174,8 @@ function Summary({ d, a, nav }) {
               sub={`${nf(sys.quota_used)} / ${nf(sys.quota_limit)}`} />
         <Stat label="Error 24 ชม." value={nf(sys.errors_24h)} sub={sys.errors_24h ? '⚠ ตรวจสอบ' : 'ปกติ'} />
         <Stat label="AI ตอบ 7 วัน" value={nf(d.messages.gemini_7d)} />
+        <Stat label="AI ตอบวันนี้" value={nf(d.messages.gemini_today)}
+              sub={d.messages.ai_daily_limit ? `จากโควต้า ${nf(d.messages.ai_daily_limit)}/วัน` : 'ไม่จำกัดโควต้า'} />
       </div>
 
       <Card title="Quick actions">

@@ -1601,6 +1601,23 @@ async def _handle_gemini_replies(events: list) -> set:
     _gemini_escalations.clear()
     handled: set = set()
     out_msgs = []
+
+    # ---- โควต้า AI ต่อวัน (กันโดน 429 กลางบทสนทนา + เตือนแอดมินก่อนหมดจริง) ----
+    # ai_daily_limit ตั้งได้ในหน้าแอดมิน (0 = ไม่จำกัด) — นับจากข้อความที่ AI ตอบไปแล้ววันนี้ (by=gemini)
+    ai_limit = 0
+    ai_used_today = 0
+    try:
+        ai_limit = int(await _get_setting("ai_daily_limit", 0) or 0)
+        if ai_limit > 0:
+            today0 = dt.date.today().isoformat()
+            ai_used_today = await supa.count("messages", {"by": "eq.gemini", "created_at": f"gte.{today0}"})
+            if ai_used_today >= int(ai_limit * 0.8):
+                await alert_admin("⚠️ โควต้า AI ใกล้เต็ม",
+                                  f"ตอบไปแล้ว {ai_used_today}/{ai_limit} ครั้งวันนี้ — เกินขีดจะขึ้นข้อความ 'รอแอดมิน' แทน",
+                                  throttle_key=f"ai_quota_{today0}")
+    except Exception as e:
+        print("ai quota check error:", e)
+
     for e in text_events:
         uid = e["source"]["userId"]
         if uid in handled:
@@ -1655,12 +1672,18 @@ async def _handle_gemini_replies(events: list) -> set:
             except Exception:
                 pass
         full_ctx = (ctx + ("\n\n" + kb if kb else "")).strip()
-        answer = await _gemini_answer(question, menu_temp[rid], context=full_ctx,
-                                      history=history, uid=uid, user_facts=user_facts)
+        if ai_limit > 0 and ai_used_today >= ai_limit:
+            # ชนโควต้าที่ตั้งไว้เอง -> ไม่ยิง API เลย (กันรอ error 429 เปล่าๆ) ตกไปข้อความ "รอแอดมิน" ทันที
+            answer = None
+        else:
+            answer = await _gemini_answer(question, menu_temp[rid], context=full_ctx,
+                                          history=history, uid=uid, user_facts=user_facts)
         gemini_ok = bool(answer)
         if not answer:
             # AI ตอบไม่ได้ (quota/error) -> อย่าปล่อยเงียบ: ข้อความค้างไว้ + ให้แอดมินเห็น
             answer = "ได้รับข้อความแล้วครับ 🙏 เดี๋ยวแอดมินมาตอบให้นะครับ"
+        else:
+            ai_used_today += 1  # นับต่อในแบทช์เดียวกัน กันยิงเกิน limit ถ้าคนถามพร้อมกันหลายคน
         if _is_urgent(question) and uid not in _gemini_escalations:
             # safety net: ข้อความมีลักษณะร้องเรียน/เร่งด่วน -> ส่งต่อแอดมินเสมอ ไม่ปล่อยให้โมเดลตัดสินใจเองอย่างเดียว
             _gemini_escalations[uid] = f"ข้อความอาจร้องเรียน/เร่งด่วน: {question[:100]}"
@@ -1669,7 +1692,8 @@ async def _handle_gemini_replies(events: list) -> set:
             handled.add(uid)
             out_msgs.append({"line_user_id": uid, "direction": "out", "by": "gemini",
                              "msg_type": "text", "text": answer,
-                             "payload": {"question": question, "model": ANTHROPIC_MODEL}})
+                             "payload": {"question": question,
+                                        "model": ANTHROPIC_MODEL if ANTHROPIC_API_KEY else GEMINI_MODEL}})
             # Gemini เรียก escalate_to_admin หรือ AI ตอบไม่ได้ -> bump unread + tag ให้แอดมินเห็น
             if uid in _gemini_escalations or not gemini_ok:
                 try:
@@ -1846,6 +1870,7 @@ async def dashboard(admin=Depends(current_admin), range: int = 30):
         msg_today=supa.count("messages", {"created_at": f"gte.{today0}"}),
         wh_7=supa.count("webhook_events", {"created_at": f"gte.{d7}"}),
         gemini_7=supa.count("messages", {"by": "eq.gemini", "created_at": f"gte.{d7}"}),
+        gemini_today=supa.count("messages", {"by": "eq.gemini", "created_at": f"gte.{today0}"}),
         ar_total=supa.count("auto_replies"),
         ar_on=supa.count("auto_replies", {"enabled": "eq.true"}),
         pb_total=supa.count("postback_actions"),
@@ -2016,6 +2041,7 @@ async def dashboard(admin=Depends(current_admin), range: int = 30):
         },
         "messages": {"in_7d": c["msg_in_7"], "out_7d": c["msg_out_7"],
                      "today": c["msg_today"], "gemini_7d": c["gemini_7"],
+                     "gemini_today": c["gemini_today"], "ai_daily_limit": await _get_setting("ai_daily_limit", 0) or 0,
                      "webhook_7d": c["wh_7"]},
         "bot": bot, "quota": quota,
         "counts": {
