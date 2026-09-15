@@ -110,11 +110,12 @@ export default function Inbox() {
     if (!text.trim()) return
     setBusy(true)
     try {
-      await api.threadSend(sel, [text])
+      const r = await api.threadSend(sel, [text])
       setText('')
       const d = await api.thread(sel, { limit: 60 }); setThread(d)
       setTimeout(() => bottomRef.current?.scrollIntoView(), 50)
       loadConvs(0, false)
+      if (r?.kb_draft_hint) t.info(`🧠 ${r.kb_draft_hint}`, 'ok')
     } catch (e) { t.err(e.message) } finally { setBusy(false) }
   }
 

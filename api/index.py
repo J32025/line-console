@@ -1421,7 +1421,12 @@ def _ai_sys_text(user_facts: str, context: str) -> str:
         "เมื่อถามราคา/บัญชีโอนเงินของหลักสูตร ให้เรียก get_course_details "
         "เมื่อถามวันเริ่มเรียน/ตารางเรียน/ลิงก์ซูมของคลาส ให้เรียก get_class_info "
         "ถ้าผู้ใช้ขอคุยกับคน/ร้องเรียน/แสดงความไม่พอใจ/เรื่องเร่งด่วน/เรื่องที่ต้องให้คนตัดสิน ให้เรียก escalate_to_admin ทันทีโดยไม่ต้องพยายามแก้ปัญหาเอง "
-        "ถ้าไม่มีข้อมูลและเครื่องมือช่วยไม่ได้ ให้บอกตรง ๆ ว่าไม่แน่ใจ แนะนำพิมพ์ 'ติดต่อแอดมิน' ห้ามแต่งคำตอบขึ้นเอง")
+        "ถ้าไม่มีข้อมูลและเครื่องมือช่วยไม่ได้ ให้บอกตรง ๆ ว่าไม่แน่ใจ แนะนำพิมพ์ 'ติดต่อแอดมิน' ห้ามแต่งคำตอบขึ้นเอง\n\n"
+        "ตัวอย่างคำตอบที่ดี — ถาม 'ราคาคอร์สเท่าไหร่': เรียก get_course_details ก่อน แล้วตอบ "
+        "'คอร์ส FC ราคา 1,499 บาทครับ โอนเข้าธนาคารกรุงเทพ เลขบัญชี 080-0-154320 ชื่อบัญชี ธีรภัทร์ นุ้ยเล็ก "
+        "โอนแล้วส่งสลิปแจ้งได้เลยครับ' (สั้น ตรงคำถาม มีตัวเลขจริงจากเครื่องมือ ไม่มี markdown)\n"
+        "ตัวอย่างคำตอบที่ไม่ดี ห้ามทำแบบนี้: '**คอร์ส FC** ราคาประมาณ 1,500 บาทครับ ลองสอบถามแอดมินอีกทีนะครับ' "
+        "(เดาราคาโดยไม่เรียกเครื่องมือ + มี markdown + ตอบกำกวมทั้งที่มีเครื่องมือหาคำตอบชัดเจนได้)")
     if user_facts:
         sys_text += f"\n\nข้อมูลผู้ใช้ที่กำลังคุย: {user_facts}"
     if context:
@@ -1700,9 +1705,10 @@ async def _handle_gemini_replies(events: list) -> set:
             kb = ""
         if not kb:
             # ไม่เจอบทความ/FAQ ที่เกี่ยวข้องเลย -> บันทึกไว้ให้แอดมินเห็นว่าควรเพิ่มความรู้เรื่องอะไร
+            # เก็บ uid ด้วย -> ใช้จับคู่กับตอนแอดมินตอบเองทีหลัง (ดู inbox_send) เพื่อร่างบทความ KB ให้อัตโนมัติ
             try:
                 await supa.insert("operations", {"actor": "gemini", "action": "gemini.kb_gap",
-                                                 "params": {"q": question[:200]}, "status": "ok"})
+                                                 "params": {"q": question[:200], "uid": uid}, "status": "ok"})
             except Exception:
                 pass
         full_ctx = (ctx + ("\n\n" + kb if kb else "")).strip()
@@ -3253,7 +3259,29 @@ async def inbox_send(uid: str, req: Request, admin=Depends(current_admin)):
         "unread": 0, "last_message_at": NOW(),
         "last_message_text": (msgs[-1].get("text") or f"[{msgs[-1].get('type')}]")[:200],
     }, {"line_user_id": f"eq.{uid}"})
-    return {"ok": True, "requestId": rid}
+
+    # ---- AI เรียนรู้จากคำตอบแอดมิน: ถ้าคนนี้เพิ่งถามอะไรที่ AI ตอบไม่ได้ (kb_gap) แล้วแอดมินมาตอบเองสดๆ
+    # ร่างเป็นบทความ KB ให้อัตโนมัติ (ปิดใช้งานไว้ก่อน — แอดมินต้องกดเปิดเองในหน้าคลังความรู้) ----
+    kb_draft_hint = None
+    reply_text = next((m.get("text") for m in msgs if m.get("type") == "text" and m.get("text")), None)
+    if reply_text and len(reply_text.strip()) >= 12:
+        try:
+            gaps = await supa.select("operations", params={
+                "select": "id,params", "action": "eq.gemini.kb_gap", "status": "eq.ok",
+                "created_at": f"gte.{_iso_ago(hours=6)}", "order": "created_at.desc", "limit": "50"})
+            gap = next((g for g in gaps if (g.get("params") or {}).get("uid") == uid), None)
+            if gap:
+                question = (gap["params"].get("q") or "").strip()
+                await supa.insert("kb_articles", {
+                    "title": question[:60] or "คำถามจากลูกค้า", "body": reply_text.strip()[:2000],
+                    "keywords": sorted(_tok(question))[:12], "category": "ร่างจาก AI (รอตรวจ)",
+                    "enabled": False})
+                await supa.update("operations", {"status": "used"}, {"id": f"eq.{gap['id']}"})
+                kb_draft_hint = "ร่างบทความ KB จากคำตอบนี้ให้แล้ว (ปิดใช้งานไว้) — ไปตรวจ/เปิดใช้ที่หน้าคลังความรู้ AI"
+        except Exception as e:
+            print("kb auto-draft error:", e)
+
+    return {"ok": True, "requestId": rid, "kb_draft_hint": kb_draft_hint}
 
 
 @app.get("/api/users/{uid}")
