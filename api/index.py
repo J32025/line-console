@@ -856,12 +856,21 @@ async def _handle_slips(img_events: list):
         if not (is_slip or notify_all):
             continue  # ไม่ใช่สลิป + ไม่ได้ตั้งให้แจ้งทุกรูป -> ข้าม (ไม่สร้าง row)
 
-        # ---- เดาหลักสูตรจากบทสนทนา ----
+        # ---- หาหลักสูตรที่คาดว่าจะจ่าย: ใช้ทะเบียนจริงก่อน (แม่นสุด — คนละ 1 หลักสูตรเท่านั้น)
+        # ถ้ายังไม่พบทะเบียนเลย (เช่น ส่งสลิปมาก่อนลงทะเบียน) ค่อย fallback ไปเดาจากบทสนทนา ----
         exp_course = None
-        for c in ("FC", "IC", "PC", "AC"):
-            if f"หลักสูตร {c}" in blob or f"course={c}" in blob or f"{c}70" in blob:
-                exp_course = c
-                break
+        try:
+            reg = await supa.select("registrations", params={
+                "line_user_id": f"eq.{uid}", "select": "course", "limit": "1"})
+            if reg:
+                exp_course = reg[0]["course"]
+        except Exception:
+            pass
+        if not exp_course:
+            for c in ("FC", "IC", "PC", "AC"):
+                if f"หลักสูตร {c}" in blob or f"course={c}" in blob or f"{c}70" in blob:
+                    exp_course = c
+                    break
 
         # ============ ทำสิ่งที่สำคัญต่อเวลาก่อน (ก่อนอ่านสลิปที่ช้า) ============
         # 1) สร้าง slip row ทันที (status=new) จะได้ไม่หายถ้า handler ถูกตัดกลางคัน
@@ -920,15 +929,28 @@ async def _handle_slips(img_events: list):
         if status != "rejected" and ocr and ocr.get("verified"):
             accounts = await supa.select("payment_accounts", params={"select": "*", "active": "eq.true"})
             racc = _digits(ocr.get("receiver_acc"))
-            acc = next((a for a in accounts if racc and (_digits(a["account_no"])[-4:] == racc[-4:])), None)
+            candidates = [a for a in accounts if racc and (_digits(a["account_no"])[-4:] == racc[-4:])]
+            # ถ้ารู้หลักสูตรที่ลงทะเบียนไว้แล้ว (จากทะเบียนจริง) ให้เลือกบัญชีที่ตรงหลักสูตรนั้นก่อน
+            # กันเลือกบัญชีผิดตัวตอนมีหลายคอร์สใช้เลขบัญชีท้าย 4 ตัวซ้ำกัน
+            known_course = exp_course  # มาจากทะเบียนจริงเท่านั้น (ถ้ามี) — ก่อนจะ fallback เป็นคอร์สของบัญชีที่ match
+            acc = None
+            if known_course:
+                acc = next((a for a in candidates
+                           if str(a["course"]).upper().startswith(known_course.upper()[:2])), None)
+            if not acc:
+                acc = candidates[0] if candidates else None
             if not acc:
                 status, auto_note = "review", f"บัญชีปลายทางไม่ตรงรายการ ({ocr.get('receiver_acc')})"
             else:
                 def _near(target):
                     return target not in (None, "") and abs(float(amount or 0) - float(target)) < 1
                 matched = _near(acc.get("price")) or _near(acc.get("full_price"))
+                mismatch_course = bool(known_course) and not str(acc["course"]).upper().startswith(known_course.upper()[:2])
                 exp_course = exp_course or acc["course"]
-                if matched:
+                if mismatch_course:
+                    # ลงทะเบียนไว้คอร์สหนึ่ง แต่ยอด/บัญชีที่ตรงกลับเป็นอีกคอร์ส -> ให้แอดมินเช็คเอง ไม่ auto-verify
+                    status, auto_note = "review", f"⚠️ ลงทะเบียน {known_course} แต่ยอด/บัญชีตรงกับคอร์ส {acc['course']} — รบกวนแอดมินเช็ค"
+                elif matched:
                     status, auto_note = "verified", f"✓ {acc['course']} · {amount} บาท · {acc['bank']}"
                 else:
                     status, auto_note = "review", f"ยอดไม่ตรง: โอน {amount} / ราคา {acc['price']} ({acc['course']})"
@@ -1013,10 +1035,22 @@ async def _send_receipt(uid: str, s: dict):
 
 
 async def _mark_registration_paid(uid: str, course_hint: str | None = None):
-    """สลิป verified -> mark registration ของ user คนนั้นเป็นจ่ายแล้ว (match คอร์ส FC->FC70*)"""
+    """สลิป verified -> mark registration ของ user คนนั้นเป็นจ่ายแล้ว
+    ระบบรองรับคนละ 1 หลักสูตรเท่านั้น -> ถ้ามี registration ที่ยังไม่จ่ายอยู่แถวเดียว mark แถวนั้นเลย
+    ไม่ต้องพึ่ง course_hint (กันเคส hint เดามาผิด/เดาไม่ได้ แล้ว update ไม่โดนแถวไหนเลยแบบเงียบๆ)
+    เหลือใช้ course_hint เป็นตัวช่วยแยกเฉพาะกรณี legacy ที่มีมากกว่า 1 แถว (นำเข้าจากระบบเก่าก่อนเปลี่ยนกฎ)"""
     if not uid:
         return
     try:
+        unpaid = await supa.select("registrations", params={
+            "line_user_id": f"eq.{uid}", "paid": "eq.false", "select": "id,course"})
+        if not unpaid:
+            return
+        if len(unpaid) == 1:
+            await supa.update("registrations", {"paid": True, "updated_at": NOW()},
+                              {"id": f"eq.{unpaid[0]['id']}"})
+            return
+        # legacy: มากกว่า 1 แถว -> ต้องพึ่ง course_hint แยกว่าจ่ายคอร์สไหน
         params = {"line_user_id": f"eq.{uid}", "paid": "eq.false"}
         if course_hint:
             params["course"] = f"like.{course_hint.upper()}*"
@@ -5138,6 +5172,13 @@ async def public_reg_submit(req: Request):
     if not name or not tel or not course:
         raise HTTPException(400, "กรอก ชื่อ-นามสกุล / เบอร์โทร / หลักสูตร ให้ครบ")
     _rate_limit(f"reg:{u['userId']}", limit=6, window=300)
+
+    # ระบบรองรับคนละ 1 หลักสูตรเท่านั้น — ถ้าเคยลงทะเบียนไปแล้ว (คอร์สไหนก็ตาม) ปฏิเสธทันที
+    # กันซ้ำแม้ฝั่ง UI จะพยายามพาไปหน้าฟอร์มอีกรอบก็ตาม (เผื่อ token เก่า/เปิดฟอร์มค้างไว้)
+    existing = await supa.select("registrations", params={
+        "line_user_id": f"eq.{u['userId']}", "select": "course", "limit": "1"})
+    if existing:
+        raise HTTPException(400, f"คุณลงทะเบียนหลักสูตร {existing[0]['course']} ไปแล้ว ระบบรองรับคนละ 1 หลักสูตรเท่านั้น")
 
     # อัปโหลดรูป (ถ้าแนบมา) — เก็บลง Storage แทนการฝาก base64 ไว้ในแถวข้อมูล
     photo_url = None
