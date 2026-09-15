@@ -3804,7 +3804,8 @@ async def broadcast_clicks(bid: int, admin=Depends(current_admin)):
         chunk = uids[i:i + 80]
         try:
             for u in await supa.select("line_users", params={
-                    "select": "line_user_id,display_name,picture_url,tags",
+                    "select": "line_user_id,display_name,picture_url,tags,stage,is_following,"
+                              "last_message_at,current_rich_menu_id,rich_menu_name",
                     "line_user_id": f"in.({','.join(chunk)})", "limit": "80"}):
                 names[u["line_user_id"]] = u
         except Exception:
@@ -3825,6 +3826,10 @@ async def broadcast_clicks(bid: int, admin=Depends(current_admin)):
         r["display_name"] = u.get("display_name")
         r["picture_url"] = u.get("picture_url")
         r["tags"] = u.get("tags")
+        r["stage"] = u.get("stage")
+        r["is_following"] = u.get("is_following")
+        r["last_message_at"] = u.get("last_message_at")
+        r["rich_menu_name"] = u.get("rich_menu_name")
         r["registered"] = r["line_user_id"] in registered
     return {
         "total_clicks": len(rows), "unique_users": len(uids),

@@ -6,8 +6,10 @@ import { useProgress } from '../lib/progress.jsx'
 import MessageEditor from '../components/MessageEditor.jsx'
 import MessagePreview from '../components/MessagePreview.jsx'
 import TemplateGallery from '../components/TemplateGallery.jsx'
+import UserDetail from '../components/UserDetail.jsx'
 
 const DRAFT_KEY = 'lc_msg_draft'
+const FALLBACK = 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2280%22 height=%2280%22%3E%3Crect width=%2280%22 height=%2280%22 fill=%22%23dfe3e8%22/%3E%3C/svg%3E'
 
 export default function Messaging() {
   const t = useToast()
@@ -36,6 +38,8 @@ export default function Messaging() {
   const [ncProgress, setNcProgress] = useState(null)
   const [gallery, setGallery] = useState(false)
   const [clickView, setClickView] = useState(null) // {bid, loading, data}
+  const [clickFilter, setClickFilter] = useState('unreg') // unreg | all
+  const [clickDetailUid, setClickDetailUid] = useState(null)
 
   const loadHistory = () => api.broadcastHistory().then((d) => setHistory(d.broadcasts)).catch(() => {})
   const loadScheduled = () => api.scheduled().then((d) => setScheduled(d.jobs)).catch(() => {})
@@ -87,7 +91,7 @@ export default function Messaging() {
   }
 
   const openClicks = async (bid) => {
-    setClickView({ bid, loading: true, data: null })
+    setClickView({ bid, loading: true, data: null }); setClickFilter('unreg')
     try {
       const d = await api.broadcastClicks(bid)
       setClickView({ bid, loading: false, data: d })
@@ -465,7 +469,7 @@ export default function Messaging() {
 
       {clickView && (
         <div className="modal-bg" onClick={() => setClickView(null)}>
-          <div className="modal" style={{ maxWidth: 560 }} onClick={(e) => e.stopPropagation()}>
+          <div className="modal" style={{ maxWidth: 720 }} onClick={(e) => e.stopPropagation()}>
             <div className="row spread"><h3>👆 คนที่คลิกปุ่ม postback</h3><button className="xs" onClick={() => setClickView(null)}>✕</button></div>
             {clickView.loading ? <InlineSpinner /> : clickView.data?.schema_missing ? (
               <p className="err">{clickView.data.hint}</p>
@@ -484,19 +488,42 @@ export default function Messaging() {
                     ))}
                   </div>
                 )}
-                <div className="table-scroll" style={{ maxHeight: 320 }}>
+                <div className="row wrap" style={{ gap: 6, marginBottom: 8 }}>
+                  <button className={clickFilter === 'unreg' ? 'xs primary' : 'xs'} onClick={() => setClickFilter('unreg')}>
+                    ยังไม่ลงทะเบียน ({clickView.data.unregistered_count})
+                  </button>
+                  <button className={clickFilter === 'all' ? 'xs primary' : 'xs'} onClick={() => setClickFilter('all')}>
+                    ทั้งหมด ({clickView.data.unique_users})
+                  </button>
+                </div>
+                <div className="table-scroll" style={{ maxHeight: 360 }}>
                   <table>
+                    <thead><tr><th></th><th>ชื่อ</th><th>สถานะ</th><th>เมนูปัจจุบัน</th><th>ทักล่าสุด</th><th>คลิกเมื่อ</th></tr></thead>
                     <tbody>
-                      {clickView.data.clicks.map((c, i) => (
-                        <tr key={i}>
-                          <td>{c.display_name || c.line_user_id.slice(0, 10) + '…'}</td>
+                      {clickView.data.clicks
+                        .filter((c) => clickFilter === 'all' || !c.registered)
+                        .map((c, i) => (
+                        <tr key={i} style={{ cursor: 'pointer' }} onClick={() => setClickDetailUid(c.line_user_id)}>
+                          <td><img src={c.picture_url || FALLBACK} alt="" style={{ width: 28, height: 28, borderRadius: '50%', objectFit: 'cover' }} /></td>
+                          <td>
+                            {c.display_name || c.line_user_id.slice(0, 10) + '…'}
+                            {!c.is_following && <span className="chip failed xs" style={{ marginLeft: 4 }}>เลิกติดตาม</span>}
+                            {(c.tags || []).length > 0 && (
+                              <div className="row wrap" style={{ gap: 2, marginTop: 2 }}>
+                                {c.tags.slice(0, 3).map((tg) => <span key={tg} className="chip xs muted">{tg}</span>)}
+                              </div>
+                            )}
+                          </td>
                           <td>{c.registered ? <span className="chip ok xs">ลงทะเบียนแล้ว</span> : <span className="chip partial xs">ยังไม่ลงทะเบียน</span>}</td>
+                          <td className="muted xs">{c.rich_menu_name || '—'}</td>
+                          <td className="muted sm">{c.last_message_at ? new Date(c.last_message_at).toLocaleDateString('th-TH') : '—'}</td>
                           <td className="muted sm">{new Date(c.clicked_at).toLocaleString('th-TH')}</td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
                 </div>
+                <p className="muted xs" style={{ marginTop: 4 }}>คลิกที่แถวเพื่อดูรายละเอียด/ประวัติเต็มของคนนั้น</p>
                 <div className="row wrap" style={{ gap: 6, marginTop: 8 }}>
                   <button className="primary" onClick={() => messageClickers(true)} disabled={!clickView.data.unregistered_count}>
                     ✈️ ส่งเฉพาะคนที่ยังไม่ลงทะเบียน ({clickView.data.unregistered_count} คน)
@@ -516,6 +543,10 @@ export default function Messaging() {
           onClose={() => setGallery(false)}
           onPick={(msgs) => { setMessages(msgs.slice(0, 5)); window.scrollTo(0, 0); t.ok('ใส่เทมเพลตแล้ว — แก้เนื้อหา/ลิงก์/รูปก่อนส่ง') }}
         />
+      )}
+
+      {clickDetailUid && (
+        <UserDetail uid={clickDetailUid} onClose={() => setClickDetailUid(null)} onSaved={() => {}} />
       )}
     </div>
   )
