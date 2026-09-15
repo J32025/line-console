@@ -120,7 +120,7 @@ export default function RichMenus() {
                     ตั้ง default
                   </button>
                   <button className={`xs ${m.geminiEnabled ? 'primary' : ''}`}
-                          title="ตั้งค่า Claude AI สำหรับเมนูนี้"
+                          title="ตั้งค่า AI สำหรับเมนูนี้"
                           onClick={() => setGeminiModal({
                             rid: m.richMenuId, name: m.name,
                             enabled: !!m.geminiEnabled,

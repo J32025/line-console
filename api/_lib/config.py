@@ -48,12 +48,15 @@ ENFORCE_RICHMENU_ID = os.environ.get("ENFORCE_RICHMENU_ID", "").strip()
 ENFORCE_EXCLUDE_MENUS = [m.strip() for m in os.environ.get("ENFORCE_EXCLUDE_MENUS", "").split(",") if m.strip()]
 
 # (ตัวเลือก) AI ตอบคำถามอิสระ — เฉพาะ user ที่ current rich menu ตรงชื่อนี้
-# เว้นว่าง ANTHROPIC_API_KEY = ปิดฟีเจอร์นี้ทั้งหมด (ไม่กระทบ auto-reply/automation เดิม)
-# GEMINI_API_KEY เก็บไว้เผื่อย้อนกลับ/เทียบผล — ตัวที่ใช้งานจริงตอนนี้คือ Anthropic (Claude) ตาม ANTHROPIC_*
-# ชื่อ setting/คอลัมน์ในระบบ (gemini_enabled, gemini_temperature, gemini_context ฯลฯ) ยังใช้คำเดิม
-# เพื่อไม่ต้อง migrate ฐานข้อมูล — แต่โมเดลที่ตอบจริงคือ Claude แล้ว
+# เว้นว่างทั้ง ANTHROPIC_API_KEY และ GEMINI_API_KEY = ปิดฟีเจอร์นี้ทั้งหมด (ไม่กระทบ auto-reply/automation เดิม)
+# รองรับ 2 ผู้ให้บริการ เลือกอัตโนมัติ: มี ANTHROPIC_API_KEY -> ใช้ Claude (คุณภาพดีกว่า, มีค่าใช้จ่าย)
+#                                     ไม่มี แต่มี GEMINI_API_KEY -> ใช้ Gemini แทน (free tier ได้ ไม่ต้องผูกบัตร)
+# ชื่อ setting/คอลัมน์ในระบบ (gemini_enabled, gemini_temperature, gemini_context ฯลฯ) ใช้คำว่า gemini_* ตามประวัติเดิม
+# ไม่เกี่ยวกับว่าตอนนี้ตอบจริงด้วยผู้ให้บริการไหน
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash").strip()
+# gemini-flash-lite-latest = รุ่นประหยัด/free tier กว้างกว่ารุ่น thinking (gemini-3.6-flash เดิมติด 20 ครั้ง/วัน)
+# เช็ค quota จริงได้ที่ aistudio.google.com — ปรับผ่าน env GEMINI_MODEL ได้ถ้าอยากลองรุ่นอื่น
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-lite-latest").strip()
 GEMINI_TRIGGER_MENU_NAME = os.environ.get("GEMINI_TRIGGER_MENU_NAME", "แล้วพบกัน").strip()
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "").strip()
 ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5").strip()

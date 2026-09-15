@@ -42,7 +42,7 @@ export default function KB() {
         <button className="sm primary" onClick={() => setForm({ ...EMPTY })}>+ บทความ</button>
       </div>
       <p className="muted sm">
-        แหล่งข้อมูลกลางที่ <b>Claude AI</b> ดึงไปใช้ตอบลูกค้า (ค้นตามคำถามอัตโนมัติ) — ใส่: รายละเอียดคอร์ส · ตารางติว · เงื่อนไข · วิธีชำระ · FAQ ต่าง ๆ
+        แหล่งข้อมูลกลางที่ <b>AI</b> ดึงไปใช้ตอบลูกค้า (ค้นตามคำถามอัตโนมัติ) — ใส่: รายละเอียดคอร์ส · ตารางติว · เงื่อนไข · วิธีชำระ · FAQ ต่าง ๆ
       </p>
 
       {hint && <p className="err">{hint}</p>}
