@@ -36,7 +36,7 @@ export default function RichMenus() {
 
   const run = async (mode) => {
     if (mode === 'link' && !sel) return t.err('เลือก rich menu ก่อน')
-    const label = { all: 'ผู้ใช้ทุกคน', none: 'คนที่ยังไม่มีเมนู', list: `${parseIds().length} คนในลิสต์` }[target] || target
+    const label = { all: 'ผู้ใช้ทุกคน', none: 'คนที่ยังไม่มีเมนู', unregistered: 'คนที่ยังไม่ได้ลงทะเบียน', list: `${parseIds().length} คนในลิสต์` }[target] || target
     if (!confirm(`${mode === 'link' ? 'ผูก' : 'ถอด'} rich menu กับ ${label}?`)) return
     setBusy(true)
     const task = prog.start(mode === 'link' ? 'กำลังผูก Rich Menu' : 'กำลังถอด Rich Menu', 0)
@@ -154,6 +154,7 @@ export default function RichMenus() {
             <select value={target} onChange={(e) => setTarget(e.target.value)}>
               <option value="all">ผู้ใช้ที่ติดตามทุกคน</option>
               <option value="none">เฉพาะคนที่ยังไม่มีเมนู</option>
+              <option value="unregistered">เฉพาะคนที่ยังไม่ได้ลงทะเบียน</option>
               <option value="list">ระบุ userId เอง</option>
             </select>
           </label>

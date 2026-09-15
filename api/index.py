@@ -4925,6 +4925,12 @@ async def resolve_target(req: Request, admin=Depends(current_admin)):
         uids = await _uids_by_filter(b.get("filter", {}))
     elif tg == "none":
         uids = await _uids_by_filter({"noMenu": True})
+    elif tg == "unregistered":
+        # คนที่ติดตามอยู่ แต่ยังไม่มีแถวใน registrations เลย (ยังไม่เคยลงทะเบียนหลักสูตรไหน)
+        all_uids = set(await _uids_by_filter({}))
+        reg_rows = await supa.select_all("registrations", params={"select": "line_user_id"})
+        registered = {r["line_user_id"] for r in reg_rows if r.get("line_user_id")}
+        uids = [u for u in all_uids if u not in registered]
     elif tg == "tag":
         uids = await _uids_by_filter({"tag": b.get("tag", "")})
     elif tg == "list":
