@@ -94,11 +94,12 @@ export default function Messaging() {
     } catch (e) { t.err(e.message); setClickView(null) }
   }
 
-  const messageClickers = () => {
-    const uids = [...new Set((clickView?.data?.clicks || []).map((c) => c.line_user_id))]
+  const messageClickers = (onlyUnregistered = false) => {
+    const rows = (clickView?.data?.clicks || []).filter((c) => !onlyUnregistered || !c.registered)
+    const uids = [...new Set(rows.map((c) => c.line_user_id))]
     if (!uids.length) return
     setMode('push'); setTo(uids.join('\n')); setClickView(null)
-    t.info(`ใส่รายชื่อคนที่คลิก ${uids.length} คนในช่อง "ส่งหา userId" แล้ว — แก้ข้อความแล้วกดส่งได้เลย`, 'ok')
+    t.info(`ใส่รายชื่อ ${uids.length} คน${onlyUnregistered ? ' (เฉพาะที่ยังไม่ลงทะเบียน)' : 'ที่คลิก'} ในช่อง "ส่งหา userId" แล้ว — แก้ข้อความแล้วกดส่งได้เลย`, 'ok')
     window.scrollTo(0, 0)
   }
 
@@ -474,6 +475,7 @@ export default function Messaging() {
               <>
                 <p className="muted sm">
                   คลิกทั้งหมด <b>{clickView.data.total_clicks}</b> ครั้ง · คนไม่ซ้ำ <b>{clickView.data.unique_users}</b> คน
+                  {' '}· ลงทะเบียนแล้ว <b>{clickView.data.registered_count}</b> · ยังไม่ลงทะเบียน <b>{clickView.data.unregistered_count}</b>
                 </p>
                 {clickView.data.by_data.length > 1 && (
                   <div className="row wrap" style={{ gap: 4, marginBottom: 8 }}>
@@ -488,16 +490,21 @@ export default function Messaging() {
                       {clickView.data.clicks.map((c, i) => (
                         <tr key={i}>
                           <td>{c.display_name || c.line_user_id.slice(0, 10) + '…'}</td>
-                          <td className="muted xs">{c.data}</td>
+                          <td>{c.registered ? <span className="chip ok xs">ลงทะเบียนแล้ว</span> : <span className="chip partial xs">ยังไม่ลงทะเบียน</span>}</td>
                           <td className="muted sm">{new Date(c.clicked_at).toLocaleString('th-TH')}</td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
                 </div>
-                <button className="primary" style={{ marginTop: 8 }} onClick={messageClickers}>
-                  ✈️ ส่งข้อความหาคนที่คลิก ({clickView.data.unique_users} คน)
-                </button>
+                <div className="row wrap" style={{ gap: 6, marginTop: 8 }}>
+                  <button className="primary" onClick={() => messageClickers(true)} disabled={!clickView.data.unregistered_count}>
+                    ✈️ ส่งเฉพาะคนที่ยังไม่ลงทะเบียน ({clickView.data.unregistered_count} คน)
+                  </button>
+                  <button onClick={() => messageClickers(false)}>
+                    ส่งหาทุกคนที่คลิก ({clickView.data.unique_users} คน)
+                  </button>
+                </div>
               </>
             )}
           </div>

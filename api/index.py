@@ -3799,6 +3799,7 @@ async def broadcast_clicks(bid: int, admin=Depends(current_admin)):
                 "clicks": [], "unique_users": 0, "by_data": []}
     uids = list({r["line_user_id"] for r in rows if r.get("line_user_id")})
     names = {}
+    registered: set = set()
     for i in range(0, len(uids), 80):
         chunk = uids[i:i + 80]
         try:
@@ -3806,6 +3807,13 @@ async def broadcast_clicks(bid: int, admin=Depends(current_admin)):
                     "select": "line_user_id,display_name,picture_url,tags",
                     "line_user_id": f"in.({','.join(chunk)})", "limit": "80"}):
                 names[u["line_user_id"]] = u
+        except Exception:
+            pass
+        try:
+            for r in await supa.select("registrations", params={
+                    "select": "line_user_id", "line_user_id": f"in.({','.join(chunk)})", "limit": "80"}):
+                if r.get("line_user_id"):
+                    registered.add(r["line_user_id"])
         except Exception:
             pass
     by_data: dict = {}
@@ -3817,8 +3825,10 @@ async def broadcast_clicks(bid: int, admin=Depends(current_admin)):
         r["display_name"] = u.get("display_name")
         r["picture_url"] = u.get("picture_url")
         r["tags"] = u.get("tags")
+        r["registered"] = r["line_user_id"] in registered
     return {
         "total_clicks": len(rows), "unique_users": len(uids),
+        "registered_count": len(registered), "unregistered_count": len(uids) - len(registered),
         "by_data": sorted([{"data": k, "count": v} for k, v in by_data.items()], key=lambda x: -x["count"]),
         "clicks": rows[:500],
     }
