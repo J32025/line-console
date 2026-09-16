@@ -2265,6 +2265,185 @@ _GAP_STOP = {"ครับ", "ค่ะ", "คะ", "นะ", "น่ะ", "ท�
              "ทำ", "ต้อง", "นี้", "นั้น", "อัน", "ตัว", "เลย", "จ้า", "จ้ะ", "งับ", "hello", "hi"}
 
 
+# ---------- knowledge base: auto-generate เนื้อหาจัดซื้อจัดจ้างภาครัฐ ----------
+_KB_TOPIC_SETTING_KEY = "kb_autogen_done_topics"
+
+_PROCUREMENT_TOPICS = [
+    "หลักประกันการเสนอราคาและหลักประกันสัญญา: ประเภทและอัตรา",
+    "การขึ้นทะเบียนผู้ประกอบการงานก่อสร้าง",
+    "ราคากลางและหลักเกณฑ์การคำนวณราคากลาง",
+    "การจัดทำแผนการจัดซื้อจัดจ้างประจำปีและการเผยแพร่แผน",
+    "ระบบจัดซื้อจัดจ้างภาครัฐด้วยอิเล็กทรอนิกส์ (e-GP)",
+    "บทบาทหน้าที่คณะกรรมการตรวจรับพัสดุ",
+    "บทบาทหน้าที่คณะกรรมการซื้อหรือจ้างในแต่ละวิธี",
+    "ผู้มีผลประโยชน์ร่วมกันและคุณสมบัติต้องห้ามของผู้เสนอราคา",
+    "ข้อห้ามการแบ่งซื้อแบ่งจ้างเพื่อหลีกเลี่ยงวิธีการที่กำหนด",
+    "บัญชีรายชื่อผู้ทิ้งงาน",
+    "หลักเกณฑ์เฉพาะของงานจ้างที่ปรึกษา",
+    "หลักเกณฑ์เฉพาะของงานจ้างออกแบบหรือควบคุมงานก่อสร้าง",
+    "บัญชีนวัตกรรมไทยและการส่งเสริมผู้ประกอบการ SME",
+    "การยกเลิกการจัดซื้อจัดจ้างและเหตุแห่งการยกเลิก",
+    "การขอขยายเวลา งดหรือลดค่าปรับให้คู่สัญญา",
+    "การจำหน่ายพัสดุ: แลกเปลี่ยน โอน แปรสภาพ ทำลาย",
+    "กฎกระทรวงกำหนดวงเงินการจัดซื้อจัดจ้างพัสดุโดยวิธีเฉพาะเจาะจง",
+    "ระเบียบกระทรวงการคลังว่าด้วยการจัดซื้อจัดจ้างและการบริหารพัสดุภาครัฐ พ.ศ. 2560",
+    "เปรียบเทียบวิธี e-market แบบใบเสนอราคา (RFQ) กับแบบประมูลอิเล็กทรอนิกส์ (e-Auction)",
+    "ข้อยกเว้นการใช้บังคับ พ.ร.บ. สำหรับหน่วยงานที่ใช้เงินกู้/เงินช่วยเหลือจากต่างประเทศ",
+    "การจัดทำรายงานขอซื้อขอจ้าง",
+    "หลักเกณฑ์การพิจารณาผลการเสนอราคา: ราคาต่ำสุด กับ คุณภาพและราคา (Price Performance)",
+    "เหตุที่ไม่อาจอุทธรณ์ผลการจัดซื้อจัดจ้างได้",
+    "จรรยาบรรณของเจ้าหน้าที่พัสดุ",
+    "การตรวจสอบพัสดุประจำปีและการรายงานผล",
+    "การยืมพัสดุระหว่างหน่วยงานของรัฐ",
+    "ความแตกต่างระหว่างวิธีประกาศเชิญชวนทั่วไป วิธีคัดเลือก และวิธีเฉพาะเจาะจง (เปรียบเทียบเชิงปฏิบัติ)",
+    "การอุทธรณ์: ขั้นตอนและระยะเวลาโดยละเอียด",
+    "หน้าที่และความรับผิดของเจ้าหน้าที่พัสดุตามกฎหมาย",
+    "การจัดซื้อจัดจ้างที่เกี่ยวกับความมั่นคงของชาติ (ข้อยกเว้นพิเศษ)",
+]
+
+_KB_GEN_SYS_PROMPT = (
+    "คุณคือผู้เชี่ยวชาญกฎหมายการจัดซื้อจัดจ้างและการบริหารพัสดุภาครัฐไทย "
+    "(อ้างอิงพระราชบัญญัติการจัดซื้อจัดจ้างและการบริหารพัสดุภาครัฐ พ.ศ. 2560 "
+    "และระเบียบ/กฎกระทรวงที่เกี่ยวข้อง) ทำหน้าที่ร่างบทความความรู้สั้น กระชับ "
+    "สำหรับสอนนักเรียนที่เตรียมสอบตำแหน่งเจ้าหน้าที่พัสดุ/นักวิชาการพัสดุ\n"
+    "ตอบเป็น JSON เท่านั้น ห้ามมี markdown code fence ห้ามมีข้อความอื่นนอก JSON "
+    'รูปแบบ: {"title": "หัวข้อสั้นไม่เกิน 60 ตัวอักษร", '
+    '"body": "เนื้อหา 200-450 คำ ภาษาไทย กระชับเข้าใจง่าย ไม่ใช้ markdown", '
+    '"keywords": ["คำ/วลีที่เกี่ยวข้อง 8-12 คำ"], '
+    '"category": "เลือกหมวดที่ใกล้เคียงที่สุด: ภาพรวมกฎหมาย, วิธีจัดซื้อจัดจ้าง, สัญญาและการตรวจรับ, บริหารพัสดุ, บทลงโทษ, ระเบียบและหนังสือเวียน"}\n'
+    "ถ้าไม่มั่นใจตัวเลข/มาตรา/วันที่ที่แม่นยำ ให้เขียนเชิงหลักการกว้าง ๆ แทนการเดาตัวเลขที่ไม่แน่ใจ "
+    "ห้ามระบุตัวเลขมาตราที่ไม่มั่นใจว่าถูกต้อง"
+)
+
+
+def _parse_kb_gen_json(text: str) -> dict | None:
+    text = re.sub(r"^```(?:json)?|```$", "", (text or "").strip(), flags=re.MULTILINE).strip()
+    try:
+        data = json.loads(text)
+    except Exception:
+        m = re.search(r"\{.*\}", text, re.DOTALL)
+        if not m:
+            return None
+        try:
+            data = json.loads(m.group(0))
+        except Exception:
+            return None
+    title = (data.get("title") or "").strip()
+    body = (data.get("body") or "").strip()
+    if not title or not body:
+        return None
+    kws = data.get("keywords") or []
+    if isinstance(kws, str):
+        kws = [k.strip() for k in kws.split(",") if k.strip()]
+    return {
+        "title": title[:120],
+        "body": body[:3000],
+        "keywords": [str(k).strip() for k in kws if str(k).strip()][:14],
+        "category": (data.get("category") or "ระเบียบและหนังสือเวียน").strip(),
+    }
+
+
+async def _ai_generate_kb_article(topic: str) -> dict | None:
+    """ให้ AI (Claude ก่อนถ้ามี ANTHROPIC_API_KEY ไม่งั้น Gemini) ร่างบทความความรู้ 1 หัวข้อ
+    คืน dict {title,body,keywords,category} หรือ None ถ้าล้มเหลว/ไม่ได้ตั้งคีย์ใดเลย
+    ใช้เฉพาะความรู้ที่โมเดลมีอยู่แล้ว (ไม่ได้ค้นเว็บสด) — ผลลัพธ์จึงยังต้องให้แอดมินตรวจก่อนเปิดใช้เสมอ"""
+    user_prompt = f"หัวข้อบทความ: {topic}"
+    try:
+        if ANTHROPIC_API_KEY:
+            client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY, timeout=25)
+            resp = await client.messages.create(
+                model=ANTHROPIC_MODEL, max_tokens=1200, temperature=0.3,
+                system=_KB_GEN_SYS_PROMPT,
+                messages=[{"role": "user", "content": user_prompt}])
+            text = "".join(b.text for b in resp.content if b.type == "text").strip()
+        elif GEMINI_API_KEY:
+            url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+                   f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}")
+            body = {
+                "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
+                "systemInstruction": {"parts": [{"text": _KB_GEN_SYS_PROMPT}]},
+                "generationConfig": {"responseMimeType": "application/json", "temperature": 0.3, "maxOutputTokens": 1200},
+            }
+            async with httpx.AsyncClient(timeout=25) as c:
+                r = await c.post(url, json=body)
+            j = r.json()
+            if r.status_code != 200:
+                print("kb autogen gemini http error:", r.status_code, str(j)[:300])
+                return None
+            cand = (j.get("candidates") or [{}])[0]
+            parts = (cand.get("content") or {}).get("parts") or []
+            text = "".join(p.get("text", "") for p in parts).strip()
+        else:
+            return None
+        return _parse_kb_gen_json(text)
+    except Exception as e:
+        print("kb autogen error:", topic, e)
+        return None
+
+
+async def _kb_autogen_batch(count: int, actor: str) -> dict:
+    done = set(await _get_setting(_KB_TOPIC_SETTING_KEY, []) or [])
+    pending = [t for t in _PROCUREMENT_TOPICS if t not in done]
+    if not pending:
+        return {"created": [], "failed_topics": [], "remaining": 0}
+    batch = pending[:max(1, min(count, 10))]
+    created, failed_topics = [], []
+    for topic in batch:
+        art = await _ai_generate_kb_article(topic)
+        if not art:
+            failed_topics.append(topic)
+            continue
+        row = {**art, "enabled": False, "updated_by": actor, "updated_at": NOW()}
+        try:
+            res = await supa.insert("kb_articles", row)
+            created.append({"id": (res[0]["id"] if res else None), "title": art["title"], "category": art["category"]})
+            done.add(topic)
+        except Exception as e:
+            print("kb autogen insert error:", e)
+            failed_topics.append(topic)
+    if created:
+        await supa.upsert("app_settings", {"key": _KB_TOPIC_SETTING_KEY, "value": sorted(done), "updated_at": NOW()},
+                          on_conflict="key")
+        _gemini_kb_cache["items"] = None
+    remaining = len(_PROCUREMENT_TOPICS) - len(done)
+    return {"created": created, "failed_topics": failed_topics, "remaining": remaining}
+
+
+@app.get("/api/kb/autogen/status")
+async def kb_autogen_status(admin=Depends(current_admin)):
+    done = set(await _get_setting(_KB_TOPIC_SETTING_KEY, []) or [])
+    pending = [t for t in _PROCUREMENT_TOPICS if t not in done]
+    return {"total": len(_PROCUREMENT_TOPICS), "done": len(_PROCUREMENT_TOPICS) - len(pending),
+            "pending": pending, "ai_ready": bool(ANTHROPIC_API_KEY or GEMINI_API_KEY)}
+
+
+@app.post("/api/kb/autogen/run")
+async def kb_autogen_run(req: Request, admin=Depends(current_admin)):
+    if not (ANTHROPIC_API_KEY or GEMINI_API_KEY):
+        raise HTTPException(400, "ยังไม่ได้ตั้งค่า AI (ANTHROPIC_API_KEY หรือ GEMINI_API_KEY)")
+    b = {}
+    try:
+        b = await req.json()
+    except Exception:
+        pass
+    res = await _kb_autogen_batch(int(b.get("count") or 3), admin["userId"])
+    await supa.log_operation(admin["userId"], "kb.autogen", {"count": b.get("count")}, res)
+    return {"ok": True, **res}
+
+
+@app.api_route("/api/cron/kb-autogen", methods=["GET", "POST"])
+async def cron_kb_autogen(request: Request):
+    """สร้างบทความ KB เรื่องจัดซื้อจัดจ้างภาครัฐเพิ่มทีละน้อยแบบอัตโนมัติ (ค่าเริ่ม 2 บทความ/ครั้ง)
+    เพื่อไม่ให้ยิง AI รัวเกินไป — ทุกบทความ enabled=false ต้องให้แอดมินตรวจก่อนเปิดใช้เสมอ"""
+    _check_cron_key(request)
+    if not (ANTHROPIC_API_KEY or GEMINI_API_KEY):
+        return {"ok": True, "skipped": "no AI key set"}
+    count = int(request.query_params.get("count") or 2)
+    res = await _kb_autogen_batch(count, "cron")
+    await supa.log_operation("cron", "kb.autogen.cron", {"count": count}, res)
+    return {"ok": True, **res}
+
+
 # ---------- knowledge base ----------
 @app.get("/api/kb")
 async def kb_list(admin=Depends(current_admin)):

@@ -12,12 +12,25 @@ export default function KB() {
   const [busy, setBusy] = useState(false)
   const [gaps, setGaps] = useState(null)
   const [showGaps, setShowGaps] = useState(false)
+  const [autogen, setAutogen] = useState(null)
+  const [autogenBusy, setAutogenBusy] = useState(false)
 
   const load = () => api.kb().then((d) => { setList(d.articles); if (d.schema_missing) setHint(d.hint) }).catch((e) => t.err(e.message))
-  useEffect(() => { load() }, [])
+  const loadAutogen = () => api.kbAutogenStatus().then(setAutogen).catch(() => {})
+  useEffect(() => { load(); loadAutogen() }, [])
   useEffect(() => {
     if (showGaps && !gaps) api.kbGaps(14).then(setGaps).catch((e) => t.err(e.message))
   }, [showGaps]) // eslint-disable-line
+
+  const runAutogen = async () => {
+    setAutogenBusy(true)
+    try {
+      const r = await api.kbAutogenRun(3)
+      if (r.created.length) t.ok(`ร่างเพิ่ม ${r.created.length} บทความ (ปิดใช้งานไว้ — ไปตรวจที่รายการด้านล่าง)`)
+      else t.err(r.failed_topics?.length ? 'สร้างไม่สำเร็จ ลองใหม่อีกครั้ง' : 'ครบทุกหัวข้อแล้ว')
+      load(); loadAutogen()
+    } catch (e) { t.err(e.message) } finally { setAutogenBusy(false) }
+  }
 
   const articleFromQuestion = (q) => setForm({
     ...EMPTY, title: q.length > 60 ? q.slice(0, 60) + '…' : q, keywords: q,
@@ -46,6 +59,31 @@ export default function KB() {
       </p>
 
       {hint && <p className="err">{hint}</p>}
+
+      <section className="card">
+        <div className="row spread" style={{ alignItems: 'center' }}>
+          <h3>🤖 สร้างความรู้อัตโนมัติ: จัดซื้อจัดจ้างภาครัฐ</h3>
+          {autogen && <span className="muted sm">{autogen.done}/{autogen.total} หัวข้อ</span>}
+        </div>
+        {!autogen ? <Spinner /> : (
+          <>
+            <div style={{ height: 6, borderRadius: 3, background: 'var(--border)', overflow: 'hidden', margin: '4px 0 8px' }}>
+              <div style={{ height: '100%', width: `${autogen.total ? (autogen.done / autogen.total) * 100 : 0}%`, background: 'var(--primary)' }} />
+            </div>
+            <p className="muted sm">
+              ทุกวันระบบจะร่างบทความความรู้ พ.ร.บ.จัดซื้อจัดจ้างฯ ให้เองอัตโนมัติวันละ 2 บทความ (ต้องรัน migration 0015 ตั้งเวลาก่อน)
+              — ทุกบทความที่ร่าง <b>ปิดใช้งานไว้เสมอ (enabled=false)</b> เป็นเนื้อหาที่ AI สรุปมา ไม่ใช่ตัวบทกฎหมายฉบับสมบูรณ์
+              ต้องตรวจทานความถูกต้อง/ความทันสมัยก่อนเปิดใช้จริงทุกครั้ง
+            </p>
+            {!autogen.ai_ready && <p className="err sm">ยังไม่ได้ตั้งค่า AI (ANTHROPIC_API_KEY หรือ GEMINI_API_KEY) — สร้างบทความอัตโนมัติไม่ได้</p>}
+            <button className="sm primary" disabled={autogenBusy || !autogen.ai_ready || autogen.done >= autogen.total}
+                    onClick={runAutogen}>
+              {autogenBusy && <InlineSpinner />}
+              {autogen.done >= autogen.total ? 'ครบทุกหัวข้อแล้ว' : 'สร้างเพิ่ม 3 บทความตอนนี้'}
+            </button>
+          </>
+        )}
+      </section>
 
       <section className="card">
         <div className="row spread">
