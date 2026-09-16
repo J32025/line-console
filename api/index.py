@@ -4469,7 +4469,8 @@ async def _make_backup():
     raw = json.dumps(dump, ensure_ascii=False).encode()
     size_kb = len(raw) // 1024
     blob = gzip.compress(raw, 6)
-    # เก็บสำเนาไว้ที่ Storage ด้วย (แยกจาก DB — DB ล่มก็ยังกู้ได้)
+    row_counts = {k: (len(v) if isinstance(v, list) else 0) for k, v in dump.items()}
+    # ข้อมูลเต็มเก็บที่ Storage เท่านั้น (แยกจาก DB — DB ล่มก็ยังกู้ได้)
     ext_url = None
     storage_err = None
     try:
@@ -4479,7 +4480,9 @@ async def _make_backup():
     except Exception as e:
         storage_err = str(e)
         print("backup storage upload error:", e)
-    await supa.upsert("backups", {"day": day, "tables": dump, "size_kb": size_kb},
+    # เก็บแค่ metadata + จำนวนแถวต่อตารางลง Postgres (คอลัมน์ tables เดิม แต่ไม่ใส่ข้อมูลเต็มแล้ว —
+    # ตารางที่โตขึ้นเรื่อย ๆ (richmenu_history, line_users ฯลฯ) ทำให้ payload ใหญ่จนพัง 500 ตอน upsert)
+    await supa.upsert("backups", {"day": day, "tables": row_counts, "size_kb": size_kb},
                       on_conflict="day")
     old = await supa.select("backups", params={"select": "id,day", "order": "day.desc", "limit": "60"})
     for r in old[30:]:
@@ -4490,7 +4493,7 @@ async def _make_backup():
             pass
     return {"day": day, "size_kb": size_kb, "gz_kb": len(blob) // 1024,
             "storage": bool(ext_url), "storage_url": ext_url, "storage_err": storage_err,
-            "rows": {k: (len(v) if isinstance(v, list) else 0) for k, v in dump.items()}}
+            "rows": row_counts}
 
 
 async def _retag_from_registrations() -> dict:

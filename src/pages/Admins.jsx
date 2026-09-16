@@ -71,12 +71,21 @@ export default function Admins({ me }) {
   }
 
   const downloadBackup = async (b) => {
+    // ข้อมูลเต็มอยู่ที่ Storage เท่านั้น (ตาราง backups เก็บแค่จำนวนแถวไว้ดูคร่าว ๆ — ไฟล์เต็มโตเกินจะพังตอนเขียนลง Postgres)
+    if (!b.storage_url) return t.err('ไม่มีไฟล์สำรองใน Storage สำหรับวันนี้')
     setBusy('dl' + b.id)
     try {
-      const full = await api.backupGet(b.id)
-      const blob = new Blob([JSON.stringify(full.tables, null, 2)], { type: 'application/json' })
+      const res = await fetch(b.storage_url)
+      if (!res.ok) throw new Error('ดาวน์โหลดจาก Storage ไม่สำเร็จ')
+      let blob, ext = 'json.gz'
+      if (typeof DecompressionStream !== 'undefined') {
+        blob = await new Response(res.body.pipeThrough(new DecompressionStream('gzip'))).blob()
+        ext = 'json'
+      } else {
+        blob = await res.blob()
+      }
       const a = document.createElement('a')
-      a.href = URL.createObjectURL(blob); a.download = `backup-${b.day}.json`; a.click()
+      a.href = URL.createObjectURL(blob); a.download = `backup-${b.day}.${ext}`; a.click()
       URL.revokeObjectURL(a.href)
     } catch (e) { t.err(e.message) } finally { setBusy('') }
   }
