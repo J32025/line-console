@@ -2991,6 +2991,79 @@ async def cron_enforce_richmenu(request: Request):
     return {"ok": True, "total": len(uids), "assigned": results["ok"], "fail": results["fail"]}
 
 
+async def _richmenu_auto_unregistered(limit: int = 300) -> dict:
+    """หา follower ที่ยังไม่เคยถูกตั้งเมนูเฉพาะ (rich_menu_status none/ว่าง — แปลว่ายังใช้เมนู default ของบอทอยู่)
+    และยังไม่มีแถวใน registrations เลย -> สลับเป็นเมนู unregistered_richmenu_id (ตั้งค่าที่หน้า Admins)
+    ตั้งใจไม่แตะคนที่เคยถูกตั้งเมนูเฉพาะไปแล้ว กันชนกับโฟลว์อื่น (เช่น ห้อง Zoom/รอผลสอบ/ริชเมนูตามคอร์ส)
+    เป็น rolling batch เหมือน sync-richmenu (เอาคนที่เช็คนานสุดก่อน) — เผื่อ follower ใหม่ทยอยเข้ามาเรื่อย ๆ"""
+    rid = await _get_setting("unregistered_richmenu_id")
+    if not rid:
+        return {"skipped": "ยังไม่ได้ตั้งค่า unregistered_richmenu_id", "total": 0, "ok": 0, "fail": 0}
+
+    rows = await supa.select("line_users", params={
+        "select": "line_user_id,current_rich_menu_id,rich_menu_status", "is_following": "eq.true",
+        "or": "(rich_menu_status.eq.none,rich_menu_status.is.null)",
+        "order": "rich_menu_checked_at.asc.nullsfirst",
+        "limit": str(limit),
+    })
+    uids = [r["line_user_id"] for r in rows if r.get("current_rich_menu_id") != rid]
+    if uids:
+        reg_rows = await supa.select_all("registrations", params={"select": "line_user_id"})
+        registered = {r["line_user_id"] for r in reg_rows if r.get("line_user_id")}
+        uids = [u for u in uids if u not in registered]
+    if not uids:
+        return {"total": 0, "ok": 0, "fail": 0}
+
+    old_map = await _fetch_current_menu_map(uids)
+    sem = asyncio.Semaphore(8)
+    results = {"ok": 0, "fail": 0}
+
+    async def one(uid):
+        async with sem:
+            ok, code = await line.user_richmenu_link(uid, rid)
+            results["ok" if ok else "fail"] += 1
+            return uid, ok
+
+    done = await asyncio.gather(*[one(u) for u in uids])
+    ts = NOW()
+    patch = [{
+        "line_user_id": u,
+        "current_rich_menu_id": rid if ok else old_map.get(u, {}).get("current_rich_menu_id"),
+        "rich_menu_status": "assigned" if ok else old_map.get(u, {}).get("rich_menu_status"),
+        "rich_menu_checked_at": ts, "updated_at": ts,
+    } for u, ok in done]
+    try:
+        await supa.upsert("line_users", patch, on_conflict="line_user_id")
+    except Exception as e:
+        results["db_error"] = str(e)
+
+    await _log_richmenu_diffs(old_map, patch, "auto-unregistered", "cron")
+    return {"total": len(uids), **results}
+
+
+@app.post("/api/richmenu/auto-unregistered/run")
+async def richmenu_auto_unregistered_run(admin=Depends(current_admin)):
+    if not await _get_setting("unregistered_richmenu_id"):
+        raise HTTPException(400, "ยังไม่ได้ตั้งค่า Rich Menu สำหรับคนที่ยังไม่ลงทะเบียน (หน้า ผู้ดูแล)")
+    res = await _richmenu_auto_unregistered(limit=1000)
+    await supa.log_operation(admin["userId"], "richmenu.auto_unregistered", {"manual": True}, res)
+    return {"ok": True, **res}
+
+
+@app.api_route("/api/cron/richmenu-unregistered", methods=["GET", "POST"])
+async def cron_richmenu_unregistered(request: Request):
+    """ตั้งเวลาให้ทำงานเองต่อเนื่อง (migration 0016) — no-op ถ้ายังไม่ได้ตั้ง unregistered_richmenu_id"""
+    _check_cron_key(request)
+    try:
+        limit = min(int(request.query_params.get("limit", "300")), 1000)
+    except ValueError:
+        limit = 300
+    res = await _richmenu_auto_unregistered(limit=limit)
+    await supa.log_operation("cron", "richmenu.auto_unregistered", {"limit": limit}, res,
+                             "ok" if res.get("fail", 0) == 0 else "partial")
+    return {"ok": True, **res}
+
+
 # ============================================================
 # USERS
 # ============================================================
@@ -4634,7 +4707,12 @@ async def cron_heartbeat(request: Request):
         "automation.run": 2 * 3600,
         "stats.snapshot": 30 * 3600,
         "backup": 30 * 3600,
+        "reconcile.auto_mark": 30 * 3600,
     }
+    # richmenu.auto_unregistered เฝ้าดูแยก — เป็น no-op ปกติถ้ายังไม่ตั้ง unregistered_richmenu_id
+    # (ใส่ใน checks ตายตัวจะ false-positive กับ user ที่ไม่ได้ใช้ฟีเจอร์นี้)
+    if await _get_setting("unregistered_richmenu_id"):
+        checks["richmenu.auto_unregistered"] = 6 * 3600
     stale = []
     for act, limit in checks.items():
         last = await _cron_last_run(f"*{act}*")
@@ -5839,8 +5917,7 @@ async def cron_task_reminders(request: Request):
     return {"ok": True, "admins_notified": sent, "overdue": len(overdue)}
 
 
-@app.get("/api/reconcile")
-async def reconcile(admin=Depends(current_admin)):
+async def _reconcile_data() -> dict:
     """กระทบยอด: ทะเบียน vs สลิปที่ยืนยัน vs สถานะจ่าย"""
     regs = await supa.select_all("registrations", params={
         "select": "id,line_user_id,course,course_raw,name,tel,org,paid,created_at"})
@@ -5935,6 +6012,11 @@ async def reconcile(admin=Depends(current_admin)):
     }
 
 
+@app.get("/api/reconcile")
+async def reconcile(admin=Depends(current_admin)):
+    return await _reconcile_data()
+
+
 @app.get("/api/reports/revenue")
 async def report_revenue(admin=Depends(current_admin), frm: str = "", to: str = "",
                          group: str = "course", format: str = ""):
@@ -5981,13 +6063,9 @@ async def report_revenue(admin=Depends(current_admin), frm: str = "", to: str = 
             "total": round(total), "count": sum(r["count"] for r in out)}
 
 
-@app.post("/api/reconcile/mark-paid")
-async def reconcile_mark_paid(req: Request, admin=Depends(current_admin)):
-    """mark registrations เป็นจ่ายแล้วเป็นชุด (จาก paid_not_marked)"""
-    b = await req.json()
-    ids = [int(x) for x in b.get("ids", []) if str(x).isdigit()]
+async def _mark_registrations_paid_by_ids(ids: list[int]) -> int:
     if not ids:
-        raise HTTPException(400, "ไม่มี id")
+        return 0
     await supa.update("registrations", {"paid": True, "updated_at": NOW()},
                       {"id": f"in.({','.join(map(str, ids))})"})
     # tag จ่ายแล้ว
@@ -6005,8 +6083,33 @@ async def reconcile_mark_paid(req: Request, admin=Depends(current_admin)):
                 await supa.upsert("line_users", patch, on_conflict="line_user_id")
         except Exception as e:
             print("mark-paid tag error:", e)
-    await supa.log_operation(admin["userId"], "reconcile.mark_paid", {"count": len(ids)}, None)
-    return {"ok": True, "marked": len(ids)}
+    return len(ids)
+
+
+@app.post("/api/reconcile/mark-paid")
+async def reconcile_mark_paid(req: Request, admin=Depends(current_admin)):
+    """mark registrations เป็นจ่ายแล้วเป็นชุด (จาก paid_not_marked)"""
+    b = await req.json()
+    ids = [int(x) for x in b.get("ids", []) if str(x).isdigit()]
+    if not ids:
+        raise HTTPException(400, "ไม่มี id")
+    marked = await _mark_registrations_paid_by_ids(ids)
+    await supa.log_operation(admin["userId"], "reconcile.mark_paid", {"count": marked}, None)
+    return {"ok": True, "marked": marked}
+
+
+@app.api_route("/api/cron/reconcile-auto-mark", methods=["GET", "POST"])
+async def cron_reconcile_auto_mark(request: Request):
+    """ทุกวัน: มี slip status=verified ตรงคอร์สกับทะเบียนอยู่แล้ว แต่ registrations.paid ยังเป็น false
+    (เคส 'paid_not_marked' ในหน้ากระทบยอด) -> mark paid=true ให้อัตโนมัติ (ข้อมูลยืนยันแล้วอยู่แล้ว แค่ sync flag)
+    ไม่แตะเคส unpaid (ไม่มีสลิปเลย) หรือ slip_no_reg (จับคู่คอร์สไม่ได้) — สองเคสนั้นยังต้องให้แอดมินตรวจเอง"""
+    _check_cron_key(request)
+    data = await _reconcile_data()
+    ids = [x["id"] for x in data["issues"]["paid_not_marked"]]
+    marked = await _mark_registrations_paid_by_ids(ids)
+    res = {"marked": marked, "candidate_ids": ids[:50]}
+    await supa.log_operation("cron", "reconcile.auto_mark", {"count": marked}, res)
+    return {"ok": True, **res}
 
 
 _REG_PRICES_DEFAULT = {"FC": 1499, "IC": 1999, "PC": 999}

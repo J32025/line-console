@@ -18,6 +18,7 @@ export default function Admins({ me }) {
   const [regNext, setRegNext] = useState('')
   const [regCourses, setRegCourses] = useState('')
   const [regMenuMap, setRegMenuMap] = useState({})
+  const [unregMenu, setUnregMenu] = useState('')
   const [menuList, setMenuList] = useState([])
   const [accts, setAccts] = useState([])
   const [na, setNa] = useState({ course: '', bank: '', account_no: '', account_name: '', price: '', full_price: '' })
@@ -34,6 +35,7 @@ export default function Admins({ me }) {
       setRegNext(d.settings.reg_next_url || '')
       setRegCourses(Array.isArray(d.settings.reg_courses) ? d.settings.reg_courses.join(', ') : (d.settings.reg_courses || ''))
       setRegMenuMap(d.settings.reg_richmenu_map || {})
+      setUnregMenu(d.settings.unregistered_richmenu_id || '')
     }).catch(() => {})
     api.payAccounts().then((d) => setAccts(d.accounts)).catch(() => {})
     api.richmenuUsage().then((d) => setMenuList((d.items || []).filter((m) => m.richMenuId))).catch(() => {})
@@ -225,6 +227,36 @@ export default function Admins({ me }) {
             t.ok('บันทึกแล้ว')
           } catch (e) { t.err(e.message) } finally { setBusy('') }
         }}>บันทึกการสลับเมนู</button>
+
+        <h4 className="sm" style={{ marginTop: 16 }}>Rich Menu เตือนคนที่ยังไม่ลงทะเบียน (อัตโนมัติต่อเนื่อง)</h4>
+        <p className="muted xs">
+          ระบบจะเช็คทุก 30 นาที — follower ใหม่ที่ยังไม่เคยถูกตั้งเมนูเฉพาะ (ยังใช้เมนู default อยู่) และยังไม่ลงทะเบียนเลย
+          จะถูกสลับมาเมนูนี้ให้เองอัตโนมัติ (ไม่แตะคนที่เคยถูกตั้งเมนูอื่นไปแล้ว เช่น ห้อง Zoom/รอผลสอบ) — เว้นว่าง = ปิดฟีเจอร์นี้
+        </p>
+        <div className="row" style={{ gap: 8, alignItems: 'center' }}>
+          <select style={{ flex: 1 }} value={unregMenu} onChange={(e) => setUnregMenu(e.target.value)}>
+            <option value="">— ปิด —</option>
+            {menuList.map((m) => (
+              <option key={m.richMenuId} value={m.richMenuId}>
+                {m.name} ({m.count.toLocaleString()} คน) — {m.richMenuId}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="row" style={{ gap: 8, marginTop: 6 }}>
+          <button className="primary sm" disabled={busy === 'unregmenu'} onClick={async () => {
+            setBusy('unregmenu')
+            try { await api.setSetting('unregistered_richmenu_id', unregMenu || null); t.ok('บันทึกแล้ว') }
+            catch (e) { t.err(e.message) } finally { setBusy('') }
+          }}>บันทึก</button>
+          <button className="sm" disabled={busy === 'unregrun' || !unregMenu} onClick={async () => {
+            setBusy('unregrun')
+            try {
+              const r = await api.richmenuAutoUnregisteredRun()
+              t.ok(`สลับเมนูให้ ${r.ok || 0} คน (เหลือรอรอบถัดไปถ้ายังมี)`)
+            } catch (e) { t.err(e.message) } finally { setBusy('') }
+          }}>{busy === 'unregrun' && <InlineSpinner />}รันเดี๋ยวนี้ (ไม่ต้องรอ 30 นาที)</button>
+        </div>
       </section>
 
       <section className="card">
