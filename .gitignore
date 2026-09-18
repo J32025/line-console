@@ -21,3 +21,6 @@ reg2.html
 *_userids*.txt
 *.roster.txt
 _liff_keys/
+
+.vercel
+.env*
