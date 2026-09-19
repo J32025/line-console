@@ -2677,6 +2677,27 @@ async def set_menu_gemini(rid: str, req: Request, admin=Depends(current_admin)):
 
 @app.get("/api/richmenu/usage")
 async def richmenu_usage(admin=Depends(current_admin)):
+    return await _richmenu_usage_data()
+
+
+@app.get("/api/cron/richmenu-usage")
+async def cron_richmenu_usage(request: Request):
+    """สรุปการใช้ Rich Menu แบบอ่านอย่างเดียว (ต้องมี ?key=CRON_SECRET) — ตัวเลขรวม ไม่มีข้อมูลส่วนบุคคล
+    แนบค่าตั้งค่าที่เกี่ยวกับ Rich Menu (ไม่ใช่ความลับ: เป็นแค่ richMenuId) และเวลา sync ล่าสุดด้วย"""
+    _check_cron_key(request)
+    data = await _richmenu_usage_data()
+    data["config"] = {
+        "unregistered_richmenu_id": await _get_setting("unregistered_richmenu_id", None),
+        "reg_richmenu_map": await _get_setting("reg_richmenu_map", None),
+        "slip_success_richmenu_id": SLIP_SUCCESS_RICHMENU_ID or None,
+        "enforce_richmenu_id": ENFORCE_RICHMENU_ID or None,
+        "gemini_trigger_menu_name": GEMINI_TRIGGER_MENU_NAME,
+    }
+    data["last_sync"] = await _cron_last_run("*richmenu.sync*")
+    return data
+
+
+async def _richmenu_usage_data() -> dict:
     """นับจำนวน user ที่ผูกแต่ละ rich menu อยู่ (จาก DB) เรียงมาก→น้อย"""
     rows = await supa.select_all("line_users", params={
         "select": "current_rich_menu_id", "is_following": "eq.true",
