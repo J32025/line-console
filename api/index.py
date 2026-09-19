@@ -2843,7 +2843,7 @@ async def _sync_richmenu_for(uids: list[str], source: str = "sync", actor: str |
         return {"total": 0, "assigned": 0, "none": 0, "error": 0}
     old_map = await _fetch_current_menu_map(uids)
     menus = {m["richMenuId"]: m.get("name") for m in await line.richmenu_list()}
-    sem = asyncio.Semaphore(10)
+    sem = asyncio.Semaphore(25)  # งาน I/O ล้วน (รอ LINE API) — ขนานมากขึ้น = wall time สั้นลง = กิน GB-hrs ของ Vercel น้อยลง
     summary = {"assigned": 0, "none": 0, "error": 0}
     patch = []
 
@@ -4703,7 +4703,7 @@ async def cron_heartbeat(request: Request):
     """เช็คว่า cron จำเป็นยังทำงานอยู่ไหม — แจ้งแอดมินถ้าเงียบเกินกำหนด"""
     _check_cron_key(request)
     checks = {
-        "richmenu.sync": 2 * 3600,
+        "richmenu.sync": 14 * 3600,  # sync รันวันละ 2 รอบ (08:00 / 19:00 น.) ห่างสุด ~13 ชม.
         "automation.run": 2 * 3600,
         "stats.snapshot": 30 * 3600,
         "backup": 30 * 3600,
