@@ -107,6 +107,14 @@ async def update(table: str, patch: dict, params: dict) -> list:
     return r.json() if r.content else []
 
 
+async def rpc(fn: str, params: dict, *, timeout: int = 5):
+    """เรียก Postgres function ผ่าน PostgREST (/rpc/<fn>) — ไม่ retry ตั้งใจ ใช้กับงานที่ต้องเร็วและยอมล้มได้ (เช่น rate limit)"""
+    r = await _req("POST", f"{_base()}/rpc/{fn}", headers=_headers(), json_body=params,
+                   timeout=timeout, retries=0)
+    r.raise_for_status()
+    return r.json() if r.content else None
+
+
 async def delete(table: str, params: dict) -> None:
     r = await _req("DELETE", f"{_base()}/{table}", headers=_headers(), params=params)
     r.raise_for_status()

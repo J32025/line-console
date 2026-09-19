@@ -72,6 +72,43 @@ def _rate_ok(key: str, limit: int, window: float) -> bool:
     return True
 
 
+# ---- rate limit แบบใช้ได้จริง: นับใน Postgres (migration 0019) ใช้ร่วมกันทุก instance ----
+# fail-open: ตาราง/function ยังไม่มี หรือ DB ช้า -> ถอยไปใช้ตัวนับในหน่วยความจำข้างบน แล้วพัก DB 5 นาที
+# (คำขอจริงต้องไม่ล่มเพราะระบบกันสแปมเอง)
+_rl_db_down_until = 0.0
+
+
+def _client_ip(request: Request) -> str:
+    return request.headers.get("x-forwarded-for", "?").split(",")[0].strip() or "?"
+
+
+async def _rl_db(key: str, limit: int, window: int):
+    """True = ยังไม่เกิน, False = เกิน, None = ใช้ DB ไม่ได้"""
+    global _rl_db_down_until
+    if time.time() < _rl_db_down_until:
+        return None
+    try:
+        return bool(await supa.rpc("rate_limit_hit", {
+            "p_key": key, "p_window_seconds": int(window), "p_limit": int(limit)}))
+    except Exception as e:
+        _rl_db_down_until = time.time() + 300
+        print("rate limit db unavailable, falling back to in-memory for 5min:", str(e)[:150])
+        return None
+
+
+async def _rate_limit_db(key: str, limit: int, window: int):
+    ok = await _rl_db(key, limit, window)
+    if ok is None:
+        _rate_limit(key, limit, window)
+    elif not ok:
+        raise HTTPException(429, "เรียกถี่เกินไป ลองใหม่อีกครั้ง")
+
+
+async def _rate_ok_db(key: str, limit: int, window: int) -> bool:
+    ok = await _rl_db(key, limit, window)
+    return _rate_ok(key, limit, window) if ok is None else ok
+
+
 _alert_last: dict[str, float] = {}
 
 
@@ -104,14 +141,16 @@ async def short_redirect(code: str, request: Request):
     if not rows:
         return RedirectResponse(APP_URL, status_code=302)
     sl = rows[0]
-    try:
-        await supa.insert("link_clicks", {
-            "code": code, "target": sl["target"], "broadcast_id": sl.get("broadcast_id"),
-            "line_user_id": request.query_params.get("u"),
-        })
-        await supa.update("short_links", {"clicks": (sl.get("clicks") or 0) + 1}, {"code": f"eq.{code}"})
-    except Exception:
-        pass
+    # เกินโควต้า = ยังพาไปปลายทางตามปกติ แค่ไม่บันทึกคลิก (ไม่บล็อกคนจริง กันปั่นยอด/ปั่น DB เท่านั้น)
+    if await _rate_ok_db(f"r:{_client_ip(request)}", 120, 60):
+        try:
+            await supa.insert("link_clicks", {
+                "code": code, "target": sl["target"], "broadcast_id": sl.get("broadcast_id"),
+                "line_user_id": request.query_params.get("u"),
+            })
+            await supa.update("short_links", {"clicks": (sl.get("clicks") or 0) + 1}, {"code": f"eq.{code}"})
+        except Exception:
+            pass
     return RedirectResponse(sl["target"], status_code=302)
 
 
@@ -152,12 +191,33 @@ async def link_delete(code: str, admin=Depends(current_admin)):
     return {"ok": True}
 
 
+async def _deep_health_allowed(request: Request) -> bool:
+    """deep=1 เรียก LINE/EasySlip/Gemini/DB จริงหลายตัว (2-3 วินาที/ครั้ง) — ห้ามเปิดสาธารณะ ใครยิงรัวก็เผาโควต้าได้
+    อนุญาตเฉพาะ: ?key=CRON_SECRET (หรือ header x-cron-key) หรือแอดมินที่ login แล้ว (หน้า ผู้ดูแล ส่ง Bearer token มาอยู่แล้ว)"""
+    key = request.query_params.get("key") or request.headers.get("x-cron-key", "")
+    if CRON_SECRET and key and hmac.compare_digest(key.encode(), CRON_SECRET.encode()):
+        return True
+    auth = request.headers.get("authorization", "")
+    tok = auth[7:] if auth.lower().startswith("bearer ") else auth
+    # กรองก่อนเรียก LINE verify (คำขอภายนอก): id_token จริงเป็น JWT 3 ท่อน + จำกัดต่อ IP
+    if tok.count(".") == 2 and len(tok) > 100 and await _rate_ok_db(f"health:{_client_ip(request)}", 20, 60):
+        try:
+            await current_admin(authorization=auth)
+            return True
+        except Exception:
+            return False
+    return False
+
+
 @app.get("/api/health")
-async def health(deep: int = 0, test_gemini: int = 0, test_uid: str = "", test_ask: str = ""):
+async def health(request: Request, deep: int = 0, test_gemini: int = 0, test_uid: str = "", test_ask: str = ""):
     out = {"ok": True, "time": NOW(),
            "commit": (os.environ.get("VERCEL_GIT_COMMIT_SHA") or "?")[:7],
            "deployed_at": os.environ.get("VERCEL_DEPLOYMENT_ID", "?")}
     if not deep:
+        return out
+    if not await _deep_health_allowed(request):
+        out["deep"] = "locked — ต้องใช้ ?key=<CRON_SECRET> หรือ login แอดมิน"
         return out
     # deep check
     checks = {}
@@ -363,8 +423,8 @@ async def global_search(admin=Depends(current_admin), q: str = ""):
 # ============================================================
 @app.post("/api/webhook")
 async def webhook(request: Request):
-    ip = request.headers.get("x-forwarded-for", "?").split(",")[0].strip()
-    _rate_limit(f"wh:{ip}", limit=120, window=60)  # 120 req/นาที/ip (LINE ยิงเป็น batch อยู่แล้ว)
+    # ไม่มี rate limit ที่นี่ตั้งใจ: คำขอปลอมโดน 403 จากการตรวจลายเซ็น (HMAC ไม่มี I/O) ก็ไม่ทำงานต่ออยู่แล้ว
+    # จำกัดอัตราไม่ได้ลดจำนวน invocation แต่จะเสี่ยงตีกลับ event จริงของ LINE ตอนแคมเปญคนคลิกพร้อมกันเยอะ
     body = await request.body()
     sig = request.headers.get("x-line-signature", "")
     if LINE_CHANNEL_SECRET:
@@ -1661,13 +1721,14 @@ async def _handle_gemini_replies(events: list) -> set:
         uid = e["source"]["userId"]
         if uid in handled:
             continue
-        if not _rate_ok(f"gemini:{uid}", limit=6, window=60):  # กันสแปม/ต้นทุนบานปลาย
-            continue
         try:
             rid = await line.user_richmenu_get(uid)
         except Exception:
             rid = None
         if rid not in menu_temp:
+            continue
+        # เช็คหลังตรวจสิทธิ์เมนู: จ่ายค่า DB เฉพาะข้อความที่ AI จะตอนจริง (ไม่ใช่ทุกข้อความของทุกคน)
+        if not await _rate_ok_db(f"gemini:{uid}", 6, 60):  # กันสแปม/ต้นทุนบานปลาย
             continue
         question = e["message"].get("text") or ""
 
@@ -5449,6 +5510,7 @@ async def _verify_member_token(id_token: str) -> dict | None:
 @app.post("/api/public/reg-check")
 async def public_reg_check(req: Request):
     """หน้าลงทะเบียนสมาชิกเรียก: ตรวจว่า userId นี้มีในทะเบียนแล้วหรือยัง"""
+    await _rate_limit_db(f"regchk:{_client_ip(req)}", 60, 60)  # ก่อนเรียก LINE verify (คำขอภายนอก)
     b = await req.json()
     u = await _verify_member_token(b.get("idToken"))
     if not u:
@@ -5480,7 +5542,8 @@ async def public_reg_submit(req: Request):
     course = _norm_course(course_raw)
     if not name or not tel or not course:
         raise HTTPException(400, "กรอก ชื่อ-นามสกุล / เบอร์โทร / หลักสูตร ให้ครบ")
-    _rate_limit(f"reg:{u['userId']}", limit=6, window=300)
+    await _rate_limit_db(f"reg:{u['userId']}", 6, 300)
+    await _rate_limit_db(f"regip:{_client_ip(req)}", 30, 300)  # กันคนเดียวหลายบัญชี LINE ยิงรัวจาก IP เดียว
 
     # ระบบรองรับคนละ 1 หลักสูตรเท่านั้น — ถ้าเคยลงทะเบียนไปแล้ว (คอร์สไหนก็ตาม) ปฏิเสธทันที
     # กันซ้ำแม้ฝั่ง UI จะพยายามพาไปหน้าฟอร์มอีกรอบก็ตาม (เผื่อ token เก่า/เปิดฟอร์มค้างไว้)
