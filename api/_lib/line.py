@@ -67,6 +67,21 @@ async def get_profile(user_id: str):
         return r.json()
     return None
 
+async def is_friend(user_id: str):
+    """เป็นเพื่อนกับบัญชีนี้อยู่ไหม — เช็คกับ LINE ตรง ๆ (ไม่พึ่งค่าใน DB ที่อาจคลาดเคลื่อนจาก import/webhook ตกหล่น)
+    True = เป็นเพื่อน (ดึงโปรไฟล์ได้) · False = ไม่ได้เป็นเพื่อน/บล็อกอยู่ (LINE ตอบ 404)
+    None = ไม่แน่ใจ (timeout/5xx/429) — ผู้เรียกต้องไม่ถือว่า 'ไม่ใช่เพื่อน' (อย่าบล็อกคนเพราะระบบเราเอง/LINE มีปัญหา)"""
+    try:
+        r = await _req("GET", f"/v2/bot/profile/{user_id}", retries=2)
+    except Exception:
+        return None
+    if r.status_code == 200:
+        return True
+    if r.status_code == 404:
+        return False
+    return None
+
+
 async def followers_ids(limit=1000, start=None):
     params = {"limit": limit}
     if start:

@@ -5518,21 +5518,67 @@ async def _verify_member_token(id_token: str) -> dict | None:
         return None
 
 
+_REREG_TAG = "ต้องลงทะเบียนใหม่"   # ติดที่ line_users.tags — ลงทะเบียนไว้แต่ไม่ได้เป็นเพื่อนกับบัญชี (ส่งข้อความ/สลับเมนูให้ไม่ได้)
+
+
+async def _oa_add_friend_url() -> str:
+    """ลิงก์เพิ่มเพื่อน — ตั้งเองได้ที่ setting oa_add_friend_url ไม่งั้นใช้ basic ID ของบัญชี (@886acdfn)"""
+    return (await _get_setting("oa_add_friend_url", None)) or "https://line.me/R/ti/p/@886acdfn"
+
+
+async def _user_tags(uid: str):
+    """tags ของ user (list) หรือ None ถ้ายังไม่มีแถวใน line_users"""
+    ex = await supa.select("line_users", params={"select": "tags", "line_user_id": f"eq.{uid}", "limit": "1"})
+    return ((ex[0].get("tags") or []) if ex else None)
+
+
+async def _set_rereg_flag(uid: str, on: bool):
+    cur = await _user_tags(uid)
+    tags = set(cur or [])
+    new = (tags | {_REREG_TAG}) if on else (tags - {_REREG_TAG})
+    if cur is not None and new == tags:
+        return
+    row = {"line_user_id": uid, "tags": sorted(new), "updated_at": NOW()}
+    if cur is None:   # ยังไม่มีแถว — คนที่ไม่ได้เป็นเพื่อน จึงไม่ใช่ผู้ติดตาม
+        row.update({"source": "registration", "is_following": False})
+    await supa.upsert("line_users", [row], on_conflict="line_user_id")
+
+
 @app.post("/api/public/reg-check")
 async def public_reg_check(req: Request):
-    """หน้าลงทะเบียนสมาชิกเรียก: ตรวจว่า userId นี้มีในทะเบียนแล้วหรือยัง"""
+    """หน้าลงทะเบียนสมาชิกเรียก: ตรวจว่า userId นี้มีในทะเบียนแล้วหรือยัง + เป็นเพื่อนกับบัญชีแล้วหรือยัง
+    - ไม่ได้เป็นเพื่อน -> isFriend=false (หน้าเว็บให้กดเพิ่มเพื่อนก่อน)
+    - เคยลงทะเบียนไว้แต่ไม่ได้เป็นเพื่อน -> ติดธง needsRereg (registered=false) ให้ลงทะเบียนใหม่หลังเพิ่มเพื่อน"""
     await _rate_limit_db(f"regchk:{_client_ip(req)}", 60, 60)  # ก่อนเรียก LINE verify (คำขอภายนอก)
     b = await _json_obj(req)
     u = await _verify_member_token(b.get("idToken"))
     if not u:
         raise HTTPException(401, "ยืนยันตัวตน LINE ไม่สำเร็จ")
+    uid = u["userId"]
     regs = await supa.select("registrations", params={
-        "line_user_id": f"eq.{u['userId']}",
-        "select": "id,course,course_raw,paid,name,approved,created_at",
+        "line_user_id": f"eq.{uid}",
+        "select": "id,course,course_raw,paid,name,tel,org,email,approved,created_at",
         "order": "created_at.desc"})
+    is_friend = (await line.is_friend(uid)) is not False   # เช็คไม่ได้ (None) = ไม่บล็อก
+    needs_rereg = False
+    if regs:
+        flagged = _REREG_TAG in (await _user_tags(uid) or [])
+        if not is_friend and not flagged:
+            # ลงทะเบียนไว้แล้วแต่ตอนนี้ไม่ได้เป็นเพื่อน -> ติดธงให้ลงทะเบียนใหม่ (เก็บแถวเดิม/สถานะชำระไว้ ไม่ลบ)
+            try:
+                await _set_rereg_flag(uid, True)
+                flagged = True
+            except Exception as e:
+                print("reg-check rereg flag error:", e)
+        needs_rereg = flagged
+    old = regs[0] if (regs and needs_rereg) else None
     return {
-        "registered": bool(regs),
-        "userId": u["userId"], "displayName": u.get("name"), "picture": u.get("picture"),
+        "registered": bool(regs) and not needs_rereg,
+        "isFriend": is_friend, "needsRereg": needs_rereg,
+        "addFriendUrl": await _oa_add_friend_url(),
+        "prefill": ({"name": old.get("name"), "tel": old.get("tel"), "org": old.get("org"),
+                     "email": old.get("email"), "course": old.get("course")} if old else None),
+        "userId": uid, "displayName": u.get("name"), "picture": u.get("picture"),
         "registrations": regs,
         "courses": await _reg_courses(),
         "nextUrl": await _get_setting("reg_next_url", ""),
@@ -5556,12 +5602,28 @@ async def public_reg_submit(req: Request):
     await _rate_limit_db(f"reg:{u['userId']}", 6, 300)
     await _rate_limit_db(f"regip:{_client_ip(req)}", 30, 300)  # กันคนเดียวหลายบัญชี LINE ยิงรัวจาก IP เดียว
 
+    # ต้องเป็นเพื่อนกับบัญชีก่อน — ไม่งั้นส่งข้อความ/สลับ Rich Menu ให้ไม่ได้เลย (LINE ไม่อนุญาต)
+    # เช็คไม่ได้ (None) ไม่บล็อก; หน้าเว็บเช็คไว้แล้วตอน reg-check นี่คือกันซ้ำเผื่อยิงตรง/เปิดฟอร์มค้างไว้
+    friend = await line.is_friend(u["userId"])
+    if friend is False:
+        raise HTTPException(400, "กรุณาเพิ่มเพื่อนบัญชี น้องพัสดุ ก่อน แล้วกลับมาลงทะเบียนใหม่ "
+                                 "(ถ้าเคยบล็อกไว้ ให้ปลดบล็อกก่อน)")
+
     # ระบบรองรับคนละ 1 หลักสูตรเท่านั้น — ถ้าเคยลงทะเบียนไปแล้ว (คอร์สไหนก็ตาม) ปฏิเสธทันที
     # กันซ้ำแม้ฝั่ง UI จะพยายามพาไปหน้าฟอร์มอีกรอบก็ตาม (เผื่อ token เก่า/เปิดฟอร์มค้างไว้)
+    # ข้อยกเว้น: คนที่ติดธง "ต้องลงทะเบียนใหม่" (เคยลงไว้ตอนยังไม่เป็นเพื่อน) และตอนนี้เป็นเพื่อนแล้ว
+    # -> อัปเดตทับแถวเดิม (ไม่สร้างแถวที่สอง ไม่แตะสถานะชำระเงิน/อนุมัติ)
     existing = await supa.select("registrations", params={
-        "line_user_id": f"eq.{u['userId']}", "select": "course", "limit": "1"})
+        "line_user_id": f"eq.{u['userId']}", "select": "id,course,paid",
+        "order": "paid.desc,created_at.desc"})
+    rereg_row = None
     if existing:
-        raise HTTPException(400, f"คุณลงทะเบียนหลักสูตร {existing[0]['course']} ไปแล้ว ระบบรองรับคนละ 1 หลักสูตรเท่านั้น")
+        if _REREG_TAG not in (await _user_tags(u["userId"]) or []):
+            raise HTTPException(400, f"คุณลงทะเบียนหลักสูตร {existing[0]['course']} ไปแล้ว ระบบรองรับคนละ 1 หลักสูตรเท่านั้น")
+        rereg_row = existing[0]
+        if rereg_row.get("paid") and _norm_course(rereg_row["course"]) != course:
+            raise HTTPException(400, f"คุณชำระเงินหลักสูตร {rereg_row['course']} ไว้แล้ว "
+                                     "ไม่สามารถเปลี่ยนหลักสูตรได้ — กรุณาเลือกหลักสูตรเดิม")
 
     # อัปโหลดรูป (ถ้าแนบมา) — เก็บลง Storage แทนการฝาก base64 ไว้ในแถวข้อมูล
     photo_url = None
@@ -5586,17 +5648,26 @@ async def public_reg_submit(req: Request):
            "source": "liff", "updated_at": NOW()}
     if photo_url:
         row["slip_url"] = photo_url
-    await supa.upsert("registrations", row, on_conflict="line_user_id,course")
+    if rereg_row:
+        try:
+            await supa.update("registrations", row, {"id": f"eq.{rereg_row['id']}"})
+        except Exception as e:
+            print("reg-submit rereg update error:", e)
+            raise HTTPException(400, "บันทึกไม่สำเร็จ (อาจมีข้อมูลหลักสูตรนี้อยู่แล้ว) — กรุณาติดต่อแอดมิน")
+    else:
+        await supa.upsert("registrations", row, on_conflict="line_user_id,course")
     try:
         ex = await supa.select("line_users", params={
             "select": "tags", "line_user_id": f"eq.{u['userId']}", "limit": "1"})
         cur = set((ex[0].get("tags") if ex else []) or [])
-        new = cur | {"ลงทะเบียน", course}
+        new = (cur | {"ลงทะเบียน", course}) - {_REREG_TAG}   # ลงทะเบียนใหม่สำเร็จ -> ถอดธง
         patch = {"line_user_id": u["userId"], "tags": sorted(new), "updated_at": NOW()}
+        if friend is True:
+            patch["is_following"] = True    # ยืนยันกับ LINE แล้วว่าเป็นเพื่อน
         if not ex:
-            patch.update({"source": "registration", "is_following": True,
+            patch.update({"source": "registration", "is_following": friend is not False,
                           "display_name": _clean_str(u.get("name"))})
-        if new != cur or not ex:
+        if new != cur or not ex or friend is True:
             await supa.upsert("line_users", [patch], on_conflict="line_user_id")
     except Exception as e:
         print("reg-submit tag error:", e)
@@ -5610,10 +5681,95 @@ async def public_reg_submit(req: Request):
     except Exception as e:
         print("reg-submit richmenu switch error:", e)
 
-    await alert_admin("📝 ลงทะเบียนใหม่ (LIFF)",
+    await alert_admin("📝 ลงทะเบียนใหม่ (LIFF)" if not rereg_row else "🔁 ลงทะเบียนใหม่ (เพิ่มเพื่อนแล้ว)",
                       f"{name}\nหลักสูตร {course} · {b.get('org') or '-'}\nโทร {tel}",
                       throttle_key=f"reg_{u['userId']}_{course}")
     return {"ok": True, "course": course, "nextUrl": await _get_setting("reg_next_url", "")}
+
+
+async def _flag_nonfriend_registrants(apply: bool, detail: bool = False) -> dict:
+    """ไล่เช็คกับ LINE ตรง ๆ ว่าใครที่มีแถวใน registrations ตอนนี้ไม่ได้เป็นเพื่อน (404) — ค่า is_following ใน DB
+    เชื่อไม่ได้ เพราะ import/retag เคยสร้างแถวให้คนที่ไม่ได้เป็นเพื่อนด้วย is_following=true
+    apply=True: ติดธง "ต้องลงทะเบียนใหม่" + แก้ is_following=false (ไม่ลบ/ไม่แตะแถว registrations และสถานะชำระเงิน)
+    คนที่เช็คไม่ได้ (LINE error/429) ไม่ถูกนับเป็นไม่ใช่เพื่อน"""
+    regs = await supa.select_all("registrations", params={
+        "select": "id,line_user_id,course,paid,name,tel,org,created_at", "order": "created_at.desc"})
+    by_uid: dict[str, list] = {}
+    for r in regs:
+        if r.get("line_user_id"):
+            by_uid.setdefault(r["line_user_id"], []).append(r)
+    uids = list(by_uid)
+    status: dict = {}
+    sem = asyncio.Semaphore(15)
+
+    async def one(uid):
+        async with sem:
+            status[uid] = await line.is_friend(uid)
+
+    await asyncio.gather(*[one(x) for x in uids])
+    non = [x for x in uids if status.get(x) is False]
+    by_course: dict[str, int] = {}
+    for x in non:
+        c = by_uid[x][0].get("course") or "?"
+        by_course[c] = by_course.get(c, 0) + 1
+    out = {
+        "registrants": len(uids),
+        "friends": sum(1 for x in uids if status.get(x) is True),
+        "non_friends": len(non),
+        "non_friends_paid": sum(1 for x in non if any(r.get("paid") for r in by_uid[x])),
+        "unknown": sum(1 for x in uids if status.get(x) is None),
+        "by_course": by_course,
+    }
+    if detail:
+        out["items"] = [{
+            "userId": x, "name": by_uid[x][0].get("name"), "tel": by_uid[x][0].get("tel"),
+            "org": by_uid[x][0].get("org"), "course": by_uid[x][0].get("course"),
+            "paid": any(r.get("paid") for r in by_uid[x]),
+        } for x in non[:1000]]
+    if apply and non:
+        flagged = 0
+        for i in range(0, len(non), 80):
+            chunk = non[i:i + 80]
+            existing = {x["line_user_id"]: x for x in await supa.select("line_users", params={
+                "select": "line_user_id,tags", "line_user_id": f"in.({','.join(chunk)})", "limit": "200"})}
+            patch = []
+            for uid in chunk:
+                cur = set((existing.get(uid) or {}).get("tags") or [])
+                row = {"line_user_id": uid, "tags": sorted(cur | {_REREG_TAG}),
+                       "is_following": False, "updated_at": NOW()}
+                if uid not in existing:
+                    row["source"] = "registration"
+                patch.append(row)
+            await supa.upsert("line_users", patch, on_conflict="line_user_id")
+            flagged += len(patch)
+        out["flagged"] = flagged
+    return out
+
+
+@app.get("/api/registrations/nonfriends")
+async def registrations_nonfriends(admin=Depends(current_admin)):
+    """รายชื่อคนที่ลงทะเบียนแล้วแต่ไม่ได้เป็นเพื่อนกับบัญชี (เช็คกับ LINE จริง) — ยังไม่เปลี่ยนแปลงอะไร"""
+    return await _flag_nonfriend_registrants(False, detail=True)
+
+
+@app.post("/api/registrations/nonfriends/flag")
+async def registrations_nonfriends_flag(admin=Depends(current_admin)):
+    """ติดธง "ต้องลงทะเบียนใหม่" ให้คนกลุ่มนั้นทั้งหมด — พอเปิดหน้าลงทะเบียนจะเจอหน้าให้เพิ่มเพื่อนก่อน แล้วลงทะเบียนใหม่"""
+    res = await _flag_nonfriend_registrants(True, detail=True)
+    await supa.log_operation(admin["userId"], "registrations.flag_nonfriends", None,
+                             {k: v for k, v in res.items() if k != "items"})
+    return res
+
+
+@app.api_route("/api/cron/registrations-nonfriends", methods=["GET", "POST"])
+async def cron_registrations_nonfriends(request: Request):
+    """?apply=1 = ติดธงจริง (ไม่ใส่ = ดูตัวเลขเฉย ๆ) คืนเฉพาะตัวเลข ไม่มีรายชื่อ"""
+    _check_cron_key(request)
+    apply = request.query_params.get("apply") == "1"
+    res = await _flag_nonfriend_registrants(apply, detail=False)
+    if apply:
+        await supa.log_operation("cron", "registrations.flag_nonfriends", None, res)
+    return {"ok": True, "applied": apply, **res}
 
 
 @app.post("/api/registrations/import")
