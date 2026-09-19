@@ -126,12 +126,31 @@
       .then(function (res) {
         if (!res) return;
         state.check = res;
+        if (res.isFriend === false) { showAddFriend(res); return; }   // ต้องเป็นเพื่อนกับบัญชีก่อน
         res.registered ? showRegistered(res) : showForm(res);
       })
       .catch(function (e) {
         $app.html('<div class="list text-center"><h4>เปิดไม่ได้</h4><p class="text-danger">' + esc(e.message) + '</p>'
           + '<button class="btn btn-outline-secondary" onclick="location.reload()">ลองใหม่</button></div>');
       });
+
+    function showAddFriend(res) {
+      var again = res.needsRereg;
+      $app.html(
+        '<div class="list text-center">' +
+        '<div style="font-size:3rem">👋</div><h4>กรุณาเพิ่มเพื่อนก่อน</h4>' +
+        '<p class="text-muted">' +
+        (again ? 'คุณเคยลงทะเบียนไว้แล้ว แต่ยังไม่ได้เป็นเพื่อนกับบัญชี <b>น้องพัสดุ</b> ระบบจึงส่งข้อมูลและเมนูให้ไม่ได้<br>' : '') +
+        'กดปุ่มด้านล่างเพื่อเพิ่มเพื่อน <b>น้องพัสดุ</b> (ถ้าเคยบล็อกไว้ ให้ปลดบล็อกก่อน) แล้วกลับมากด “ตรวจสอบอีกครั้ง” เพื่อ' +
+        (again ? 'ลงทะเบียนใหม่' : 'ลงทะเบียน') + '</p>' +
+        '<a id="addfriend" class="btn btn-success w-100 mb-2" href="' + esc(res.addFriendUrl) + '">➕ เพิ่มเพื่อน น้องพัสดุ</a>' +
+        '<button type="button" id="recheck" class="btn btn-outline-secondary w-100">ฉันเพิ่มเพื่อนแล้ว — ตรวจสอบอีกครั้ง</button>' +
+        '</div>');
+      $('#addfriend').on('click', function (ev) {
+        if (liff.isInClient && liff.isInClient()) { ev.preventDefault(); liff.openWindow({ url: res.addFriendUrl, external: false }); }
+      });
+      $('#recheck').on('click', function () { location.reload(); });
+    }
 
     function showRegistered(res) {
       var items = (res.registrations || []).map(function (r) {
@@ -212,6 +231,19 @@
         }
         submitForm();
       });
+
+      // ลงทะเบียนใหม่ (เคยลงไว้ตอนยังไม่เป็นเพื่อน): เติมข้อมูลเดิมให้ — สถานะชำระเงินเดิมยังอยู่ ไม่หาย
+      if (res.needsRereg) {
+        $('#myForm').prepend('<div class="col-12"><div class="alert alert-info mb-3">🔁 <b>ลงทะเบียนใหม่</b> — เพิ่มเพื่อนเรียบร้อยแล้ว '
+          + 'กรุณาตรวจ/กรอกข้อมูลอีกครั้ง (สถานะการชำระเงินเดิมของคุณยังอยู่)</div></div>');
+        var p = res.prefill || {};
+        if (p.name) $('#name').val(p.name);
+        if (p.org) $('#device').val(p.org);
+        if (p.tel) $('#phone').val(p.tel);
+        if (p.email) $('#place').val(p.email);
+        var base = String(p.course || '').slice(0, 2).toUpperCase() + '70';
+        if (['PC70', 'FC70', 'IC70'].indexOf(base) >= 0) { $('#problem').val(base).trigger('change'); }
+      }
     }
 
     // ย่อรูปฝั่ง client ก่อนส่ง (กันไฟล์ต้นฉบับจากกล้องมือถือ 5-10MB ชน limit ของ serverless function)

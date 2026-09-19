@@ -381,6 +381,8 @@ function ReconcileView({ rec, reload, onMarked }) {
         <IssueTable rows={I.unpaid} />
       </section>
 
+      <NonFriendsCard />
+
       <section className="card">
         <h3>🔴 ส่งสลิปยืนยันแล้ว แต่ไม่มีทะเบียนคอร์สนั้น — {nf(I.slip_no_reg_count)}</h3>
         <p className="muted xs">คนพวกนี้จ่ายเงินแล้วแต่ยังไม่ได้กรอกฟอร์มลงทะเบียน — ติดต่อให้ลงทะเบียน</p>
@@ -401,6 +403,68 @@ function ReconcileView({ rec, reload, onMarked }) {
         </div>
       </section>
     </>
+  )
+}
+
+// ลงทะเบียนแล้วแต่ไม่ได้เป็นเพื่อนกับบัญชี — ส่งข้อความ/สลับ Rich Menu ให้ไม่ได้ (เช็คกับ LINE ตรง ๆ ไม่ใช้ค่าใน DB)
+function NonFriendsCard() {
+  const t = useToast()
+  const [d, setD] = useState(null)
+  const [busy, setBusy] = useState('')
+
+  const check = async () => {
+    setBusy('check')
+    try { setD(await api.nonFriends()) } catch (e) { t.err(e.message) } finally { setBusy('') }
+  }
+  const flag = async () => {
+    if (!confirm(`ติดธง "ต้องลงทะเบียนใหม่" ให้ ${d.non_friends} คน?\n\nพอพวกเขาเปิดหน้าลงทะเบียน จะเจอหน้าให้เพิ่มเพื่อนก่อน แล้วลงทะเบียนใหม่ได้ (ข้อมูล/สถานะชำระเงินเดิมไม่ถูกลบ)`)) return
+    setBusy('flag')
+    try { const r = await api.flagNonFriends(); setD(r); t.ok(`ติดธงแล้ว ${r.flagged || 0} คน`) } catch (e) { t.err(e.message) } finally { setBusy('') }
+  }
+
+  return (
+    <section className="card">
+      <div className="row spread">
+        <h3>👋 ลงทะเบียนแล้ว แต่ไม่ได้เป็นเพื่อนกับบัญชี{d ? ` — ${nf(d.non_friends)}` : ''}</h3>
+        <button className="sm" disabled={!!busy} onClick={check}>{busy === 'check' && <InlineSpinner />}{d ? 'ตรวจใหม่' : 'ตรวจกับ LINE'}</button>
+      </div>
+      <p className="muted xs">
+        คนกลุ่มนี้ระบบส่งข้อความ/สลับ Rich Menu ให้ไม่ได้ (LINE ไม่อนุญาต) — ตอนนี้หน้าลงทะเบียนบังคับให้เพิ่มเพื่อนก่อนแล้ว
+        และคนที่ถูกติดธงจะได้ลงทะเบียนใหม่ทับข้อมูลเดิมหลังเพิ่มเพื่อน (ไม่ลบแถวเดิม ไม่แตะสถานะชำระเงิน)
+      </p>
+      {d && (
+        <>
+          <p className="sm">
+            ผู้ลงทะเบียน {nf(d.registrants)} · เป็นเพื่อน {nf(d.friends)} · <b>ไม่ได้เป็นเพื่อน {nf(d.non_friends)}</b>
+            {d.non_friends_paid > 0 && <> (จ่ายแล้ว {nf(d.non_friends_paid)})</>}
+            {d.unknown > 0 && <> · เช็คไม่ได้ {nf(d.unknown)}</>}
+          </p>
+          {d.non_friends === 0 ? <p className="muted sm">ไม่มี — ทุกคนที่ลงทะเบียนเป็นเพื่อนอยู่ 👍</p> : (
+            <>
+              <div className="table-scroll">
+                <table>
+                  <thead><tr><th>ชื่อ</th><th>หลักสูตร</th><th>เบอร์</th><th>สังกัด</th><th>จ่ายแล้ว</th></tr></thead>
+                  <tbody>
+                    {(d.items || []).map((r) => (
+                      <tr key={r.userId}>
+                        <td>{r.name || <span className="mono xs">{r.userId.slice(0, 10)}</span>}</td>
+                        <td><span className="chip">{r.course}</span></td>
+                        <td className="sm">{r.tel || '–'}</td>
+                        <td className="sm ellipsis" style={{ maxWidth: 160 }}>{r.org || '–'}</td>
+                        <td>{r.paid ? '✅' : '–'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <button className="primary sm" style={{ marginTop: 8 }} disabled={!!busy} onClick={flag}>
+                {busy === 'flag' && <InlineSpinner />}ติดธง "ต้องลงทะเบียนใหม่" ทั้ง {nf(d.non_friends)} คน
+              </button>
+            </>
+          )}
+        </>
+      )}
+    </section>
   )
 }
 

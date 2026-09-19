@@ -153,6 +153,8 @@ export const api = {
   kbAutogenStatus: () => req('GET', '/kb/autogen/status'),
   kbAutogenRun: (count = 3) => req('POST', '/kb/autogen/run', { count }),
   richmenuAutoUnregisteredRun: () => req('POST', '/richmenu/auto-unregistered/run'),
+  nonFriends: () => req('GET', '/registrations/nonfriends'),
+  flagNonFriends: () => req('POST', '/registrations/nonfriends/flag'),
 
   postbacks: () => req('GET', '/postbacks'),
   savePostback: (payload) => req('POST', '/postbacks', payload),
