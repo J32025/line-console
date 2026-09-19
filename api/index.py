@@ -82,6 +82,17 @@ def _client_ip(request: Request) -> str:
     return request.headers.get("x-forwarded-for", "?").split(",")[0].strip() or "?"
 
 
+async def _json_obj(req: Request) -> dict:
+    """อ่าน body ของ endpoint สาธารณะ — ไม่ใช่ JSON object (เช่น ตัวเลข/ลิสต์/ขยะ) ให้ 400 แทนที่จะ 500"""
+    try:
+        b = await req.json()
+    except Exception:
+        raise HTTPException(400, "ข้อมูลที่ส่งมาไม่ใช่ JSON")
+    if not isinstance(b, dict):
+        raise HTTPException(400, "ข้อมูลที่ส่งมาต้องเป็น JSON object")
+    return b
+
+
 async def _rl_db(key: str, limit: int, window: int):
     """True = ยังไม่เกิน, False = เกิน, None = ใช้ DB ไม่ได้"""
     global _rl_db_down_until
@@ -5511,7 +5522,7 @@ async def _verify_member_token(id_token: str) -> dict | None:
 async def public_reg_check(req: Request):
     """หน้าลงทะเบียนสมาชิกเรียก: ตรวจว่า userId นี้มีในทะเบียนแล้วหรือยัง"""
     await _rate_limit_db(f"regchk:{_client_ip(req)}", 60, 60)  # ก่อนเรียก LINE verify (คำขอภายนอก)
-    b = await req.json()
+    b = await _json_obj(req)
     u = await _verify_member_token(b.get("idToken"))
     if not u:
         raise HTTPException(401, "ยืนยันตัวตน LINE ไม่สำเร็จ")
@@ -5532,7 +5543,7 @@ async def public_reg_check(req: Request):
 async def public_reg_submit(req: Request):
     """หน้าลงทะเบียนสมาชิกส่งฟอร์ม -> upsert registration + อัปโหลดรูป (ถ้ามี) + สลับ rich menu
     ตามคอร์ส (ถ้าตั้ง setting reg_richmenu_map ไว้) + tag user + แจ้งแอดมิน"""
-    b = await req.json()
+    b = await _json_obj(req)
     u = await _verify_member_token(b.get("idToken"))
     if not u:
         raise HTTPException(401, "ยืนยันตัวตน LINE ไม่สำเร็จ")
