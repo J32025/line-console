@@ -76,7 +76,8 @@ export default function Inbox() {
 
   useEffect(() => { setConvs(null); loadConvs(0, false) }, [filter, adv]) // eslint-disable-line
   useEffect(() => {
-    const id = setInterval(() => loadConvs(0, false), 15000) // poll
+    // poll — ข้ามตอนซ่อนแท็บ (ทุกรอบ = 1 invocation ของ Vercel + หลาย query)
+    const id = setInterval(() => { if (!document.hidden) loadConvs(0, false) }, 30000)
     return () => clearInterval(id)
   }, [filter, adv]) // eslint-disable-line
 
@@ -97,12 +98,13 @@ export default function Inbox() {
   useEffect(() => {
     if (!sel) return
     const id = setInterval(async () => {
+      if (document.hidden) return
       try {
         const d = await api.thread(sel, { limit: 60 })
         setThread((prev) => (prev && d.messages.length !== prev.messages.length
           ? (setTimeout(() => bottomRef.current?.scrollIntoView(), 50), d) : d))
       } catch {}
-    }, 8000)
+    }, 12000)
     return () => clearInterval(id)
   }, [sel])
 

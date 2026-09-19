@@ -14,7 +14,7 @@ export default function Slips() {
 
   const load = () => api.slips(tab).then((d) => { setList(d.slips); setNewCount(d.new_count) }).catch((e) => t.err(e.message))
   useEffect(() => { load() }, [tab]) // eslint-disable-line
-  useEffect(() => { const i = setInterval(load, 20000); return () => clearInterval(i) }, [tab]) // eslint-disable-line
+  useEffect(() => { const i = setInterval(() => { if (!document.hidden) load() }, 30000); return () => clearInterval(i) }, [tab]) // eslint-disable-line
 
   const act = async (s, status, replyUser) => {
     setBusy(s.id)
