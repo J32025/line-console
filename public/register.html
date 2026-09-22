@@ -173,8 +173,9 @@
         '<form id="myForm" class="needs-validation list" novalidate>' +
         '<div class="row justify-content-start g-3">' +
         '<div class="col-12"><label for="name"><i class="fa-solid fa-user"></i> ชื่อ-สกุล</label>' +
-        '<input type="text" id="name" name="name" class="form-control" placeholder="ชื่อ-สกุล" value="' + esc(res.displayName || '') + '" required>' +
-        '<div class="invalid-feedback">กรุณากรอกชื่อ-สกุล</div></div>' +
+        '<input type="text" id="name" name="name" class="form-control" placeholder="ชื่อ-สกุลจริง (ไม่ใช่ชื่อเล่น/ชื่อไลน์)" required>' +
+        '<div class="form-text">กรอกชื่อ-สกุลจริงตามบัตรประชาชน ไม่ใช่ชื่อที่ใช้ในไลน์</div>' +
+        '<div class="invalid-feedback">กรุณากรอกชื่อ-สกุลจริง</div></div>' +
 
         '<div class="col-12"><label for="device"><i class="fa-regular fa-circle-user"></i> สังกัดหน่วยงาน</label>' +
         '<input type="text" id="device" name="device" class="form-control" placeholder="กรุณากรอกสังกัดของท่าน" required>' +
