@@ -2374,6 +2374,19 @@ async def cron_ai_baseline(request: Request):
         days = max(3, min(int(request.query_params.get("days", "30")), 90))
     except ValueError:
         days = 30
+    if request.query_params.get("gaps") == "1":
+        # คำถามจริงที่ AI ตอบโดยไม่มีความรู้ใน KB รองรับ (จัดกลุ่มตามข้อความที่ย่อแล้ว) — ไว้ดูว่าควรเติมความรู้เรื่องอะไร
+        ops = await supa.select_all("operations", params={
+            "select": "params,created_at", "action": "like.gemini.kb_gap*",
+            "created_at": f"gte.{_iso_ago(days=days)}", "order": "created_at.desc"})
+        groups: dict[str, list] = {}
+        for o in ops:
+            q = ((o.get("params") or {}).get("q") or "").strip()
+            if q:
+                groups.setdefault(_norm_question(q) or q[:20], []).append(q[:90])
+        rows = sorted(((len(v), v[0]) for v in groups.values()), reverse=True)
+        return {"total_gap_questions": len(ops), "distinct": len(groups),
+                "top": [{"count": c, "example": q} for c, q in rows[:80]]}
     return await _ai_baseline(days)
 
 
