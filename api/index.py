@@ -881,6 +881,62 @@ async def _gemini_classify_slip(image_bytes: bytes, mime: str) -> dict | None:
     return None
 
 
+async def _evaluate_slip(ocr, exp_course, slip_id) -> dict:
+    """ตัดสินสถานะสลิปจากผลอ่าน (EasySlip/Gemini) + จับคู่บัญชี/ยอด/หลักสูตร/ref ซ้ำ
+    ใช้ร่วมกันทั้ง webhook (_handle_slips) และการตรวจซ้ำสลิปค้าง (_reprocess_slips) — กฎต้องเป็นชุดเดียวกัน"""
+    status, matched, auto_note, dup_ref = "new", None, None, None
+    amount = ocr.get("amount") if ocr else None
+    ref = ocr.get("ref") if ocr else None
+
+    # ---- ตรวจ ref ซ้ำ (ทุก source ไม่ใช่แค่ EasySlip) ----
+    if ref:
+        exist = await supa.select("slips", params={
+            "ref": f"eq.{ref}", "id": f"neq.{slip_id or 0}",
+            "select": "id", "limit": "1"})
+        if exist:
+            status, dup_ref = "rejected", ref
+            auto_note = "สลิปนี้เคยส่งมาแล้ว (ref ซ้ำ)"
+
+    if status != "rejected" and ocr and ocr.get("verified"):
+        accounts = await supa.select("payment_accounts", params={"select": "*", "active": "eq.true"})
+        racc = _digits(ocr.get("receiver_acc"))
+        candidates = [a for a in accounts if racc and (_digits(a["account_no"])[-4:] == racc[-4:])]
+        # ถ้ารู้หลักสูตรที่ลงทะเบียนไว้แล้ว (จากทะเบียนจริง) ให้เลือกบัญชีที่ตรงหลักสูตรนั้นก่อน
+        # กันเลือกบัญชีผิดตัวตอนมีหลายคอร์สใช้เลขบัญชีท้าย 4 ตัวซ้ำกัน
+        known_course = exp_course  # มาจากทะเบียนจริงเท่านั้น (ถ้ามี) — ก่อนจะ fallback เป็นคอร์สของบัญชีที่ match
+        acc = None
+        if known_course:
+            acc = next((a for a in candidates
+                       if str(a["course"]).upper().startswith(known_course.upper()[:2])), None)
+        if not acc:
+            acc = candidates[0] if candidates else None
+        if not acc:
+            status, auto_note = "review", f"บัญชีปลายทางไม่ตรงรายการ ({ocr.get('receiver_acc')})"
+        else:
+            def _near(target):
+                return target not in (None, "") and abs(float(amount or 0) - float(target)) < 1
+            matched = _near(acc.get("price")) or _near(acc.get("full_price"))
+            mismatch_course = bool(known_course) and not str(acc["course"]).upper().startswith(known_course.upper()[:2])
+            exp_course = exp_course or acc["course"]
+            if mismatch_course:
+                # ลงทะเบียนไว้คอร์สหนึ่ง แต่ยอด/บัญชีที่ตรงกลับเป็นอีกคอร์ส -> ให้แอดมินเช็คเอง ไม่ auto-verify
+                status, auto_note = "review", f"⚠️ ลงทะเบียน {known_course} แต่ยอด/บัญชีตรงกับคอร์ส {acc['course']} — รบกวนแอดมินเช็ค"
+            elif matched:
+                status, auto_note = "verified", f"✓ {acc['course']} · {amount} บาท · {acc['bank']}"
+            else:
+                status, auto_note = "review", f"ยอดไม่ตรง: โอน {amount} / ราคา {acc['price']} ({acc['course']})"
+    elif status != "rejected" and ocr and ocr.get("source") == "gemini":
+        conf_pct = round((ocr.get("confidence") or 0) * 100)
+        extra = f" (EasySlip: {ocr.get('easyslip_error')})" if ocr.get("easyslip_error") else ""
+        status, auto_note = "review", f"🤖 Gemini เดาว่าอาจเป็นสลิป (มั่นใจ {conf_pct}%){extra} — ยังไม่ตรวจยอด/ธนาคารจริง รบกวนแอดมินเช็คเอง"
+    elif status != "rejected" and ocr and not ocr.get("verified"):
+        status, auto_note = "review", f"ตรวจสลิปไม่ผ่าน: {ocr.get('error')}"
+    elif status != "rejected" and EASYSLIP_TOKEN:
+        status, auto_note = "review", "อ่านสลิปไม่ได้"
+    return {"status": status, "matched": matched, "auto_note": auto_note, "dup_ref": dup_ref,
+            "amount": amount, "ref": ref, "exp_course": exp_course}
+
+
 async def _handle_slips(img_events: list):
     notify_all = bool(await _get_setting("slip_notify_all_images", True))
 
@@ -984,55 +1040,9 @@ async def _handle_slips(img_events: list):
                        "source": "gemini", "confidence": gclass.get("confidence"),
                        "easyslip_error": easyslip_err}
 
-        status, matched, auto_note, dup_ref = "new", None, None, None
-        amount = ocr.get("amount") if ocr else None
-        ref = ocr.get("ref") if ocr else None
-
-        # ---- ตรวจ ref ซ้ำ (ทุก source ไม่ใช่แค่ EasySlip) ----
-        if ref:
-            exist = await supa.select("slips", params={
-                "ref": f"eq.{ref}", "id": f"neq.{slip_id or 0}",
-                "select": "id", "limit": "1"})
-            if exist:
-                status, dup_ref = "rejected", ref
-                auto_note = "สลิปนี้เคยส่งมาแล้ว (ref ซ้ำ)"
-
-        if status != "rejected" and ocr and ocr.get("verified"):
-            accounts = await supa.select("payment_accounts", params={"select": "*", "active": "eq.true"})
-            racc = _digits(ocr.get("receiver_acc"))
-            candidates = [a for a in accounts if racc and (_digits(a["account_no"])[-4:] == racc[-4:])]
-            # ถ้ารู้หลักสูตรที่ลงทะเบียนไว้แล้ว (จากทะเบียนจริง) ให้เลือกบัญชีที่ตรงหลักสูตรนั้นก่อน
-            # กันเลือกบัญชีผิดตัวตอนมีหลายคอร์สใช้เลขบัญชีท้าย 4 ตัวซ้ำกัน
-            known_course = exp_course  # มาจากทะเบียนจริงเท่านั้น (ถ้ามี) — ก่อนจะ fallback เป็นคอร์สของบัญชีที่ match
-            acc = None
-            if known_course:
-                acc = next((a for a in candidates
-                           if str(a["course"]).upper().startswith(known_course.upper()[:2])), None)
-            if not acc:
-                acc = candidates[0] if candidates else None
-            if not acc:
-                status, auto_note = "review", f"บัญชีปลายทางไม่ตรงรายการ ({ocr.get('receiver_acc')})"
-            else:
-                def _near(target):
-                    return target not in (None, "") and abs(float(amount or 0) - float(target)) < 1
-                matched = _near(acc.get("price")) or _near(acc.get("full_price"))
-                mismatch_course = bool(known_course) and not str(acc["course"]).upper().startswith(known_course.upper()[:2])
-                exp_course = exp_course or acc["course"]
-                if mismatch_course:
-                    # ลงทะเบียนไว้คอร์สหนึ่ง แต่ยอด/บัญชีที่ตรงกลับเป็นอีกคอร์ส -> ให้แอดมินเช็คเอง ไม่ auto-verify
-                    status, auto_note = "review", f"⚠️ ลงทะเบียน {known_course} แต่ยอด/บัญชีตรงกับคอร์ส {acc['course']} — รบกวนแอดมินเช็ค"
-                elif matched:
-                    status, auto_note = "verified", f"✓ {acc['course']} · {amount} บาท · {acc['bank']}"
-                else:
-                    status, auto_note = "review", f"ยอดไม่ตรง: โอน {amount} / ราคา {acc['price']} ({acc['course']})"
-        elif status != "rejected" and ocr and ocr.get("source") == "gemini":
-            conf_pct = round((ocr.get("confidence") or 0) * 100)
-            extra = f" (EasySlip: {ocr.get('easyslip_error')})" if ocr.get("easyslip_error") else ""
-            status, auto_note = "review", f"🤖 Gemini เดาว่าอาจเป็นสลิป (มั่นใจ {conf_pct}%){extra} — ยังไม่ตรวจยอด/ธนาคารจริง รบกวนแอดมินเช็คเอง"
-        elif status != "rejected" and ocr and not ocr.get("verified"):
-            status, auto_note = "review", f"ตรวจสลิปไม่ผ่าน: {ocr.get('error')}"
-        elif status != "rejected" and EASYSLIP_TOKEN:
-            status, auto_note = "review", "อ่านสลิปไม่ได้"
+        ev = await _evaluate_slip(ocr, exp_course, slip_id)
+        status, matched, auto_note, dup_ref = ev["status"], ev["matched"], ev["auto_note"], ev["dup_ref"]
+        amount, ref, exp_course = ev["amount"], ev["ref"], ev["exp_course"]
 
         # 3) update slip row ด้วยผลที่อ่านได้
         patch = {"ocr": ocr, "amount": amount, "ref": None if dup_ref else ref,
@@ -1068,6 +1078,134 @@ async def _handle_slips(img_events: list):
         emoji = {"verified": "✅", "rejected": "⛔", "review": "⚠️"}.get(status, "🧾")
         detail = f"จาก: {name}\n" + (auto_note + "\n" if auto_note else "") + f"เปิดดู: {APP_URL}/slips"
         await alert_admin(f"{emoji} สลิป: {status}", detail, throttle_key=f"slip_{mid}")
+
+
+# ---------- ตรวจซ้ำสลิปที่ค้าง (เงียบ: ไม่ส่งข้อความ/ใบเสร็จ/automation/สลับเมนูหาลูกค้าย้อนหลัง) ----------
+_REPROCESS_RETRY_NOTES = ("quota_exceeded", "rate_limit")   # ค้างเพราะ EasySlip โควต้าเต็ม/ถูกจำกัด — ลองใหม่ได้
+_EASYSLIP_RESERVE = 40   # กันโควต้า EasySlip ไว้ให้สลิปใหม่ที่เข้ามาจริง ไม่ใช้จนหมดกับกองเก่า
+
+
+async def _fetch_image(url: str):
+    async with httpx.AsyncClient(timeout=20) as c:
+        r = await c.get(url)
+    if r.status_code != 200 or not r.content:
+        return None, None
+    return r.content, r.headers.get("content-type", "image/jpeg")
+
+
+async def _easyslip_remaining():
+    if not EASYSLIP_TOKEN:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=12) as c:
+            r = await c.get("https://developer.easyslip.com/api/v1/me",
+                            headers={"Authorization": f"Bearer {EASYSLIP_TOKEN}"})
+        d = r.json().get("data") or {}
+        q = d.get("quota") or d
+        rem = q.get("remainingQuota")
+        return int(rem) if rem is not None else None
+    except Exception:
+        return None
+
+
+async def _reprocess_candidates() -> dict:
+    """สลิปค้างที่ 'ควรลองใหม่ได้': (ก) ไม่เคยถูกประมวลผลเลย (new ไม่มีหมายเหตุ) (ข) review เพราะ EasySlip โควต้าเต็ม
+    ไม่รวม qrcode_not_found/บัญชีไม่ตรง/ยอดไม่ตรง — ตรวจซ้ำก็ได้ผลเดิม เสียโควต้าเปล่า ต้องให้คนดู"""
+    rows = await supa.select_all("slips", params={
+        "select": "id,line_user_id,media_url,status,auto_note,expected_course,created_at",
+        "status": "in.(new,review)", "order": "created_at.desc"})
+    never, retry, no_media = [], [], 0
+    for r in rows:
+        note = r.get("auto_note") or ""
+        if r["status"] == "new" and not note:
+            bucket = never
+        elif r["status"] == "review" and any(k in note for k in _REPROCESS_RETRY_NOTES):
+            bucket = retry
+        else:
+            continue
+        if not r.get("media_url"):
+            no_media += 1
+            continue
+        bucket.append(r)
+    return {"never_processed": never, "quota_retry": retry, "no_media": no_media}
+
+
+async def _reprocess_slips(apply: bool, limit: int = 40) -> dict:
+    c = await _reprocess_candidates()
+    todo = c["quota_retry"] + c["never_processed"]   # ที่รู้แน่ว่าเป็นสลิปจริง (โควต้าเต็ม) ก่อน
+    out = {"never_processed": len(c["never_processed"]), "quota_retry": len(c["quota_retry"]),
+           "no_media": c["no_media"], "candidates": len(todo)}
+    if not apply:
+        return out   # ดูอย่างเดียว — ไม่เรียก EasySlip ไม่เสียโควต้า
+    remaining = await _easyslip_remaining()
+    budget = limit if remaining is None else max(0, min(limit, remaining - _EASYSLIP_RESERVE))
+    out.update({"easyslip_remaining": remaining, "budget": budget})
+    batch = todo[:budget]
+    counts = {"verified": 0, "review": 0, "rejected": 0, "no_image": 0, "error": 0}
+    items = []
+    sem, lock = asyncio.Semaphore(4), asyncio.Lock()
+
+    async def one(r):
+        uid = r["line_user_id"]
+        try:
+            async with sem:   # ส่วนช้า (ดึงรูป/EasySlip/Gemini) ทำขนานได้
+                content, mime = await _fetch_image(r["media_url"])
+                if not content:
+                    counts["no_image"] += 1
+                    return
+                ocr = await _easyslip_verify(content)
+                easyslip_err = ocr.get("error") if ocr and not ocr.get("verified") else None
+                if not ocr or easyslip_err:
+                    g = await _gemini_classify_slip(content, mime)
+                    if g and g.get("is_slip"):
+                        ocr = {"verified": False, "amount": g.get("amount"), "receiver_acc": g.get("receiver_account"),
+                               "receiver_bank": g.get("bank"), "ref": g.get("ref"), "date": g.get("date"),
+                               "source": "gemini", "confidence": g.get("confidence"), "easyslip_error": easyslip_err}
+            async with lock:   # ประเมิน+บันทึกทีละใบ — สลิปซ้ำในกองเดียวกันจะเห็นกันและกัน (เช็ค ref ซ้ำ)
+                exp = r.get("expected_course")
+                try:
+                    reg = await supa.select("registrations", params={
+                        "line_user_id": f"eq.{uid}", "select": "course", "limit": "1"})
+                    if reg:
+                        exp = reg[0]["course"]
+                except Exception:
+                    pass
+                ev = await _evaluate_slip(ocr, exp, r["id"])
+                await supa.update("slips", {
+                    "ocr": ocr, "amount": ev["amount"], "ref": None if ev["dup_ref"] else ev["ref"],
+                    "bank": ocr.get("receiver_bank") if ocr else None,
+                    "slip_date": str(ocr.get("date")) if ocr and ocr.get("date") else None,
+                    "status": ev["status"], "matched": ev["matched"], "auto_note": ev["auto_note"],
+                    "dup_ref": ev["dup_ref"], "expected_course": ev["exp_course"]}, {"id": f"eq.{r['id']}"})
+                counts[ev["status"] if ev["status"] in counts else "review"] += 1
+                if ev["status"] == "verified":
+                    await _mark_registration_paid(uid, ev["exp_course"])
+                if len(items) < 40:
+                    items.append({"id": r["id"], "status": ev["status"], "note": ev["auto_note"]})
+        except Exception as e:
+            counts["error"] += 1
+            print("slip reprocess error:", r.get("id"), repr(e)[:150])
+
+    await asyncio.gather(*[one(r) for r in batch])
+    out.update({"processed": len(batch), "result": counts, "items": items,
+                "left": max(0, len(todo) - len(batch))})
+    return out
+
+
+@app.api_route("/api/cron/slips-reprocess", methods=["GET", "POST"])
+async def cron_slips_reprocess(request: Request):
+    """?apply=1 = ตรวจซ้ำจริง (ไม่ใส่ = แค่นับผู้สมัคร ไม่เสียโควต้า) &limit=N (ค่าเริ่ม 40) — ไม่มีข้อมูลส่วนบุคคลในผลลัพธ์"""
+    _check_cron_key(request)
+    apply = request.query_params.get("apply") == "1"
+    try:
+        limit = max(1, min(int(request.query_params.get("limit", "40")), 80))
+    except ValueError:
+        limit = 40
+    res = await _reprocess_slips(apply, limit)
+    if apply:
+        await supa.log_operation("cron", "slips.reprocess", {"limit": limit},
+                                 {k: v for k, v in res.items() if k != "items"})
+    return {"ok": True, "applied": apply, **res}
 
 
 async def _send_receipt(uid: str, s: dict):
