@@ -1245,6 +1245,18 @@ async def cron_slips_reprocess(request: Request):
 _TRIAGE_NOTES = ("qrcode_not_found", "slip_not_found")
 _TRIAGE_REJECT_CONF = 0.8   # ตีกลับอัตโนมัติต่อเมื่อ Gemini มั่นใจว่า "ไม่ใช่สลิป" อย่างน้อยเท่านี้
 _TRIAGE_SLIP_CONF = 0.55    # ถือว่า "น่าจะเป็นสลิป" (เกณฑ์เดียวกับ gate ใน webhook)
+_TRIAGE_GAP_SEC = 4.5       # เว้นระหว่างคำขอ Gemini ~13 ครั้ง/นาที — รุ่นฟรีจำกัดต่อนาที ยิงรัวแล้วโดนปฏิเสธ (ตัวจำแนกคืน None)
+_gemini_pace = {"last": 0.0}
+_gemini_pace_lock = asyncio.Lock()
+
+
+async def _paced_classify(content: bytes, mime: str):
+    async with _gemini_pace_lock:   # เว้นจังหวะ "เริ่มคำขอ" (ตัวคำขอเองซ้อนกันได้)
+        wait = _gemini_pace["last"] + _TRIAGE_GAP_SEC - time.time()
+        if wait > 0:
+            await asyncio.sleep(wait)
+        _gemini_pace["last"] = time.time()
+    return await _gemini_classify_slip(content, mime)
 
 
 async def _triage_candidates() -> list:
@@ -1260,11 +1272,11 @@ async def _triage_candidates() -> list:
     return out
 
 
-async def _triage_recall_check(n: int = 15) -> dict:
+async def _triage_recall_check(n: int = 10, offset: int = 0) -> dict:
     """วัดความแม่นของตัวจำแนก: ให้จำแนกสลิปที่ EasySlip ยืนยันแล้ว (ของจริงแน่นอน) — ควรตอบ is_slip ทุกใบ"""
     rows = await supa.select("slips", params={
         "select": "id,media_url", "status": "eq.verified", "media_url": "not.is.null",
-        "order": "created_at.desc", "limit": str(n)})
+        "order": "created_at.desc", "limit": str(n), "offset": str(offset)})
     sem = asyncio.Semaphore(5)
     res = []
     unavailable = []
@@ -1275,7 +1287,7 @@ async def _triage_recall_check(n: int = 15) -> dict:
             if not content:
                 unavailable.append(r["id"])
                 return
-            g = await _gemini_classify_slip(content, mime)
+            g = await _paced_classify(content, mime)
             res.append(g)
 
     await asyncio.gather(*[one(r) for r in rows])
@@ -1305,7 +1317,7 @@ async def _triage_slips(apply: bool, limit: int = 25) -> dict:
                 if not content:
                     counts["no_image"] += 1
                     return
-                g = await _gemini_classify_slip(content, mime)
+                g = await _paced_classify(content, mime)
             if not g:
                 counts["left_unclear"] += 1
                 return
@@ -1370,15 +1382,16 @@ async def cron_slips_triage(request: Request):
     _check_cron_key(request)
     if request.query_params.get("recall") == "1":
         try:
-            n = max(5, min(int(request.query_params.get("n", "15")), 40))
+            n = max(3, min(int(request.query_params.get("n", "10")), 11))
+            off = max(0, int(request.query_params.get("offset", "0")))
         except ValueError:
-            n = 15
-        return {"ok": True, **await _triage_recall_check(n)}
+            n, off = 10, 0
+        return {"ok": True, "offset": off, **await _triage_recall_check(n, off)}
     apply = request.query_params.get("apply") == "1"
     try:
-        limit = max(1, min(int(request.query_params.get("limit", "25")), 40))
+        limit = max(1, min(int(request.query_params.get("limit", "10")), 11))   # 1 คำขอ/4.5 วิ -> ต้องจบใน ~50 วิ
     except ValueError:
-        limit = 25
+        limit = 10
     res = await _triage_slips(apply, limit)
     if apply:
         await supa.log_operation("cron", "slips.triage", {"limit": limit}, {k: v for k, v in res.items() if k != "items"})
