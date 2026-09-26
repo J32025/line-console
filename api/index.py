@@ -5809,7 +5809,7 @@ async def _flag_nonfriend_registrants(apply: bool, detail: bool = False) -> dict
             by_uid.setdefault(r["line_user_id"], []).append(r)
     uids = list(by_uid)
     status: dict = {}
-    sem = asyncio.Semaphore(15)
+    sem = asyncio.Semaphore(50)   # งาน I/O ล้วน ~900 คำขอ — ต้องจบใน ~10 วินาทีเพราะถูกเรียกจากสรุปประจำวันด้วย
 
     async def one(uid):
         async with sem:
