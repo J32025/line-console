@@ -1299,6 +1299,46 @@ async def _triage_recall_check(n: int = 10, offset: int = 0) -> dict:
             "confidently_said_not_slip": len(confident_wrong)}   # ตัวเลขนี้ต้องเป็น 0 ถึงจะปลอดภัยที่จะตีกลับอัตโนมัติ
 
 
+async def _triage_note(slip_id, amt, bank, receiver, date, conf, ref, accounts) -> str:
+    """หมายเหตุสำหรับสลิปที่ Gemini ว่า 'น่าจะเป็นสลิป' — บอกทุกหลักสูตรที่ยอดตรงราคา (ยอดเดียวอาจตรงหลายคอร์ส เช่น
+    FC 1,499 = PC ราคาเต็ม 1,499) + เตือนถ้า ref ที่ Gemini อ่านตรงกับสลิปอื่น (เตือนอย่างเดียว ไม่เก็บลงคอลัมน์ ref)"""
+    courses = []
+    try:
+        for a in accounts:
+            for target in (a.get("price"), a.get("full_price")):
+                if (amt not in (None, "") and target not in (None, "") and abs(float(amt) - float(target)) < 1
+                        and a["course"] not in courses):
+                    courses.append(a["course"])
+    except (TypeError, ValueError):
+        pass
+    hint = f" · ยอดตรงราคา {'/'.join(courses)}" if courses else ""
+    dup = ""
+    if ref:
+        ex = await supa.select("slips", params={"ref": f"eq.{ref}", "id": f"neq.{slip_id}",
+                                                "select": "id,status", "limit": "1"})
+        if ex:
+            dup = f" · ⚠️ ref ตรงกับสลิป #{ex[0]['id']} ({ex[0]['status']}) น่าจะซ้ำ"
+    return (f"🤖 Gemini อ่านได้ (EasySlip อ่าน QR ไม่ได้): ยอด {amt} · {bank or '-'}"
+            f" · ผู้รับ {receiver or '-'} · {date or '-'} (มั่นใจ {round(float(conf) * 100)}%){hint}{dup} — ต้องเช็คเอง")
+
+
+async def _triage_refresh_notes() -> dict:
+    """สร้างหมายเหตุของสลิปที่คัดแยกไปแล้วใหม่จากผลอ่านที่เก็บไว้ (ไม่เรียก Gemini) — ใช้ตอนปรับรูปแบบหมายเหตุ"""
+    rows = await supa.select_all("slips", params={
+        "select": "id,ocr,status", "status": "eq.review", "ocr->>triage": "eq.true"})
+    accounts = await supa.select("payment_accounts", params={"select": "course,price,full_price", "active": "eq.true"})
+    n = 0
+    for r in rows:
+        o = r.get("ocr") or {}
+        if o.get("source") != "gemini" or o.get("is_slip") is False:
+            continue
+        note = await _triage_note(r["id"], o.get("amount"), o.get("receiver_bank"), o.get("receiver_acc"),
+                                  o.get("date"), o.get("confidence") or 0, o.get("ref"), accounts)
+        await supa.update("slips", {"auto_note": note}, {"id": f"eq.{r['id']}"})
+        n += 1
+    return {"refreshed": n}
+
+
 async def _triage_slips(apply: bool, limit: int = 25) -> dict:
     cands = await _triage_candidates()
     out = {"candidates": len(cands)}
@@ -1334,24 +1374,9 @@ async def _triage_slips(apply: bool, limit: int = 25) -> dict:
                 decision = "rejected_not_slip"
             elif g.get("is_slip") and conf >= _TRIAGE_SLIP_CONF:
                 amt = g.get("amount")
-                hint = ""
-                try:
-                    for a in accounts:
-                        for target in (a.get("price"), a.get("full_price")):
-                            if amt not in (None, "") and target not in (None, "") and abs(float(amt) - float(target)) < 1:
-                                hint = f" · ยอดตรงราคา {a['course']}"
-                except (TypeError, ValueError):
-                    pass
-                dup = ""
                 ref = g.get("ref")
-                if ref:   # ref ที่ Gemini อ่านใช้แค่เตือน ไม่เก็บลงคอลัมน์ ref (อ่านผิดจะทำให้สลิปจริงใบอื่นโดนตีว่าซ้ำ)
-                    ex = await supa.select("slips", params={"ref": f"eq.{ref}", "id": f"neq.{r['id']}",
-                                                            "select": "id,status", "limit": "1"})
-                    if ex:
-                        dup = f" · ⚠️ ref ตรงกับสลิป #{ex[0]['id']} ({ex[0]['status']}) น่าจะซ้ำ"
-                note = (f"🤖 Gemini อ่านได้ (EasySlip อ่าน QR ไม่ได้): ยอด {amt} · {g.get('bank') or '-'}"
-                        f" · ผู้รับ {g.get('receiver_account') or '-'} · {g.get('date') or '-'} (มั่นใจ {pct}%){hint}{dup}"
-                        " — ต้องเช็คเอง")
+                note = await _triage_note(r["id"], amt, g.get("bank"), g.get("receiver_account"), g.get("date"),
+                                          conf, ref, accounts)
                 await supa.update("slips", {
                     "auto_note": note, "amount": amt, "bank": g.get("bank"),
                     "slip_date": str(g["date"]) if g.get("date") else None,
@@ -1360,7 +1385,7 @@ async def _triage_slips(apply: bool, limit: int = 25) -> dict:
                             "ref": ref, "date": g.get("date"), "triage": True},
                 }, {"id": f"eq.{r['id']}"})
                 counts["annotated_slip"] += 1
-                decision = "annotated_slip" + ("_dup" if dup else "")
+                decision = "annotated_slip" + ("_dup" if "น่าจะซ้ำ" in note else "")
             else:
                 counts["left_unclear"] += 1
                 return
@@ -1417,6 +1442,8 @@ async def cron_slips_triage(request: Request):
         except ValueError:
             n, off = 10, 0
         return {"ok": True, "offset": off, **await _triage_recall_check(n, off)}
+    if request.query_params.get("refresh_notes") == "1":
+        return {"ok": True, **await _triage_refresh_notes()}
     apply = request.query_params.get("apply") == "1"
     try:
         limit = max(1, min(int(request.query_params.get("limit", "10")), 11))   # 1 คำขอ/4.5 วิ -> ต้องจบใน ~50 วิ
