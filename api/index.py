@@ -1366,7 +1366,11 @@ async def cron_slips_triage(request: Request):
     ไม่ใส่อะไร = นับผู้เข้าข่ายเฉย ๆ — เงียบเสมอ ไม่ส่งข้อความหาลูกค้า"""
     _check_cron_key(request)
     if request.query_params.get("recall") == "1":
-        return {"ok": True, **await _triage_recall_check()}
+        try:
+            n = max(5, min(int(request.query_params.get("n", "15")), 40))
+        except ValueError:
+            n = 15
+        return {"ok": True, **await _triage_recall_check(n)}
     apply = request.query_params.get("apply") == "1"
     try:
         limit = max(1, min(int(request.query_params.get("limit", "25")), 40))
