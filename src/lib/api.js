@@ -131,6 +131,9 @@ export const api = {
 
   slips: (status = '') => req('GET', '/slips' + (status ? `?status=${status}` : '')),
   updateSlip: (id, payload) => req('POST', `/slips/${id}`, payload),
+  slipsMaintenance: () => req('GET', '/slips/maintenance'),
+  slipsReprocess: (limit = 25, offline = true) => req('POST', '/slips/reprocess', { limit, offline }),
+  slipsTriage: (limit = 8, offset = 0) => req('POST', '/slips/triage', { limit, offset }),
   payAccounts: () => req('GET', '/payment-accounts'),
   savePayAccount: (payload) => req('POST', '/payment-accounts', payload),
   delPayAccount: (id) => req('DELETE', `/payment-accounts/${id}`),

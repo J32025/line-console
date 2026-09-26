@@ -1159,7 +1159,7 @@ async def _reprocess_candidates() -> dict:
     return {"never_processed": never, "quota_retry": retry, "rematch": rematch, "no_media": no_media}
 
 
-async def _reprocess_slips(apply: bool, limit: int = 40) -> dict:
+async def _reprocess_slips(apply: bool, limit: int = 40, offline: bool = True) -> dict:
     c = await _reprocess_candidates()
     todo = c["quota_retry"] + c["never_processed"]   # ที่รู้แน่ว่าเป็นสลิปจริง (โควต้าเต็ม) ก่อน — ต้องเรียก EasySlip
     out = {"never_processed": len(c["never_processed"]), "quota_retry": len(c["quota_retry"]),
@@ -1170,7 +1170,8 @@ async def _reprocess_slips(apply: bool, limit: int = 40) -> dict:
     remaining = await _easyslip_remaining()
     budget = limit if remaining is None else max(0, min(limit, remaining - _EASYSLIP_RESERVE))
     out.update({"easyslip_remaining": remaining, "budget": budget})
-    batch = c["rematch"][:200] + todo[:budget]   # rematch ใช้ผลที่เก็บไว้ ไม่กินงบ EasySlip
+    # rematch ใช้ผลที่เก็บไว้ ไม่กินงบ EasySlip — offline=False ตอนหน้าเว็บเรียกวนหลายชุด (ทำรอบแรกรอบเดียว กันวนซ้ำใบที่ยังไม่ตรง)
+    batch = (c["rematch"][:200] if offline else []) + todo[:budget]
     counts = {"verified": 0, "review": 0, "rejected": 0, "no_image": 0, "error": 0}
     items = []
     sem, lock = asyncio.Semaphore(4), asyncio.Lock()
@@ -1223,6 +1224,55 @@ async def _reprocess_slips(apply: bool, limit: int = 40) -> dict:
     out.update({"processed": len(batch), "result": counts, "items": items,
                 "left": max(0, len(todo) - min(len(todo), budget))})
     return out
+
+
+def _require_slip_tools_role(admin):
+    if admin.get("role") not in ("owner", "admin"):
+        raise HTTPException(403, "ต้องเป็น owner/admin (เครื่องมือนี้แก้สถานะสลิปเป็นชุด)")
+
+
+@app.get("/api/slips/maintenance")
+async def slips_maintenance(admin=Depends(current_admin)):
+    """จำนวนสลิปที่เครื่องมือตรวจซ้ำ/คัดแยกจะทำได้ (นับเฉย ๆ ไม่เรียก EasySlip/Gemini ไม่เสียโควต้า)"""
+    c = await _reprocess_candidates()
+    tri = await _triage_candidates()
+    return {"never_processed": len(c["never_processed"]), "quota_retry": len(c["quota_retry"]),
+            "rematch_offline": len(c["rematch"]), "no_media": c["no_media"],
+            "triage_candidates": len(tri),
+            "easyslip_remaining": await _easyslip_remaining(), "easyslip_reserve": _EASYSLIP_RESERVE}
+
+
+@app.post("/api/slips/reprocess")
+async def slips_reprocess_admin(req: Request, admin=Depends(current_admin)):
+    """ตรวจซ้ำสลิปที่ค้าง (เงียบ ไม่ส่งข้อความหาลูกค้า) — หน้าเว็บเรียกวนเป็นชุดละ ~25 ใบ"""
+    _require_slip_tools_role(admin)
+    b = {}
+    try:
+        b = await req.json()
+    except Exception:
+        pass
+    limit = max(1, min(int(b.get("limit") or 25), 30))
+    res = await _reprocess_slips(True, limit, offline=bool(b.get("offline", True)))
+    await supa.log_operation(admin["userId"], "slips.reprocess", {"limit": limit},
+                             {k: v for k, v in res.items() if k != "items"})
+    return res
+
+
+@app.post("/api/slips/triage")
+async def slips_triage_admin(req: Request, admin=Depends(current_admin)):
+    """คัดแยกรูปที่ไม่ใช่สลิปออกจากที่ EasySlip อ่านไม่ได้ (เงียบ ย้อนได้) — ชุดละ ~8 ใบ (เว้นจังหวะเรียก Gemini ~4.5 วิ/ใบ)"""
+    _require_slip_tools_role(admin)
+    b = {}
+    try:
+        b = await req.json()
+    except Exception:
+        pass
+    limit = max(1, min(int(b.get("limit") or 8), 8))
+    offset = max(0, int(b.get("offset") or 0))
+    res = await _triage_slips(True, limit, offset)
+    await supa.log_operation(admin["userId"], "slips.triage", {"limit": limit, "offset": offset},
+                             {k: v for k, v in res.items() if k != "items"})
+    return res
 
 
 @app.api_route("/api/cron/slips-reprocess", methods=["GET", "POST"])
@@ -1339,13 +1389,13 @@ async def _triage_refresh_notes() -> dict:
     return {"refreshed": n}
 
 
-async def _triage_slips(apply: bool, limit: int = 25) -> dict:
+async def _triage_slips(apply: bool, limit: int = 25, offset: int = 0) -> dict:
     cands = await _triage_candidates()
     out = {"candidates": len(cands)}
     if not apply:
         return out
     accounts = await supa.select("payment_accounts", params={"select": "course,price,full_price", "active": "eq.true"})
-    batch = cands[:limit]
+    batch = cands[offset:offset + limit]
     counts = {"rejected_not_slip": 0, "annotated_slip": 0, "left_unclear": 0, "no_image": 0, "error": 0}
     items = []
     sem = asyncio.Semaphore(5)
@@ -1396,7 +1446,10 @@ async def _triage_slips(apply: bool, limit: int = 25) -> dict:
             print("slip triage error:", r.get("id"), repr(e)[:150])
 
     await asyncio.gather(*[one(r) for r in batch])
-    out.update({"processed": len(batch), "result": counts, "items": items, "left": max(0, len(cands) - len(batch))})
+    # ใบที่ตัดสินไม่ได้ (Gemini ไม่ตอบ/ไม่มั่นใจ/ไม่มีรูป/error) ยังเป็นผู้เข้าข่ายอยู่ — ชุดถัดไปต้องข้ามไป ไม่งั้นหยิบใบเดิมวนไม่จบ
+    skipped = counts["left_unclear"] + counts["no_image"] + counts["error"]
+    out.update({"processed": len(batch), "result": counts, "items": items,
+                "next_offset": offset + skipped, "left": max(0, len(cands) - offset - len(batch))})
     return out
 
 
