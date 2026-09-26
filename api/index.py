@@ -1241,6 +1241,143 @@ async def cron_slips_reprocess(request: Request):
     return {"ok": True, "applied": apply, **res}
 
 
+# ---------- คัดแยกสลิปที่ EasySlip อ่าน QR ไม่ได้: รูปที่ไม่ใช่สลิป vs สลิปที่ต้องให้คนตรวจ ----------
+_TRIAGE_NOTES = ("qrcode_not_found", "slip_not_found")
+_TRIAGE_REJECT_CONF = 0.8   # ตีกลับอัตโนมัติต่อเมื่อ Gemini มั่นใจว่า "ไม่ใช่สลิป" อย่างน้อยเท่านี้
+_TRIAGE_SLIP_CONF = 0.55    # ถือว่า "น่าจะเป็นสลิป" (เกณฑ์เดียวกับ gate ใน webhook)
+
+
+async def _triage_candidates() -> list:
+    rows = await supa.select_all("slips", params={
+        "select": "id,line_user_id,media_url,auto_note,ocr,created_at", "status": "eq.review",
+        "order": "created_at.desc"})
+    out = []
+    for r in rows:
+        note = r.get("auto_note") or ""
+        # เฉพาะที่ EasySlip ล้มอย่างเดียว ยังไม่มีความเห็นจาก Gemini (ที่มี Gemini แล้วขึ้นต้นด้วย 🤖)
+        if r.get("media_url") and any(k in note for k in _TRIAGE_NOTES) and not note.startswith("🤖"):
+            out.append(r)
+    return out
+
+
+async def _triage_recall_check(n: int = 15) -> dict:
+    """วัดความแม่นของตัวจำแนก: ให้จำแนกสลิปที่ EasySlip ยืนยันแล้ว (ของจริงแน่นอน) — ควรตอบ is_slip ทุกใบ"""
+    rows = await supa.select("slips", params={
+        "select": "id,media_url", "status": "eq.verified", "media_url": "not.is.null",
+        "order": "created_at.desc", "limit": str(n)})
+    sem = asyncio.Semaphore(5)
+    res = []
+
+    async def one(r):
+        async with sem:
+            content, mime = await _fetch_image(r["media_url"])
+            if not content:
+                return
+            g = await _gemini_classify_slip(content, mime)
+            res.append(g)
+
+    await asyncio.gather(*[one(r) for r in rows])
+    ok = [g for g in res if g and g.get("is_slip") and (g.get("confidence") or 0) >= _TRIAGE_SLIP_CONF]
+    confident_wrong = [g for g in res if g and not g.get("is_slip") and (g.get("confidence") or 0) >= _TRIAGE_REJECT_CONF]
+    return {"checked": len(res), "recognized_as_slip": len(ok),
+            "no_answer": sum(1 for g in res if not g),
+            "confidently_said_not_slip": len(confident_wrong)}   # ตัวเลขนี้ต้องเป็น 0 ถึงจะปลอดภัยที่จะตีกลับอัตโนมัติ
+
+
+async def _triage_slips(apply: bool, limit: int = 25) -> dict:
+    cands = await _triage_candidates()
+    out = {"candidates": len(cands)}
+    if not apply:
+        return out
+    accounts = await supa.select("payment_accounts", params={"select": "course,price,full_price", "active": "eq.true"})
+    batch = cands[:limit]
+    counts = {"rejected_not_slip": 0, "annotated_slip": 0, "left_unclear": 0, "no_image": 0, "error": 0}
+    items = []
+    sem = asyncio.Semaphore(5)
+
+    async def one(r):
+        try:
+            async with sem:
+                content, mime = await _fetch_image(r["media_url"])
+                if not content:
+                    counts["no_image"] += 1
+                    return
+                g = await _gemini_classify_slip(content, mime)
+            if not g:
+                counts["left_unclear"] += 1
+                return
+            conf = float(g.get("confidence") or 0)
+            pct = round(conf * 100)
+            prior = r.get("auto_note") or ""
+            if not g.get("is_slip") and conf >= _TRIAGE_REJECT_CONF:
+                await supa.update("slips", {
+                    "status": "rejected",
+                    "auto_note": f"ไม่ใช่สลิปโอนเงิน (Gemini มั่นใจ {pct}%) — {prior}",
+                    "ocr": {"source": "gemini", "is_slip": False, "confidence": conf, "triage": True},
+                }, {"id": f"eq.{r['id']}"})
+                counts["rejected_not_slip"] += 1
+                decision = "rejected_not_slip"
+            elif g.get("is_slip") and conf >= _TRIAGE_SLIP_CONF:
+                amt = g.get("amount")
+                hint = ""
+                try:
+                    for a in accounts:
+                        for target in (a.get("price"), a.get("full_price")):
+                            if amt not in (None, "") and target not in (None, "") and abs(float(amt) - float(target)) < 1:
+                                hint = f" · ยอดตรงราคา {a['course']}"
+                except (TypeError, ValueError):
+                    pass
+                dup = ""
+                ref = g.get("ref")
+                if ref:   # ref ที่ Gemini อ่านใช้แค่เตือน ไม่เก็บลงคอลัมน์ ref (อ่านผิดจะทำให้สลิปจริงใบอื่นโดนตีว่าซ้ำ)
+                    ex = await supa.select("slips", params={"ref": f"eq.{ref}", "id": f"neq.{r['id']}",
+                                                            "select": "id,status", "limit": "1"})
+                    if ex:
+                        dup = f" · ⚠️ ref ตรงกับสลิป #{ex[0]['id']} ({ex[0]['status']}) น่าจะซ้ำ"
+                note = (f"🤖 Gemini อ่านได้ (EasySlip อ่าน QR ไม่ได้): ยอด {amt} · {g.get('bank') or '-'}"
+                        f" · ผู้รับ {g.get('receiver_account') or '-'} · {g.get('date') or '-'} (มั่นใจ {pct}%){hint}{dup}"
+                        " — ต้องเช็คเอง")
+                await supa.update("slips", {
+                    "auto_note": note, "amount": amt, "bank": g.get("bank"),
+                    "slip_date": str(g["date"]) if g.get("date") else None,
+                    "ocr": {"verified": False, "source": "gemini", "confidence": conf, "amount": amt,
+                            "receiver_acc": g.get("receiver_account"), "receiver_bank": g.get("bank"),
+                            "ref": ref, "date": g.get("date"), "triage": True},
+                }, {"id": f"eq.{r['id']}"})
+                counts["annotated_slip"] += 1
+                decision = "annotated_slip" + ("_dup" if dup else "")
+            else:
+                counts["left_unclear"] += 1
+                return
+            if len(items) < 60:
+                items.append({"id": r["id"], "decision": decision})
+        except Exception as e:
+            counts["error"] += 1
+            print("slip triage error:", r.get("id"), repr(e)[:150])
+
+    await asyncio.gather(*[one(r) for r in batch])
+    out.update({"processed": len(batch), "result": counts, "items": items, "left": max(0, len(cands) - len(batch))})
+    return out
+
+
+@app.api_route("/api/cron/slips-triage", methods=["GET", "POST"])
+async def cron_slips_triage(request: Request):
+    """?recall=1 = วัดความแม่นของตัวจำแนกกับสลิปที่ยืนยันแล้ว (ไม่เขียนอะไร) · ?apply=1&limit=N = คัดแยกจริง
+    ไม่ใส่อะไร = นับผู้เข้าข่ายเฉย ๆ — เงียบเสมอ ไม่ส่งข้อความหาลูกค้า"""
+    _check_cron_key(request)
+    if request.query_params.get("recall") == "1":
+        return {"ok": True, **await _triage_recall_check()}
+    apply = request.query_params.get("apply") == "1"
+    try:
+        limit = max(1, min(int(request.query_params.get("limit", "25")), 40))
+    except ValueError:
+        limit = 25
+    res = await _triage_slips(apply, limit)
+    if apply:
+        await supa.log_operation("cron", "slips.triage", {"limit": limit}, {k: v for k, v in res.items() if k != "items"})
+    return {"ok": True, "applied": apply, **res}
+
+
 async def _send_receipt(uid: str, s: dict):
     """ส่งใบเสร็จให้ลูกค้าหลังสลิป verified (ปิดได้ด้วย setting send_receipt=false)"""
     try:
