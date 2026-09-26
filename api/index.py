@@ -1375,6 +1375,36 @@ async def _triage_slips(apply: bool, limit: int = 25) -> dict:
     return out
 
 
+@app.get("/api/cron/slips-triage-report")
+async def cron_slips_triage_report(request: Request):
+    """ตรวจย้อนหลังผลคัดแยก (อ่านอย่างเดียว ไม่มีข้อมูลส่วนบุคคล): ที่ตีกลับว่า 'ไม่ใช่สลิป' เป็นของใคร (ลงทะเบียน/จ่ายแล้วไหม)
+    และรายการที่ Gemini ว่าเป็นสลิปแต่ต้องคนตรวจ"""
+    _check_cron_key(request)
+    rows = await supa.select_all("slips", params={
+        "select": "id,line_user_id,status,amount,bank,auto_note,created_at", "ocr->>triage": "eq.true"})
+    regs = await supa.select_all("registrations", params={"select": "line_user_id,paid"})
+    paid_by_uid: dict[str, bool] = {}
+    for r in regs:
+        if r.get("line_user_id"):
+            paid_by_uid[r["line_user_id"]] = paid_by_uid.get(r["line_user_id"], False) or bool(r.get("paid"))
+
+    def owner(uid):
+        return "ไม่ได้ลงทะเบียน" if uid not in paid_by_uid else ("ลงทะเบียน-จ่ายแล้ว" if paid_by_uid[uid] else "ลงทะเบียน-ยังไม่จ่าย")
+
+    rej = [r for r in rows if r["status"] == "rejected"]
+    ann = [r for r in rows if r["status"] == "review"]
+    rej_by_owner: dict[str, int] = {}
+    for r in rej:
+        rej_by_owner[owner(r["line_user_id"])] = rej_by_owner.get(owner(r["line_user_id"]), 0) + 1
+    return {
+        "rejected_not_slip": len(rej), "rejected_by_owner": rej_by_owner,
+        "rejected_unpaid_registrant_ids": [r["id"] for r in rej if owner(r["line_user_id"]) == "ลงทะเบียน-ยังไม่จ่าย"][:80],
+        "likely_slips_for_human": [
+            {"id": r["id"], "amount": r.get("amount"), "bank": r.get("bank"), "owner": owner(r["line_user_id"]),
+             "note": (r.get("auto_note") or "")[:220]} for r in ann][:60],
+    }
+
+
 @app.api_route("/api/cron/slips-triage", methods=["GET", "POST"])
 async def cron_slips_triage(request: Request):
     """?recall=1 = วัดความแม่นของตัวจำแนกกับสลิปที่ยืนยันแล้ว (ไม่เขียนอะไร) · ?apply=1&limit=N = คัดแยกจริง
