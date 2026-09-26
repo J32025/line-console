@@ -14,6 +14,9 @@ export default function KB() {
   const [showGaps, setShowGaps] = useState(false)
   const [autogen, setAutogen] = useState(null)
   const [autogenBusy, setAutogenBusy] = useState(false)
+  const [teach, setTeach] = useState(null)
+  const [teachBusy, setTeachBusy] = useState(false)
+  const [answers, setAnswers] = useState({})
 
   const load = () => api.kb().then((d) => { setList(d.articles); if (d.schema_missing) setHint(d.hint) }).catch((e) => t.err(e.message))
   const loadAutogen = () => api.kbAutogenStatus().then(setAutogen).catch(() => {})
@@ -22,6 +25,24 @@ export default function KB() {
     if (showGaps && !gaps) api.kbGaps(14).then(setGaps).catch((e) => t.err(e.message))
   }, [showGaps]) // eslint-disable-line
 
+  const loadTeach = (refresh = 0) => {
+    setTeachBusy(true)
+    return api.kbTeach(refresh).then(setTeach).catch((e) => t.err(e.message)).finally(() => setTeachBusy(false))
+  }
+  const saveTeach = async (th) => {
+    try {
+      await api.kbTeachSave(th.key, answers[th.key] || '', th.title)
+      t.ok('บันทึกแล้ว — น้องพัสดุใช้คำตอบนี้ได้ทันที')
+      setTeach((x) => ({ ...x, themes: x.themes.filter((y) => y.key !== th.key) }))
+      load()
+    } catch (e) { t.err(e.message) }
+  }
+  const skipTeach = async (th) => {
+    try {
+      await api.kbTeachDismiss(th.key)
+      setTeach((x) => ({ ...x, themes: x.themes.filter((y) => y.key !== th.key) }))
+    } catch (e) { t.err(e.message) }
+  }
   const runAutogen = async () => {
     setAutogenBusy(true)
     try {
@@ -83,6 +104,35 @@ export default function KB() {
             </button>
           </>
         )}
+      </section>
+
+      <section className="card">
+        <div className="row spread" style={{ alignItems: 'center' }}>
+          <h3>🎓 สอนน้องพัสดุ</h3>
+          <button className="sm" disabled={teachBusy} onClick={() => loadTeach(teach ? 1 : 0)}>
+            {teachBusy && <InlineSpinner />}{teach ? 'รีเฟรช' : 'ดูคำถามที่ลูกค้าถามบ่อย'}
+          </button>
+        </div>
+        <p className="muted sm">
+          ระบบรวมคำถามจริงที่ AI ยังไม่มีคำตอบ จัดเป็นหัวข้อ — พิมพ์คำตอบครั้งเดียว AI จะใช้ตอบทุกคนที่ถามเรื่องเดียวกันทันที (ตัดข้อมูลส่วนตัวออกแล้ว)
+        </p>
+        {teach && teach.error && <p className="err sm">{teach.error}</p>}
+        {teach && !teach.error && teach.themes.length === 0 && <p className="muted sm">ไม่มีหัวข้อค้างสอน 🎉</p>}
+        {teach && teach.themes.map((th) => (
+          <div key={th.key} style={{ borderTop: '1px solid var(--border)', paddingTop: 10, marginTop: 10 }}>
+            <div className="row spread">
+              <b>{th.title}</b>
+              <span className="muted sm">{th.kind === 'knowledge' ? 'ต้องการข้อมูล' : th.kind === 'status' ? 'ถามสถานะ (ระบบตอบเองได้)' : th.kind === 'escalate' ? 'ต้องคนตัดสินใจ' : th.kind === 'chitchat' ? 'ทักทาย/ขอบคุณ' : 'อื่น ๆ'} · {th.count} ครั้ง</span>
+            </div>
+            <ul className="muted sm" style={{ margin: '4px 0' }}>{th.examples.map((e, i) => <li key={i}>{e}</li>)}</ul>
+            <textarea rows={3} placeholder="พิมพ์คำตอบที่ถูกต้อง (เช่น เริ่มติววันที่ ... ผ่านกลุ่ม LINE ...)"
+                      value={answers[th.key] || ''} onChange={(e) => setAnswers((a) => ({ ...a, [th.key]: e.target.value }))} />
+            <div className="row" style={{ gap: 8 }}>
+              <button className="sm primary" disabled={(answers[th.key] || '').trim().length < 10} onClick={() => saveTeach(th)}>บันทึกเป็นความรู้</button>
+              <button className="sm" onClick={() => skipTeach(th)}>ข้าม / ไม่ต้องสอน</button>
+            </div>
+          </div>
+        ))}
       </section>
 
       <section className="card">

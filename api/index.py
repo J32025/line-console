@@ -2479,6 +2479,9 @@ async def _handle_gemini_replies(events: list) -> set:
             rid = None
         if rid not in menu_temp:
             continue
+        # ข้อความรับทราบ/ขอบคุณ/ปุ่มระบบ ไม่ต้องให้ AI ตอบ (ไม่เสียโควต้า ไม่ตอบซ้ำซ้อนให้ดูเป็นบอท)
+        if _norm_question(e["message"].get("text") or "") in _TEACH_NOISE_PLAIN:
+            continue
         # เช็คหลังตรวจสิทธิ์เมนู: จ่ายค่า DB เฉพาะข้อความที่ AI จะตอนจริง (ไม่ใช่ทุกข้อความของทุกคน)
         if not await _rate_ok_db(f"gemini:{uid}", 6, 60):  # กันสแปม/ต้นทุนบานปลาย
             continue
@@ -3324,6 +3327,202 @@ async def kb_gaps(admin=Depends(current_admin), days: int = 14):
     top_keywords = [{"word": w, "count": c} for w, c in words.most_common(30) if c >= 2]
     return {"days": days, "total": len(texts),
             "top_questions": top_questions, "top_keywords": top_keywords, "samples": texts[:60]}
+
+
+# ---------- สอนน้องพัสดุ: เจ้าของตอบคำถามจริงที่ลูกค้าถามบ่อยแต่ยังไม่มีคำตอบ ครั้งเดียว -> เป็นความรู้ที่ AI ใช้ทันที ----------
+_TEACH_TTL = 6 * 3600
+# ข้อความที่ไม่ใช่ "คำถามที่ต้องสอน": ปุ่ม/คำสั่งของระบบ และการรับทราบ/ขอบคุณเฉย ๆ (ซ้ำเยอะจนบดบังคำถามจริง)
+_TEACH_NOISE = {_norm_question(x) for x in (
+    "ลงทะเบียนที่เมนูด้านล่าง", "ติดต่อแอดมิน", "ค่ะ", "คะ", "ครับ", "ค่า", "จ้า", "โอเค", "ok", "รับทราบ",
+    "ขอบคุณที่ให้น้องพัสดุดูแล แล้วพบกันนะครับ", "ขอบคุณ", "ขอบคุณค่ะ", "ขอบคุณครับ", "ขอบคุณมากค่ะ", "ขอบคุณมากครับ",
+    "ขอบคุณนะคะ", "ขอบคุณนะครับ", "สวัสดี", "สวัสดีค่ะ", "สวัสดีครับ", "สวัสดีคะ")}
+# ข้อความที่ AI ไม่ควรตอบเลย: การรับทราบ/ขอบคุณ/ทักทายสั้น ๆ (คำถามจริงต้องมีสาระกว่านี้)
+_TEACH_NOISE_PLAIN = _TEACH_NOISE - {_norm_question(x) for x in ("ติดต่อแอดมิน", "ลงทะเบียนที่เมนูด้านล่าง", "สวัสดี", "สวัสดีค่ะ", "สวัสดีครับ", "สวัสดีคะ")}
+_PII_RE = re.compile(r"\d[\d\-\s]{6,}\d|userid|@|(?:^|\s)(?:นาย|นางสาว|นาง|น\.ส\.|คุณ)\s*\S+|(?:ต\.|อ\.|จ\.|หมู่|ซอย|ถนน)\s*\S*\d")
+
+
+def _teach_clean(q: str) -> str | None:
+    """คืนคำถามที่สะอาดพอส่งให้ AI จัดกลุ่ม หรือ None ถ้าควรทิ้ง (ข้อมูลส่วนตัว/ปุ่มระบบ/ไม่มีสาระ)"""
+    q = re.sub(r"[​‌‍]", "", (q or "")).strip()
+    if not (4 <= len(q) <= 140) or q.count("\n") >= 1:
+        return None
+    if _PII_RE.search(q.lower()):
+        return None
+    n = _norm_question(q)
+    if len(n) < 3 or n in _TEACH_NOISE:
+        return None
+    return q
+
+
+def _parse_json_loose(text: str):
+    text = re.sub(r"^```(?:json)?|```$", "", (text or "").strip(), flags=re.MULTILINE).strip()
+    try:
+        return json.loads(text)
+    except Exception:
+        m = re.search(r"[\[{].*[\]}]", text, re.DOTALL)
+        if m:
+            try:
+                return json.loads(m.group(0))
+            except Exception:
+                return None
+    return None
+
+
+async def _ai_text_json(system: str, user: str, max_tokens: int = 3000, timeout: int = 45):
+    """เรียก AI (Claude ก่อน ไม่มีค่อย Gemini) ให้ตอบ JSON จากข้อความล้วน — คืน object/None"""
+    try:
+        if ANTHROPIC_API_KEY:
+            client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY, timeout=timeout)
+            resp = await client.messages.create(model=ANTHROPIC_MODEL, max_tokens=max_tokens, temperature=0.2,
+                                                system=system, messages=[{"role": "user", "content": user}])
+            return _parse_json_loose("".join(b.text for b in resp.content if b.type == "text"))
+        if GEMINI_API_KEY:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+            body = {"contents": [{"role": "user", "parts": [{"text": user}]}],
+                    "systemInstruction": {"parts": [{"text": system}]},
+                    "generationConfig": {"responseMimeType": "application/json", "temperature": 0.2, "maxOutputTokens": max_tokens}}
+            async with httpx.AsyncClient(timeout=timeout) as c:
+                r = await c.post(url, json=body)
+            if r.status_code != 200:
+                print("ai json http error:", r.status_code, r.text[:200])
+                return None
+            parts = ((r.json().get("candidates") or [{}])[0].get("content") or {}).get("parts") or []
+            return _parse_json_loose("".join(p.get("text", "") for p in parts))
+    except Exception as e:
+        print("ai json error:", repr(e)[:200])
+    return None
+
+
+_TEACH_SYS = (
+    "คุณช่วยจัดกลุ่มข้อความจริงที่ลูกค้าพิมพ์ถามเพจติวสอบ e-CPP (ติวสอบมาตรฐานวิชาชีพด้านการจัดซื้อจัดจ้างและการบริหารพัสดุภาครัฐ "
+    "หลักสูตร FC IC PC AC) ให้แต่ละกลุ่มคือ 'เรื่องเดียวกันที่เจ้าของต้องตอบครั้งเดียวแล้วใช้ได้กับทุกคน'\n"
+    'ตอบเป็น JSON เท่านั้น: {"themes":[{"title":"หัวข้อสั้น ไม่เกิน 40 ตัวอักษร เขียนเป็นเรื่องที่ต้องตอบ เช่น วันเริ่มเรียน/เริ่มติวเมื่อไหร่",'
+    '"kind":"knowledge|status|escalate|chitchat|other","ids":[เลขข้อที่อยู่ในกลุ่มนี้]}]}\n'
+    "kind: knowledge = ต้องการข้อมูล/นโยบายที่ผู้สอนต้องเป็นคนบอก (ตารางเรียน วันเริ่ม กำหนดเวลา เอกสาร/ชีท/คลิป การเปลี่ยนรุ่น เงื่อนไข วิธีสมัคร "
+    "เนื้อหาสอบ) · status = ถามสถานะการสมัคร/การชำระเงิน/สลิปของตัวเอง (ระบบตอบจากข้อมูลจริงได้) · escalate = ร้องเรียน ขอเงินคืน ต้องให้คนตัดสินใจ · "
+    "chitchat = ทักทาย ขอบคุณ แจ้งข่าวส่วนตัวที่ไม่ต้องตอบข้อมูล · other = ที่เหลือ\n"
+    "กติกา: ทุกข้อต้องอยู่ในกลุ่มเดียว ห้ามแต่งข้อความขึ้นเอง อ้างเฉพาะเลขข้อที่ให้มา รวมข้อที่ความหมายเดียวกันเข้ากลุ่มเดียว (เช่น เริ่มเรียนวันไหน/เริ่มติวเมื่อไหร่/จะติวช่วงไหน) "
+    "ไม่เกิน 25 กลุ่ม"
+)
+
+
+async def _teach_handled() -> set:
+    return set(await _get_setting("kb_teach_handled", []) or [])
+
+
+async def _teach_build() -> dict | None:
+    """ดึงคำถามที่ AI ตอบโดยไม่มีความรู้รองรับ -> กรองข้อมูลส่วนตัว/ปุ่ม -> ให้ AI จัดกลุ่ม -> คืน themes"""
+    ops = await supa.select_all("operations", params={
+        "select": "params", "action": "like.gemini.kb_gap*", "created_at": f"gte.{_iso_ago(days=90)}"})
+    handled = await _teach_handled()
+    counts: dict[str, dict] = {}
+    for o in ops:
+        q = _teach_clean(str((o.get("params") or {}).get("q") or ""))
+        if not q:
+            continue
+        n = _norm_question(q)
+        if n in handled:
+            continue
+        g = counts.setdefault(n, {"q": q, "n": 0})
+        g["n"] += 1
+    items = sorted(counts.items(), key=lambda kv: -kv[1]["n"])[:120]
+    if not items:
+        return {"themes": [], "total_questions": 0}
+    listing = "\n".join(f"{i + 1}. [{v['n']}x] {v['q']}" for i, (_n, v) in enumerate(items))
+    res = await _ai_text_json(_TEACH_SYS, "ข้อความลูกค้า:\n" + listing)
+    if not isinstance(res, dict) or not isinstance(res.get("themes"), list):
+        return None
+    themes, seen = [], set()
+    for t in res["themes"]:
+        ids = [i for i in (t.get("ids") or []) if isinstance(i, int) and 1 <= i <= len(items) and i not in seen]
+        if not ids:
+            continue
+        seen.update(ids)
+        norms = [items[i - 1][0] for i in ids]
+        themes.append({
+            "key": hashlib.sha1("|".join(sorted(norms)).encode()).hexdigest()[:12],
+            "title": str(t.get("title") or "")[:60] or items[ids[0] - 1][1]["q"][:40],
+            "kind": t.get("kind") if t.get("kind") in ("knowledge", "status", "escalate", "chitchat", "other") else "other",
+            "count": sum(items[i - 1][1]["n"] for i in ids),
+            "examples": [items[i - 1][1]["q"] for i in ids][:5],
+            "norms": norms,
+        })
+    themes.sort(key=lambda t: (t["kind"] != "knowledge", -t["count"]))
+    return {"themes": themes, "total_questions": sum(v["n"] for _n, v in items)}
+
+
+async def _teach_state(refresh: bool = False) -> dict:
+    cache = await _get_setting("kb_teach_cache", None)
+    if not refresh and isinstance(cache, dict) and time.time() - float(cache.get("at") or 0) < _TEACH_TTL:
+        return cache
+    built = await _teach_build()
+    if built is None:
+        if isinstance(cache, dict):
+            return {**cache, "stale": True}
+        return {"themes": [], "total_questions": 0, "at": time.time(), "error": "AI จัดกลุ่มไม่สำเร็จ ลองใหม่อีกครั้ง"}
+    built["at"] = time.time()
+    await supa.upsert("app_settings", {"key": "kb_teach_cache", "value": built, "updated_at": NOW()}, on_conflict="key")
+    return built
+
+
+async def _teach_mark(theme: dict):
+    handled = await _teach_handled() | set(theme.get("norms") or [])
+    await supa.upsert("app_settings", {"key": "kb_teach_handled", "value": sorted(handled)[-3000:], "updated_at": NOW()},
+                      on_conflict="key")
+    cache = await _get_setting("kb_teach_cache", None)
+    if isinstance(cache, dict):
+        cache["themes"] = [t for t in cache.get("themes", []) if t.get("key") != theme.get("key")]
+        await supa.upsert("app_settings", {"key": "kb_teach_cache", "value": cache, "updated_at": NOW()}, on_conflict="key")
+
+
+def _teach_public(state: dict) -> dict:
+    return {"themes": [{k: t[k] for k in ("key", "title", "kind", "count", "examples")} for t in state.get("themes", [])],
+            "total_questions": state.get("total_questions", 0), "generated_at": state.get("at"),
+            "stale": bool(state.get("stale")), "error": state.get("error"),
+            "ai_ready": bool(ANTHROPIC_API_KEY or GEMINI_API_KEY)}
+
+
+@app.get("/api/kb/teach")
+async def kb_teach_list(admin=Depends(current_admin), refresh: int = 0):
+    if not (ANTHROPIC_API_KEY or GEMINI_API_KEY):
+        raise HTTPException(400, "ยังไม่ได้ตั้งค่า AI")
+    return _teach_public(await _teach_state(bool(refresh)))
+
+
+async def _teach_find(key: str) -> dict:
+    cache = await _get_setting("kb_teach_cache", None) or {}
+    theme = next((t for t in cache.get("themes", []) if t.get("key") == key), None)
+    if not theme:
+        raise HTTPException(404, "ไม่พบหัวข้อนี้แล้ว (อาจถูกจัดการไปแล้ว) — กดรีเฟรชรายการ")
+    return theme
+
+
+@app.post("/api/kb/teach")
+async def kb_teach_save(req: Request, admin=Depends(current_admin)):
+    """บันทึกคำตอบของเจ้าของเป็นบทความความรู้ที่ 'ใช้ทันที' (เจ้าของเป็นคนเขียนเอง จึงไม่ต้องรอตรวจซ้ำ)"""
+    b = await req.json()
+    answer = (b.get("answer") or "").strip()
+    if len(answer) < 10:
+        raise HTTPException(400, "คำตอบสั้นเกินไป (อย่างน้อย 10 ตัวอักษร)")
+    theme = await _teach_find(str(b.get("key") or ""))
+    title = (b.get("title") or theme["title"]).strip()[:120]
+    kw = sorted(_tok(title) | set().union(*[_tok(x) for x in theme.get("examples", [])]))[:24]
+    res = await supa.insert("kb_articles", {
+        "title": title, "body": answer[:2000], "keywords": kw, "category": "สอนโดยแอดมิน",
+        "enabled": True, "updated_by": admin["userId"], "updated_at": NOW()})
+    await _teach_mark(theme)
+    _gemini_kb_cache["items"] = None
+    await supa.log_operation(admin["userId"], "kb.teach", {"title": title, "questions": theme.get("count")}, None)
+    return {"ok": True, "id": (res[0]["id"] if res else None)}
+
+
+@app.post("/api/kb/teach/dismiss")
+async def kb_teach_dismiss(req: Request, admin=Depends(current_admin)):
+    """ข้ามหัวข้อนี้ (ไม่ต้องสอน เช่น ทักทาย/ขอบคุณ) — คำถามกลุ่มนี้จะไม่โผล่มาอีก"""
+    b = await req.json()
+    theme = await _teach_find(str(b.get("key") or ""))
+    await _teach_mark(theme)
+    return {"ok": True}
 
 
 @app.get("/api/insights/gaps")
