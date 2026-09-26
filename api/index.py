@@ -4869,6 +4869,51 @@ async def _dg_easyslip():
     return f"{'⚠️' if warn else '🧾'} EasySlip: ใช้ {used}/{mx}" + (" — ใกล้เต็ม" if warn else "")
 
 
+async def _slips_summary() -> dict:
+    """สรุปสลิปแบบไม่มีข้อมูลส่วนบุคคล: จำนวนตามสถานะ, เหตุผลที่ค้าง (auto_note), อายุของที่ค้าง"""
+    rows = await supa.select_all("slips", params={
+        "select": "status,auto_note,matched,amount,expected_course,created_at"})
+    now = dt.datetime.now(dt.timezone.utc)
+    by_status: dict[str, int] = {}
+    reasons: dict[str, int] = {}
+    ages = {"<1 วัน": 0, "1-3 วัน": 0, "3-7 วัน": 0, ">7 วัน": 0}
+    pending = no_amount = no_course = 0
+    for r in rows:
+        st = r.get("status") or "?"
+        by_status[st] = by_status.get(st, 0) + 1
+        if st not in ("new", "review"):
+            continue
+        pending += 1
+        note = re.sub(r"\d+", "#", (r.get("auto_note") or "(ไม่มีหมายเหตุ)"))[:70]
+        reasons[note] = reasons.get(note, 0) + 1
+        no_amount += r.get("amount") is None
+        no_course += not r.get("expected_course")
+        try:
+            age = (now - dt.datetime.fromisoformat(r["created_at"])).days
+        except Exception:
+            age = 0
+        ages["<1 วัน" if age < 1 else "1-3 วัน" if age < 3 else "3-7 วัน" if age < 7 else ">7 วัน"] += 1
+    return {"total": len(rows), "by_status": by_status, "pending": pending,
+            "pending_no_amount": no_amount, "pending_no_expected_course": no_course,
+            "pending_age": ages,
+            "pending_reasons": sorted(reasons.items(), key=lambda x: -x[1])[:12]}
+
+
+@app.get("/api/cron/slips-summary")
+async def cron_slips_summary(request: Request):
+    """อ่านอย่างเดียว (?key=CRON_SECRET) — ไว้ตรวจว่าทำไมสลิปค้าง"""
+    _check_cron_key(request)
+    return await _slips_summary()
+
+
+async def _dg_slips():
+    s = await _slips_summary()
+    old = s["pending_age"]["3-7 วัน"] + s["pending_age"][">7 วัน"]
+    if s["pending"] >= 30 or old:
+        return f"⚠️ สลิปค้างตรวจ {s['pending']} ใบ (ค้างเกิน 3 วัน {old}) — เปิดหน้าสลิป > ต้องตรวจเอง"
+    return f"✅ สลิปค้างตรวจ {s['pending']} ใบ"
+
+
 async def _dg_nonfriends():
     r = await _flag_nonfriend_registrants(False)
     n = r["non_friends"]
@@ -4888,9 +4933,10 @@ async def _dg_kb():
 
 
 async def _health_digest_lines() -> tuple[list[str], bool]:
-    names = ["Cron", "โควต้า LINE", "EasySlip", "ผู้ลงทะเบียน/เพื่อน", "KB"]
+    names = ["Cron", "โควต้า LINE", "EasySlip", "สลิป", "ผู้ลงทะเบียน/เพื่อน", "KB"]
     res = await asyncio.gather(
-        *[asyncio.wait_for(j, 28) for j in (_dg_cron(), _dg_line_quota(), _dg_easyslip(), _dg_nonfriends(), _dg_kb())],
+        *[asyncio.wait_for(j, 28) for j in (_dg_cron(), _dg_line_quota(), _dg_easyslip(), _dg_slips(),
+                                            _dg_nonfriends(), _dg_kb())],
         return_exceptions=True)
     lines = []
     for n, r in zip(names, res):
