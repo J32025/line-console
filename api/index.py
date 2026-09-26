@@ -904,6 +904,166 @@ async def _gemini_classify_slip(image_bytes: bytes, mime: str) -> dict | None:
     return None
 
 
+# ---------- ดูรูปที่ user ส่งมาก่อนตอบ: สลิป -> "ขอตรวจสอบ" · รูปทั่วไป -> วิเคราะห์แล้วตอบ ----------
+_IMAGE_ANALYZE_PROMPT = (
+    'คุณคือ "น้องพัสดุ" ผู้ช่วยของติวเตอร์สอบมาตรฐานวิชาชีพด้านการจัดซื้อจัดจ้างและการบริหารพัสดุภาครัฐ (e-CPP) '
+    "ตอบลูกค้าทาง LINE ลูกค้าส่งรูปมา 1 รูป ให้ทำ 2 อย่างในคำตอบเดียว:\n"
+    '1) ตัดสินว่ารูปนี้คือ "สลิปโอนเงิน/หลักฐานการชำระเงิน" (สลิปธนาคาร, mobile banking, พร้อมเพย์, ใบเสร็จโอนเงิน) หรือไม่\n'
+    "2) ถ้าไม่ใช่สลิป ให้วิเคราะห์ว่าเป็นรูปอะไร แล้วเขียนข้อความตอบลูกค้า\n\n"
+    "ตอบเป็น JSON เท่านั้น ห้ามมี markdown code fence ห้ามมีข้อความนอก JSON ตามโครงสร้างนี้:\n"
+    '{"kind": "slip" หรือ "other", "confidence": ตัวเลข 0 ถึง 1 (ความมั่นใจใน kind), '
+    '"slip": {"amount": ตัวเลขล้วน หรือ null, "bank": ชื่อธนาคาร หรือ null, "receiver_account": เลขบัญชี/พร้อมเพย์ปลายทาง หรือ null, '
+    '"ref": เลขอ้างอิงธุรกรรม หรือ null, "date": "YYYY-MM-DD" หรือ null} เมื่อ kind=slip ไม่งั้นเป็น null, '
+    '"reply": "ข้อความภาษาไทยตอบลูกค้า" เมื่อ kind=other ไม่งั้นเป็น null}\n\n'
+    "กติกาของ reply (เมื่อ kind=other):\n"
+    '- ภาษาไทยสุภาพ ลงท้าย "ครับ" สั้นกระชับ ไม่เกิน 5 บรรทัด ห้ามใช้ markdown (** # หรือขีดนำหน้า) ใช้อีโมจิได้เล็กน้อย\n'
+    '- เริ่มด้วยการบอกสั้น ๆ ว่าเห็นเป็นรูปอะไร (เช่น "เป็นรูปสกรีนช็อตโจทย์ข้อสอบ...", "เป็นรูปถ่ายอาหาร...") แล้วช่วยตามประเภท:\n'
+    "  • โจทย์/ข้อสอบ/เนื้อหาเกี่ยวกับการจัดซื้อจัดจ้างและพัสดุภาครัฐ: อ่านโจทย์ ตอบสั้น ๆ พร้อมเหตุผล 1-2 ประโยค "
+    "และแนะนำให้ทวนกับเอกสารติวอีกครั้ง (ไม่ใช่คำวินิจฉัยทางกฎหมาย)\n"
+    "  • สกรีนช็อตปัญหาการลงทะเบียน/ชำระเงิน/ระบบ: สรุปสั้น ๆ ว่าเห็นอะไร แล้วบอกว่าแอดมินจะช่วยดู ให้พิมพ์ 'ติดต่อแอดมิน'\n"
+    "  • เอกสารส่วนตัว (บัตรประชาชน ทะเบียนบ้าน สมุดบัญชี ฯลฯ): บอกแค่ประเภทเอกสาร ห้ามอ่านหรือทวนเลข/ที่อยู่/ชื่อออกมา "
+    "และแนะนำไม่ให้ส่งเอกสารส่วนตัวในแชท (การลงทะเบียนทำผ่านฟอร์ม)\n"
+    "  • รูปอื่น (คน สัตว์ อาหาร สถานที่ มีม สติกเกอร์): ตอบเป็นกันเองสั้น ๆ ว่าเห็นอะไร แล้วถามว่ามีอะไรให้ช่วยเรื่องการติว/สมัครเรียนไหม\n"
+    "  • รูปไม่เหมาะสม/อนาจาร/รุนแรง: ตอบสุภาพว่าไม่สามารถตอบรูปแบบนี้ได้\n"
+    "  • รูปเบลอ/ไม่ชัด: บอกว่าดูไม่ชัด ขอให้ส่งใหม่หรือพิมพ์บอกว่าต้องการอะไร\n"
+    "- ห้ามอ้างว่าตรวจการชำระเงินหรือยืนยันการสมัครให้ ห้ามเดาสิ่งที่ไม่เห็นในรูป ห้ามให้เลขบัญชีหรือราคา "
+    "(ถ้าลูกค้าอยากรู้ ให้พิมพ์ข้อความมาถาม)"
+)
+
+
+def _parse_image_analysis(text: str) -> dict | None:
+    text = re.sub(r"^```(?:json)?|```$", "", (text or "").strip(), flags=re.MULTILINE).strip()
+    try:
+        d = json.loads(text)
+    except Exception:
+        m = re.search(r"\{.*\}", text, re.DOTALL)
+        if not m:
+            return None
+        try:
+            d = json.loads(m.group(0))
+        except Exception:
+            return None
+    kind = d.get("kind")
+    if kind not in ("slip", "other"):
+        return None
+    slip = d.get("slip") if isinstance(d.get("slip"), dict) else None
+    reply = d.get("reply")
+    reply = reply.strip()[:900] if isinstance(reply, str) and reply.strip() else None
+    try:
+        conf = float(d.get("confidence") or 0)
+    except (TypeError, ValueError):
+        conf = 0.0
+    return {"kind": kind, "confidence": max(0.0, min(conf, 1.0)),
+            "slip": ({k: slip.get(k) for k in ("amount", "bank", "receiver_account", "ref", "date")} if slip else None),
+            "reply": reply}
+
+
+async def _claude_analyze_image(image_bytes: bytes, mime: str) -> dict | None:
+    if not ANTHROPIC_API_KEY or not image_bytes:
+        return None
+    try:
+        client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY, timeout=20)
+        resp = await client.messages.create(
+            model=ANTHROPIC_MODEL, max_tokens=900, temperature=0.3,
+            messages=[{"role": "user", "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": mime or "image/jpeg",
+                                             "data": base64.b64encode(image_bytes).decode()}},
+                {"type": "text", "text": _IMAGE_ANALYZE_PROMPT}]}])
+        return _parse_image_analysis("".join(b.text for b in resp.content if b.type == "text"))
+    except Exception as e:
+        print("claude image analyze error:", repr(e)[:200])
+        return None
+
+
+async def _google_analyze_image(image_bytes: bytes, mime: str) -> dict | None:
+    if not GEMINI_API_KEY or not image_bytes:
+        return None
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+    body = {
+        "contents": [{"role": "user", "parts": [
+            {"text": _IMAGE_ANALYZE_PROMPT},
+            {"inlineData": {"mimeType": mime or "image/jpeg", "data": base64.b64encode(image_bytes).decode()}}]}],
+        "generationConfig": {"responseMimeType": "application/json", "temperature": 0.3, "maxOutputTokens": 900},
+    }
+    try:
+        async with httpx.AsyncClient(timeout=20) as c:
+            r = await c.post(url, json=body)
+        j = r.json()
+        if r.status_code != 200:
+            print("gemini image analyze http error:", r.status_code, str(j)[:300])
+            return None
+        parts = ((j.get("candidates") or [{}])[0].get("content") or {}).get("parts") or []
+        return _parse_image_analysis("".join(p.get("text", "") for p in parts))
+    except Exception as e:
+        print("gemini image analyze error:", repr(e)[:200])
+        return None
+
+
+async def _analyze_image(image_bytes: bytes, mime: str) -> dict | None:
+    """ดูรูปครั้งเดียวได้ทั้ง 'เป็นสลิปไหม (+ข้อมูลที่อ่านได้)' และ 'ถ้าไม่ใช่ เป็นรูปอะไร + ข้อความตอบ' (ประหยัดโควต้า AI)
+    เลือกผู้ให้บริการอัตโนมัติเหมือน _gemini_classify_slip; คืน None ถ้า AI ใช้ไม่ได้/ตอบผิดรูปแบบ"""
+    if ANTHROPIC_API_KEY:
+        return await _claude_analyze_image(image_bytes, mime)
+    if GEMINI_API_KEY:
+        return await _google_analyze_image(image_bytes, mime)
+    return None
+
+
+_ACK_SLIP = "ขอตรวจสอบสลิปสักครู่นะครับ 🙏 ระบบจะแจ้งผลให้ทราบครับ"
+_ACK_MAYBE = "ขอตรวจสอบรูปนี้สักครู่นะครับ 🙏"
+_ACK_UNSURE = "ได้รับรูปแล้วครับ ทีมงานจะตรวจสอบให้นะครับ 🙏"
+_GENERIC_IMAGE_REPLY = "ได้รับรูปแล้วครับ 🙏 มีอะไรให้ช่วยเรื่องการติวหรือการสมัครเรียน พิมพ์บอกได้เลยนะครับ"
+
+
+async def _image_ai_on() -> bool:
+    """โหมด 'ดูรูปก่อนแล้วค่อยตอบ' — เปิดโดย default ถ้ามี AI; ปิดได้ด้วย setting image_ai_reply=false (กลับไปใช้กฎตอบอัตโนมัติชนิดรูปภาพเดิม)"""
+    if not (ANTHROPIC_API_KEY or GEMINI_API_KEY):
+        return False
+    return bool(await _get_setting("image_ai_reply", True))
+
+
+async def _reply_image(e: dict, uid: str, mid: str, text: str, by: str = "auto") -> bool:
+    """ตอบรูปที่ user ส่งมา — ผ่าน reply token (ฟรี) ถ้าใช้ไม่ได้ค่อย push (นับโควต้าข้อความ)
+    ไม่ตอบถ้าแอดมินกำลังคุยเอง (auto_reply_paused) หรือเคยตอบรูปนี้ไปแล้ว (กันคิวงานรันซ้ำแล้วตอบซ้ำ)"""
+    if not text:
+        return False
+    try:
+        u = await supa.select("line_users", params={
+            "select": "auto_reply_paused", "line_user_id": f"eq.{uid}", "limit": "1"})
+        if u and u[0].get("auto_reply_paused"):
+            return False
+        done = await supa.select("messages", params={
+            "select": "id", "line_user_id": f"eq.{uid}", "direction": "eq.out",
+            "payload->>reply_to": f"eq.{mid}", "limit": "1"})
+        if done:
+            return False
+    except Exception as ex:
+        print("reply_image pre-check error:", repr(ex)[:120])
+    msgs = [{"type": "text", "text": text[:4900]}]
+    code = 0
+    if e.get("replyToken"):
+        code, _ = await line.reply(e["replyToken"], msgs)
+    if code != 200:
+        try:
+            code, *_ = await line.push(uid, msgs)
+        except Exception:
+            code = 0
+    if code != 200:
+        return False
+    try:
+        await supa.insert("messages", {"line_user_id": uid, "direction": "out", "by": by, "msg_type": "text",
+                                       "text": text, "payload": {"type": "text", "text": text, "reply_to": mid}})
+    except Exception as ex:
+        print("reply_image log error:", repr(ex)[:120])
+    return True
+
+
+async def _reply_general_image(e: dict, uid: str, mid: str, text: str | None) -> bool:
+    if not await _rate_ok_db(f"imgai:{uid}", 3, 60):   # ส่งรูปรัว ๆ ตอบไม่เกิน 3 ครั้ง/นาที/คน
+        return False
+    return await _reply_image(e, uid, mid, text or _GENERIC_IMAGE_REPLY, by="gemini")
+
+
 async def _evaluate_slip(ocr, exp_course, slip_id) -> dict:
     """ตัดสินสถานะสลิปจากผลอ่าน (EasySlip/Gemini) + จับคู่บัญชี/ยอด/หลักสูตร/ref ซ้ำ
     ใช้ร่วมกันทั้ง webhook (_handle_slips) และการตรวจซ้ำสลิปค้าง (_reprocess_slips) — กฎต้องเป็นชุดเดียวกัน"""
@@ -961,6 +1121,8 @@ async def _evaluate_slip(ocr, exp_course, slip_id) -> dict:
 
 async def _handle_slips(img_events: list):
     notify_all = bool(await _get_setting("slip_notify_all_images", True))
+    image_ai = await _image_ai_on()
+    acked: set = set()   # ส่งข้อความ "ขอตรวจสอบ" ให้ user คนละ 1 ครั้งต่อ batch (ส่งหลายรูปพร้อมกันไม่ต้องตอบซ้ำหลายรอบ)
 
     for e in img_events:
         uid = e.get("source", {}).get("userId")
@@ -995,14 +1157,36 @@ async def _handle_slips(img_events: list):
             blob = ""
 
         # ---- gate: รูปนี้เป็น "สลิป" ไหม ----
-        # คุยเรื่องเงินใน 24 ชม. (pay_ctx) เชื่อได้เลย; ถ้าไม่มี -> ถาม Gemini (timeout 8s)
         gclass = None
         is_slip = pay_ctx
-        if content and not pay_ctx:
+        maybe_slip = False   # ไม่แน่ใจ -> สร้างแถวให้แอดมินเห็น แต่ยังไม่สลับเมนู
+        ack = None           # ข้อความตอบ user ทันที (ก่อนตรวจต่อ)
+        if image_ai and mtype == "image" and content:
+            # ดูรูปก่อนแล้วค่อยตอบ: สลิป -> "ขอตรวจสอบ" + ตรวจต่อ · รูปทั่วไป -> วิเคราะห์แล้วตอบ ไม่ถือเป็นสลิป
+            analysis = await _analyze_image(content, ctype)
+            if analysis:
+                conf = analysis["confidence"]
+                if analysis["kind"] == "slip" and conf >= 0.55:
+                    is_slip, ack = True, _ACK_SLIP
+                    gclass = {"is_slip": True, "confidence": conf, **(analysis.get("slip") or {})}
+                elif analysis["kind"] == "other" and conf >= (0.8 if pay_ctx else 0.6):
+                    await _reply_general_image(e, uid, mid, analysis.get("reply"))
+                    continue   # รูปทั่วไป: ไม่สร้างแถวสลิป ไม่แจ้งแอดมินว่าเป็นสลิป (รูปยังอยู่ในกล่องข้อความ)
+                else:
+                    # ไม่แน่ใจ -> ปฏิบัติเหมือนอาจเป็นสลิป (พลาดสลิปจริงแย่กว่าตรวจเกิน) แต่ไม่สลับเมนูถ้าไม่มีบริบทเรื่องเงิน
+                    maybe_slip, ack = True, _ACK_MAYBE
+            else:
+                ack = _ACK_UNSURE   # AI ใช้ไม่ได้: ตอบกลาง ๆ แล้วทำตามกติกาเดิม (pay_ctx / notify_all)
+        elif content and not pay_ctx:
+            # ปิดโหมด AI ดูรูป หรือเป็นไฟล์ (ไม่ใช่รูปภาพ): กติกาเดิม — ถาม Gemini เฉพาะเมื่อไม่มีบริบทเรื่องเงิน
             gclass = await _gemini_classify_slip(content, ctype)
             is_slip = bool(gclass and gclass.get("is_slip") and (gclass.get("confidence") or 0) >= 0.55)
 
-        if not (is_slip or notify_all):
+        if ack and uid not in acked:
+            acked.add(uid)
+            await _reply_image(e, uid, mid, ack, by="auto")
+
+        if not (is_slip or maybe_slip or notify_all):
             continue  # ไม่ใช่สลิป + ไม่ได้ตั้งให้แจ้งทุกรูป -> ข้าม (ไม่สร้าง row)
 
         # ---- หาหลักสูตรที่คาดว่าจะจ่าย: ใช้ทะเบียนจริงก่อน (แม่นสุด — คนละ 1 หลักสูตรเท่านั้น)
@@ -2306,6 +2490,11 @@ async def _handle_auto_replies(events: list, gemini_uids: set = frozenset()) -> 
                 return pa
         return None
 
+    # รูปภาพ: ให้ตัวจัดการรูป (_handle_slips) ดูรูปก่อนแล้วตอบเอง — ไม่ตอบด้วยกฎ "ได้รับรูป/สลิปแล้ว" ทันที
+    skip_images = False
+    if any(e.get("type") == "message" and e.get("message", {}).get("type") == "image" for e in repliable):
+        skip_images = await _image_ai_on()
+
     name_cache: dict[str, str] = {}
     async def name_of(uid):
         if not uid:
@@ -2321,6 +2510,8 @@ async def _handle_auto_replies(events: list, gemini_uids: set = frozenset()) -> 
         try:
             uid = e.get("source", {}).get("userId")
             if uid in paused or uid in replied_uids:
+                continue
+            if skip_images and e["type"] == "message" and e.get("message", {}).get("type") == "image":
                 continue
 
             # ---- postback action (routing table) มาก่อน ----
