@@ -1267,11 +1267,13 @@ async def _triage_recall_check(n: int = 15) -> dict:
         "order": "created_at.desc", "limit": str(n)})
     sem = asyncio.Semaphore(5)
     res = []
+    unavailable = []
 
     async def one(r):
         async with sem:
             content, mime = await _fetch_image(r["media_url"])
             if not content:
+                unavailable.append(r["id"])
                 return
             g = await _gemini_classify_slip(content, mime)
             res.append(g)
@@ -1279,7 +1281,8 @@ async def _triage_recall_check(n: int = 15) -> dict:
     await asyncio.gather(*[one(r) for r in rows])
     ok = [g for g in res if g and g.get("is_slip") and (g.get("confidence") or 0) >= _TRIAGE_SLIP_CONF]
     confident_wrong = [g for g in res if g and not g.get("is_slip") and (g.get("confidence") or 0) >= _TRIAGE_REJECT_CONF]
-    return {"checked": len(res), "recognized_as_slip": len(ok),
+    return {"asked": len(rows), "image_unavailable": len(unavailable),
+            "checked": len(res), "recognized_as_slip": len(ok),
             "no_answer": sum(1 for g in res if not g),
             "confidently_said_not_slip": len(confident_wrong)}   # ตัวเลขนี้ต้องเป็น 0 ถึงจะปลอดภัยที่จะตีกลับอัตโนมัติ
 
