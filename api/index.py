@@ -757,6 +757,29 @@ def _digits(s):
     return re.sub(r"\D", "", str(s or ""))
 
 
+_MASK_CHARS = "xX*•"
+
+
+def _acct_matches(receiver, account_no) -> bool:
+    """เลขบัญชีปลายทางที่สลิปแสดงตรงกับบัญชีที่ตั้งไว้ไหม
+    1) กติกาเดิม: 4 หลักท้ายตรง (สลิปที่โชว์เลขท้ายครบ)
+    2) สลิปที่ธนาคารปิดเลขบางหลัก เช่น xxx-x-x5432-x / XXXXX7942XXX — หลักที่เห็นต้องตรงตำแหน่งเดียวกับเลขจริง
+       (ถ้าความยาวเท่ากัน) หรือเป็นเลขติดกัน >=4 หลักที่อยู่ในเลขจริง (ถ้ารูปแบบความยาวไม่เท่า)"""
+    real = _digits(account_no)
+    if not real or not receiver:
+        return False
+    rd = _digits(receiver)
+    if len(rd) >= 4 and rd[-4:] == real[-4:]:
+        return True
+    chars = re.sub(rf"[^0-9{re.escape(_MASK_CHARS)}]", "", str(receiver))
+    if sum(c.isdigit() for c in chars) < 3:
+        return False
+    if len(chars) == len(real):
+        return all(c in _MASK_CHARS or c == r for c, r in zip(chars, real))
+    runs = re.findall(r"\d{4,}", re.sub(rf"[{re.escape(_MASK_CHARS)}]", " ", chars))
+    return any(run in real for run in runs)
+
+
 async def _easyslip_verify(image_bytes: bytes):
     """เรียก EasySlip -> คืน dict (verified, amount, receiver_acc, receiver_bank, ref, date) หรือ None"""
     if not EASYSLIP_TOKEN:
@@ -899,8 +922,7 @@ async def _evaluate_slip(ocr, exp_course, slip_id) -> dict:
 
     if status != "rejected" and ocr and ocr.get("verified"):
         accounts = await supa.select("payment_accounts", params={"select": "*", "active": "eq.true"})
-        racc = _digits(ocr.get("receiver_acc"))
-        candidates = [a for a in accounts if racc and (_digits(a["account_no"])[-4:] == racc[-4:])]
+        candidates = [a for a in accounts if _acct_matches(ocr.get("receiver_acc"), a["account_no"])]
         # ถ้ารู้หลักสูตรที่ลงทะเบียนไว้แล้ว (จากทะเบียนจริง) ให้เลือกบัญชีที่ตรงหลักสูตรนั้นก่อน
         # กันเลือกบัญชีผิดตัวตอนมีหลายคอร์สใช้เลขบัญชีท้าย 4 ตัวซ้ำกัน
         known_course = exp_course  # มาจากทะเบียนจริงเท่านั้น (ถ้ามี) — ก่อนจะ fallback เป็นคอร์สของบัญชีที่ match
@@ -1112,11 +1134,18 @@ async def _reprocess_candidates() -> dict:
     """สลิปค้างที่ 'ควรลองใหม่ได้': (ก) ไม่เคยถูกประมวลผลเลย (new ไม่มีหมายเหตุ) (ข) review เพราะ EasySlip โควต้าเต็ม
     ไม่รวม qrcode_not_found/บัญชีไม่ตรง/ยอดไม่ตรง — ตรวจซ้ำก็ได้ผลเดิม เสียโควต้าเปล่า ต้องให้คนดู"""
     rows = await supa.select_all("slips", params={
-        "select": "id,line_user_id,media_url,status,auto_note,expected_course,created_at",
+        "select": "id,line_user_id,media_url,status,auto_note,expected_course,created_at,ocr",
         "status": "in.(new,review)", "order": "created_at.desc"})
-    never, retry, no_media = [], [], 0
+    never, retry, rematch, no_media = [], [], [], 0
     for r in rows:
         note = r.get("auto_note") or ""
+        if (r["status"] == "review" and note.startswith("บัญชีปลายทางไม่ตรงรายการ")
+                and isinstance(r.get("ocr"), dict) and r["ocr"].get("verified")):
+            # EasySlip อ่านสลิปสำเร็จแล้ว แต่จับคู่บัญชีไม่ได้ (เช่น เลขบัญชีถูกปิดบางหลัก) — ประเมินใหม่จากผล OCR ที่เก็บไว้
+            # ไม่ต้องดึงรูป ไม่เรียก EasySlip ไม่เสียโควต้า
+            r["_offline"] = True
+            rematch.append(r)
+            continue
         if r["status"] == "new" and not note:
             bucket = never
         elif r["status"] == "review" and any(k in note for k in _REPROCESS_RETRY_NOTES):
@@ -1127,20 +1156,21 @@ async def _reprocess_candidates() -> dict:
             no_media += 1
             continue
         bucket.append(r)
-    return {"never_processed": never, "quota_retry": retry, "no_media": no_media}
+    return {"never_processed": never, "quota_retry": retry, "rematch": rematch, "no_media": no_media}
 
 
 async def _reprocess_slips(apply: bool, limit: int = 40) -> dict:
     c = await _reprocess_candidates()
-    todo = c["quota_retry"] + c["never_processed"]   # ที่รู้แน่ว่าเป็นสลิปจริง (โควต้าเต็ม) ก่อน
+    todo = c["quota_retry"] + c["never_processed"]   # ที่รู้แน่ว่าเป็นสลิปจริง (โควต้าเต็ม) ก่อน — ต้องเรียก EasySlip
     out = {"never_processed": len(c["never_processed"]), "quota_retry": len(c["quota_retry"]),
-           "no_media": c["no_media"], "candidates": len(todo)}
+           "rematch_offline": len(c["rematch"]), "no_media": c["no_media"],
+           "candidates": len(todo) + len(c["rematch"])}
     if not apply:
         return out   # ดูอย่างเดียว — ไม่เรียก EasySlip ไม่เสียโควต้า
     remaining = await _easyslip_remaining()
     budget = limit if remaining is None else max(0, min(limit, remaining - _EASYSLIP_RESERVE))
     out.update({"easyslip_remaining": remaining, "budget": budget})
-    batch = todo[:budget]
+    batch = c["rematch"][:200] + todo[:budget]   # rematch ใช้ผลที่เก็บไว้ ไม่กินงบ EasySlip
     counts = {"verified": 0, "review": 0, "rejected": 0, "no_image": 0, "error": 0}
     items = []
     sem, lock = asyncio.Semaphore(4), asyncio.Lock()
@@ -1149,18 +1179,21 @@ async def _reprocess_slips(apply: bool, limit: int = 40) -> dict:
         uid = r["line_user_id"]
         try:
             async with sem:   # ส่วนช้า (ดึงรูป/EasySlip/Gemini) ทำขนานได้
-                content, mime = await _fetch_image(r["media_url"])
-                if not content:
-                    counts["no_image"] += 1
-                    return
-                ocr = await _easyslip_verify(content)
-                easyslip_err = ocr.get("error") if ocr and not ocr.get("verified") else None
-                if not ocr or easyslip_err:
-                    g = await _gemini_classify_slip(content, mime)
-                    if g and g.get("is_slip"):
-                        ocr = {"verified": False, "amount": g.get("amount"), "receiver_acc": g.get("receiver_account"),
-                               "receiver_bank": g.get("bank"), "ref": g.get("ref"), "date": g.get("date"),
-                               "source": "gemini", "confidence": g.get("confidence"), "easyslip_error": easyslip_err}
+                if r.get("_offline"):
+                    ocr = r["ocr"]   # ประเมินใหม่จากผล OCR เดิม
+                else:
+                    content, mime = await _fetch_image(r["media_url"])
+                    if not content:
+                        counts["no_image"] += 1
+                        return
+                    ocr = await _easyslip_verify(content)
+                    easyslip_err = ocr.get("error") if ocr and not ocr.get("verified") else None
+                    if not ocr or easyslip_err:
+                        g = await _gemini_classify_slip(content, mime)
+                        if g and g.get("is_slip"):
+                            ocr = {"verified": False, "amount": g.get("amount"), "receiver_acc": g.get("receiver_account"),
+                                   "receiver_bank": g.get("bank"), "ref": g.get("ref"), "date": g.get("date"),
+                                   "source": "gemini", "confidence": g.get("confidence"), "easyslip_error": easyslip_err}
             async with lock:   # ประเมิน+บันทึกทีละใบ — สลิปซ้ำในกองเดียวกันจะเห็นกันและกัน (เช็ค ref ซ้ำ)
                 exp = r.get("expected_course")
                 try:
@@ -1188,7 +1221,7 @@ async def _reprocess_slips(apply: bool, limit: int = 40) -> dict:
 
     await asyncio.gather(*[one(r) for r in batch])
     out.update({"processed": len(batch), "result": counts, "items": items,
-                "left": max(0, len(todo) - len(batch))})
+                "left": max(0, len(todo) - min(len(todo), budget))})
     return out
 
 
