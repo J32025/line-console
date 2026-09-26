@@ -4795,6 +4795,15 @@ async def _cron_last_run(action_like: str) -> str | None:
 async def cron_heartbeat(request: Request):
     """เช็คว่า cron จำเป็นยังทำงานอยู่ไหม — แจ้งแอดมินถ้าเงียบเกินกำหนด"""
     _check_cron_key(request)
+    stale = await _cron_stale()
+    if stale:
+        await alert_admin("⚠️ Cron ไม่ทำงาน", "\n".join(stale), throttle_key="cron_stale")
+    await supa.log_operation("cron", "heartbeat", None, {"stale": stale})
+    return {"ok": not stale, "stale": stale}
+
+
+async def _cron_stale() -> list[str]:
+    """รายการ cron ที่เงียบเกินกำหนด (ว่าง = ปกติ) — ใช้ร่วมกันทั้ง heartbeat และสรุปประจำวัน"""
     checks = {
         "richmenu.sync": 14 * 3600,  # sync รันวันละ 2 รอบ (08:00 / 19:00 น.) ห่างสุด ~13 ชม.
         "automation.run": 2 * 3600,
@@ -4815,10 +4824,82 @@ async def cron_heartbeat(request: Request):
         age = (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(last)).total_seconds()
         if age > limit:
             stale.append(f"{act}: {int(age // 3600)} ชม.ที่แล้ว")
-    if stale:
-        await alert_admin("⚠️ Cron ไม่ทำงาน", "\n".join(stale), throttle_key="cron_stale")
-    await supa.log_operation("cron", "heartbeat", None, {"stale": stale})
-    return {"ok": not stale, "stale": stale}
+    return stale
+
+
+# ---- หมวด "สุขภาพระบบ" ในสรุปประจำวัน: แต่ละข้อแยกกัน ข้อไหนเช็คไม่ได้ก็ไม่ล้มทั้งสรุป ----
+async def _dg_cron():
+    stale = await _cron_stale()
+    return "⚙️ Cron: ปกติ ✅" if not stale else "⚠️ Cron ค้าง: " + "; ".join(stale)
+
+
+async def _dg_line_quota():
+    import calendar
+    q = await line.message_quota()
+    lim = q.get("quota", {}).get("quota", q.get("quota")) or {}
+    used = q.get("totalUsage")
+    if not isinstance(lim, dict) or lim.get("type") != "limited" or not lim.get("value") or used is None:
+        return None   # แผนไม่จำกัด/อ่านไม่ได้ — ไม่ต้องรายงาน
+    limit, used = int(lim["value"]), int(used)
+    today = dt.date.today()
+    projected = used / max(today.day, 1) * calendar.monthrange(today.year, today.month)[1]
+    pct, ppct = used / limit * 100, projected / limit * 100
+    warn = pct >= 80 or ppct >= 100
+    return (f"{'⚠️' if warn else '💌'} โควต้าข้อความ LINE: {used:,}/{limit:,} ({pct:.0f}%)"
+            f" · คาดสิ้นเดือน ~{ppct:.0f}%")
+
+
+async def _dg_easyslip():
+    if not EASYSLIP_TOKEN:
+        return None
+    async with httpx.AsyncClient(timeout=12) as c:
+        r = await c.get("https://developer.easyslip.com/api/v1/me",
+                        headers={"Authorization": f"Bearer {EASYSLIP_TOKEN}"})
+    if r.status_code != 200:
+        return f"⚠️ EasySlip: token มีปัญหา (HTTP {r.status_code})"
+    d = r.json().get("data") or {}
+    q = d.get("quota") or d
+    used, mx, remain = q.get("usedQuota", q.get("used")), q.get("maxQuota", q.get("max", q.get("limit"))), q.get("remainingQuota")
+    if used is None or mx is None:
+        return "🧾 EasySlip: เชื่อมต่อได้"
+    try:
+        warn = remain is not None and (int(remain) <= 0 or int(remain) <= int(mx) * 0.2)
+    except (TypeError, ValueError):
+        warn = False
+    return f"{'⚠️' if warn else '🧾'} EasySlip: ใช้ {used}/{mx}" + (" — ใกล้เต็ม" if warn else "")
+
+
+async def _dg_nonfriends():
+    r = await _flag_nonfriend_registrants(False)
+    n = r["non_friends"]
+    extra = f" (เช็คไม่ได้ {r['unknown']})" if r.get("unknown") else ""
+    if n:
+        return f"⚠️ ลงทะเบียนแล้วแต่ไม่เป็นเพื่อน {n} คน{extra} — ดูรายชื่อที่หน้าลงทะเบียน > กระทบยอด"
+    return f"✅ ผู้ลงทะเบียน {r['registrants']:,} คน เป็นเพื่อนครบทุกคน{extra}"
+
+
+async def _dg_kb():
+    total = await supa.count("kb_articles")
+    pending = await supa.count("kb_articles", {"enabled": "eq.false"})
+    done = set(await _get_setting(_KB_TOPIC_SETTING_KEY, []) or [])
+    remain = len([t for t in _PROCUREMENT_TOPICS if t not in done])
+    return (f"📚 KB: {total} บทความ" + (f" (ปิดอยู่/รอตรวจ {pending})" if pending else "")
+            + (f" · ร่างอัตโนมัติเหลือ {remain} หัวข้อ" if remain else " · ร่างครบทุกหัวข้อแล้ว"))
+
+
+async def _health_digest_lines() -> tuple[list[str], bool]:
+    names = ["Cron", "โควต้า LINE", "EasySlip", "ผู้ลงทะเบียน/เพื่อน", "KB"]
+    res = await asyncio.gather(
+        *[asyncio.wait_for(j, 28) for j in (_dg_cron(), _dg_line_quota(), _dg_easyslip(), _dg_nonfriends(), _dg_kb())],
+        return_exceptions=True)
+    lines = []
+    for n, r in zip(names, res):
+        if isinstance(r, BaseException):
+            print(f"digest health [{n}] error:", repr(r)[:150])
+            lines.append(f"⚠️ เช็ค {n} ไม่ได้ ({type(r).__name__})")
+        elif r:
+            lines.append(r)
+    return lines, any(l.startswith("⚠️") for l in lines)
 
 
 @app.api_route("/api/cron/daily-digest", methods=["GET", "POST"])
@@ -4858,15 +4939,22 @@ async def cron_daily_digest(request: Request):
     except Exception:
         pass
 
-    lines = [f"📊 สรุปวันที่ {y0}",
+    ai_y = await _cnt("messages", {"by": "eq.gemini"})
+    health, warn = await _health_digest_lines()
+
+    lines = [f"📊 สรุปวันที่ {y0} · {'🟡 มีเรื่องต้องดู' if warn else '🟢 ระบบปกติ'}",
              f"👥 เพิ่มเพื่อน {new_follow} · เลิกติดตาม {unfollow}",
              f"📝 สมัครใหม่ {new_reg}",
-             f"💬 ข้อความเข้า {msg_in}",
+             f"💬 ข้อความเข้า {msg_in} · 🤖 AI ตอบ {ai_y}",
              f"🧾 สลิปรอตรวจ {slip_new + slip_review} · ยืนยันแล้ว ฿{round(rev):,}"]
     if tasks_overdue:
         lines.append(f"⏰ งานเกินกำหนด {tasks_overdue}")
+    lines.append("\n🩺 สุขภาพระบบ")
+    lines.extend(health)
     lines.append(f"\nเปิดดู: {APP_URL}")
     text = "\n".join(lines)
+    if request.query_params.get("dry") == "1":   # ดูตัวอย่างเฉย ๆ ไม่ส่งเข้า LINE ไม่บันทึก log
+        return {"ok": True, "dry": True, "sent": 0, "preview": text}
     sent = 0
     for uid in ALERT_USER_IDS:
         try:
