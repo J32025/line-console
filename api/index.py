@@ -2271,6 +2271,112 @@ async def _gemini_answer(question: str, temperature: float = 0.7, context: str =
     return None
 
 
+def _norm_question(t: str) -> str:
+    """ย่อข้อความให้จับกลุ่มคำถามซ้ำได้ (ตัดเว้นวรรค/ตัวเลข/คำลงท้าย/เครื่องหมาย)"""
+    t = re.sub(r"[\d\s\W_]+", "", (t or "").lower())
+    return re.sub(r"(ครับ|ค่ะ|คะ|นะครับ|นะคะ|นะ|จ้า|จ๊ะ)$", "", t)[:60]
+
+
+async def _ai_baseline(days: int = 30) -> dict:
+    """วัดว่าตอนนี้ 'ใครตอบลูกค้า' — กฎ/AI/แอดมิน — และมีคำถามอะไรซ้ำบ่อย (ฐานตัวเลขสำหรับวัดว่า AI เก่งขึ้นจริงไหม)
+    ตัวตอบ: กฎ = by auto/postback/automation · AI = by gemini · แอดมิน = by เป็น LINE userId (U...) · ข้ามโน้ตระบบ"""
+    rows = await supa.select_all("messages", params={
+        "select": "line_user_id,direction,by,msg_type,text,created_at",
+        "created_at": f"gte.{_iso_ago(days=days)}", "order": "created_at.asc"})
+
+    def kind(r):
+        b = r.get("by") or ""
+        if b == "gemini":
+            return "ai"
+        if b in ("auto", "postback", "automation"):
+            return "rule"
+        if b in ("user", "system", ""):
+            return None
+        return "admin"
+
+    def ts(r):
+        return dt.datetime.fromisoformat(r["created_at"])
+
+    threads: dict[str, list] = {}
+    for r in rows:
+        threads.setdefault(r["line_user_id"], []).append(r)
+
+    first = {"rule": 0, "ai": 0, "admin_fast": 0, "admin_late": 0, "none": 0}
+    bot_then_human = {"rule": 0, "ai": 0}
+    bot_only = {"rule": 0, "ai": 0}
+    questions: dict[str, list] = {}
+    per_day: dict[str, dict] = {}
+    n_in = 0
+    admin_out = 0
+    users_in: set = set()
+
+    def day(r):
+        return r["created_at"][:10]
+
+    for uid, th in threads.items():
+        for i, r in enumerate(th):
+            k = kind(r)
+            d = per_day.setdefault(day(r), {"in": 0, "rule": 0, "ai": 0, "admin": 0})
+            if r["direction"] == "out" and k:
+                d[k] += 1
+                admin_out += (k == "admin")
+            if not (r["direction"] == "in" and r.get("msg_type") in (None, "text") and (r.get("text") or "").strip()):
+                continue
+            n_in += 1
+            d["in"] += 1
+            users_in.add(uid)
+            nq = _norm_question(r["text"])
+            if len(nq) >= 3:
+                questions.setdefault(nq, []).append((r["text"].strip()[:60]))
+            t0 = ts(r)
+            resp = next((x for x in th[i + 1:] if x["direction"] == "out" and kind(x)), None)
+            if not resp:
+                first["none"] += 1
+                continue
+            gap = (ts(resp) - t0).total_seconds()
+            rk = kind(resp)
+            if rk == "admin":
+                first["admin_fast" if gap <= 180 else "admin_late"] += 1
+                continue
+            if gap > 180:
+                first["none"] += 1
+                continue
+            first[rk] += 1
+            human_after = any(x["direction"] == "out" and kind(x) == "admin" and 0 < (ts(x) - ts(resp)).total_seconds() <= 86400
+                              for x in th[i + 1:])
+            (bot_then_human if human_after else bot_only)[rk] += 1
+
+    repeated = sorted(((len(v), v[0]) for v in questions.values() if len(v) >= 3), reverse=True)[:25]
+    try:
+        gaps = await supa.count("operations", {"action": "like.gemini.kb_gap*", "created_at": f"gte.{_iso_ago(days=days)}"})
+    except Exception:
+        gaps = None
+    ndays = max(1, len(per_day))
+    answered_by_bot = first["rule"] + first["ai"]
+    return {
+        "days": days, "inbound_text": n_in, "users": len(users_in), "inbound_per_day": round(n_in / ndays, 1),
+        "first_responder": first,
+        "bot_first_answer_kept": {"rule": bot_only["rule"], "ai": bot_only["ai"]},
+        "bot_first_then_human_followed_up": {"rule": bot_then_human["rule"], "ai": bot_then_human["ai"]},
+        "admin_messages": admin_out, "admin_messages_per_day": round(admin_out / ndays, 1),
+        "bot_answer_share_pct": round(answered_by_bot * 100 / n_in, 1) if n_in else None,
+        "kb_gaps_logged": gaps,
+        "top_repeated_questions": [{"count": c, "example": q} for c, q in repeated],
+        "last_14_days": {k: per_day[k] for k in sorted(per_day)[-14:]},
+    }
+
+
+@app.get("/api/cron/ai-baseline")
+async def cron_ai_baseline(request: Request):
+    """อ่านอย่างเดียว (?key=CRON_SECRET&days=30) — ตัวเลขว่าใครตอบลูกค้า + คำถามที่ซ้ำบ่อย"""
+    _check_cron_key(request)
+    try:
+        days = max(3, min(int(request.query_params.get("days", "30")), 90))
+    except ValueError:
+        days = 30
+    return await _ai_baseline(days)
+
+
 async def _gemini_enabled_menu_ids() -> set:
     """rich_menu_id ทั้งหมดที่เปิด Gemini/AI (gemini_enabled=true หรือชื่อตรง GEMINI_TRIGGER_MENU_NAME)"""
     if not (ANTHROPIC_API_KEY or GEMINI_API_KEY):
