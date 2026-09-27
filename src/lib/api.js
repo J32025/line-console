@@ -61,6 +61,7 @@ export const api = {
   importUsers: (payload) => req('POST', '/users/import', payload),
   importMapped: (payload) => req('POST', '/users/import-mapped', payload),
   refreshProfiles: (payload) => req('POST', '/users/refresh-profile', payload),
+  usersBackfill: () => req('POST', '/users/backfill'),
   syncFollowers: () => req('POST', '/users/sync-followers'),
   updateUser: (uid, patch) => req('PATCH', `/users/${uid}`, patch),
   bulkTag: (payload) => req('POST', '/users/bulk-tag', payload),

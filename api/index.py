@@ -5884,6 +5884,51 @@ async def _slips_summary() -> dict:
             "pending_reasons": sorted(reasons.items(), key=lambda x: -x[1])[:12]}
 
 
+# userId ทุกคนที่เคยโต้ตอบ (ข้อความ/กดปุ่ม/ลงทะเบียน/ส่งสลิป) ต้องอยู่ใน line_users — เก็บตกคนที่ตกหล่น
+_UID_SOURCES = (("messages", {}), ("webhook_events", {"event_type": "eq.postback"}),
+                ("postback_clicks", {}), ("registrations", {}), ("slips", {}))
+
+
+async def _backfill_users(apply: bool) -> dict:
+    seen: dict = {}
+    for tb, flt in _UID_SOURCES:
+        try:
+            rows = await supa.select_all(tb, params={"select": "line_user_id", **flt}, cap=300000)
+        except Exception as e:
+            seen.setdefault("_errors", []).append(f"{tb}: {repr(e)[:80]}")
+            continue
+        n = 0
+        for r in rows:
+            u = r.get("line_user_id")
+            if u and u.startswith("U") and u not in seen:
+                seen[u] = tb
+                n += 1
+        seen.setdefault("_by_table", {})[tb] = n
+    errors, by_table = seen.pop("_errors", []), seen.pop("_by_table", {})
+    known = {r["line_user_id"] for r in await supa.select_all("line_users", params={"select": "line_user_id"}, cap=300000)}
+    missing = [u for u in seen if u not in known]
+    if apply and missing:
+        ts = NOW()
+        rows = [{"line_user_id": u, "source": "backfill_" + seen[u], "updated_at": ts} for u in missing]
+        for i in range(0, len(rows), 500):
+            await supa.upsert("line_users", rows[i:i + 500], on_conflict="line_user_id")
+    return {"apply": apply, "distinct_userids_seen": len(seen), "already_in_line_users": len(seen) - len(missing),
+            "missing_added" if apply else "missing_would_add": len(missing), "new_by_first_table": by_table, "errors": errors}
+
+
+@app.get("/api/cron/users-backfill")
+async def cron_users_backfill(request: Request, apply: int = 0):
+    _check_cron_key(request)
+    return await _backfill_users(bool(apply))
+
+
+@app.post("/api/users/backfill")
+async def users_backfill(admin=Depends(current_admin)):
+    r = await _backfill_users(True)
+    await supa.log_operation(admin["userId"], "users.backfill", None, r)
+    return r
+
+
 @app.get("/api/cron/slips-summary")
 async def cron_slips_summary(request: Request):
     """อ่านอย่างเดียว (?key=CRON_SECRET) — ไว้ตรวจว่าทำไมสลิปค้าง"""

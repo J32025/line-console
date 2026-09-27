@@ -101,6 +101,7 @@ export default function Users() {
         <div className="row wrap">
           <button className="primary sm" disabled={busy} onClick={fetchAllProfiles}>ดึงโปรไฟล์ + รูป</button>
           <button className="sm" disabled={busy} onClick={() => api.syncFollowers().then((r) => { t.ok(`followers ${r.followers}`); load() }).catch((e) => t.err(e.message))}>Sync followers</button>
+          <button className="sm" disabled={busy} onClick={() => api.usersBackfill().then((r) => { t.ok(`เก็บ userId ตกหล่นเพิ่ม ${r.missing_added} คน (พบทั้งหมด ${r.distinct_userids_seen})`); load() }).catch((e) => t.err(e.message))}>เก็บ userId ที่ตกหล่น</button>
           <button className="sm" onClick={() => setImportOpen(true)}>นำเข้าจาก CSV (map คอลัมน์)</button>
           <button className="sm" onClick={exportCsv}>⬇ Export CSV</button>
         </div>
