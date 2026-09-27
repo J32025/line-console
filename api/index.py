@@ -1266,7 +1266,7 @@ async def _handle_slips(img_events: list):
 
         # ตอบ user ตามผลตรวจอัตโนมัติ
         if status == "verified":
-            await line.push(uid, [{"type": "text", "text": f"✅ ตรวจสอบสลิปเรียบร้อยแล้ว\nยอด {amount} บาท · หลักสูตร {exp_course}\nขอบคุณครับ 🙏"}])
+            await line.push(uid, [{"type": "text", "text": f"✅ ตรวจสอบสลิปเรียบร้อยแล้ว\nยอด {amount} บาท · หลักสูตร {exp_course}\n\nสถานะ: 🟢 โอนเงินเรียบร้อยแล้ว รอติวตามเวลาที่กำหนด\nขอบคุณครับ 🙏"}])
             try:
                 await _enroll_automations("slip_verified", [uid], {"course": exp_course})
                 await _mark_registration_paid(uid, exp_course)
@@ -6600,7 +6600,7 @@ async def update_slip(sid: int, req: Request, admin=Depends(current_admin)):
         row = r[0] if r else None
     # ตอบ user ถ้าขอ
     if b.get("replyUser") and row:
-        msg = ("✅ ตรวจสอบสลิปเรียบร้อยแล้ว ขอบคุณครับ 🙏"
+        msg = ("✅ ตรวจสอบสลิปเรียบร้อยแล้ว\n\nสถานะ: 🟢 โอนเงินเรียบร้อยแล้ว รอติวตามเวลาที่กำหนด\nขอบคุณครับ 🙏"
                if b["status"] == "verified" else
                "สลิปที่ส่งมายังตรวจสอบไม่ผ่าน รบกวนส่งใหม่หรือติดต่อแอดมินครับ 🙏")
         await line.push(row["line_user_id"], [{"type": "text", "text": b.get("replyText") or msg}])
@@ -6675,6 +6675,36 @@ async def _reg_courses() -> list:
     if isinstance(v, list) and v:
         return [str(x) for x in v]
     return _REG_COURSES_DEFAULT
+
+
+async def _pay_account_for(course: str) -> dict | None:
+    """บัญชี/ราคาที่ตรงกับหลักสูตร (จับคู่ 2 ตัวอักษรแรก FC/IC/PC/AC) — ใช้แจ้งยอด+เลขบัญชีให้ผู้ลงทะเบียน"""
+    try:
+        prefix = str(course or "")[:2].upper()
+        accts = await supa.select("payment_accounts", params={"select": "*", "active": "eq.true"})
+        return next((a for a in accts if str(a.get("course") or "").upper().startswith(prefix)), None)
+    except Exception:
+        return None
+
+
+async def _reg_payment_accounts_public() -> list:
+    """รายการบัญชี/ราคาแบบเปิดเผยได้ (ไม่มีข้อมูลอ่อนไหว) ให้หน้าลงทะเบียนแสดงตอนเลือกหลักสูตร"""
+    try:
+        accts = await supa.select("payment_accounts", params={
+            "select": "course,bank,account_no,account_name,price,full_price", "active": "eq.true"})
+        return accts
+    except Exception:
+        return []
+
+
+def _pay_lines(acc: dict | None) -> str:
+    if not acc:
+        return ""
+    price = acc.get("price") or acc.get("full_price")
+    out = [f"ยอดที่ต้องชำระ: {price:,.0f} บาท" if price is not None else "ยอดที่ต้องชำระ: ติดต่อแอดมิน"]
+    if acc.get("bank") or acc.get("account_no"):
+        out.append(f"โอนเข้าบัญชี: {acc.get('bank') or '-'} {acc.get('account_no') or ''} ({acc.get('account_name') or '-'})")
+    return "\n".join(out)
 
 
 async def _verify_member_token(id_token: str) -> dict | None:
@@ -6766,6 +6796,7 @@ async def public_reg_check(req: Request):
         "userId": uid, "displayName": u.get("name"), "picture": u.get("picture"),
         "registrations": regs,
         "courses": await _reg_courses(),
+        "paymentAccounts": await _reg_payment_accounts_public(),
         "nextUrl": await _get_setting("reg_next_url", ""),
     }
 
@@ -6869,6 +6900,20 @@ async def public_reg_submit(req: Request):
     await alert_admin("📝 ลงทะเบียนใหม่ (LIFF)" if not rereg_row else "🔁 ลงทะเบียนใหม่ (เพิ่มเพื่อนแล้ว)",
                       f"{name}\nหลักสูตร {course} · {b.get('org') or '-'}\nโทร {tel}",
                       throttle_key=f"reg_{u['userId']}_{course}")
+
+    # แจ้งสถานะให้ผู้ลงทะเบียนทราบทันทีในแชท: ลงทะเบียนแล้ว + ยอด/บัญชีที่ต้องโอน (สถานะ: รอโอนเงิน)
+    try:
+        acc = await _pay_account_for(course)
+        lines = [f"📝 ลงทะเบียนหลักสูตร {course} เรียบร้อยแล้วครับ คุณ{name}",
+                 "สถานะ: 🟡 รอโอนเงิน"]
+        pay = _pay_lines(acc)
+        if pay:
+            lines += ["", pay]
+        lines += ["", "เมื่อโอนเงินแล้ว กรุณาส่งสลิปเข้ามาในแชทนี้ได้เลยครับ ระบบจะตรวจสอบให้อัตโนมัติ"]
+        await line.push(u["userId"], [{"type": "text", "text": "\n".join(lines)}])
+    except Exception as e:
+        print("reg-submit status push error:", e)
+
     return {"ok": True, "course": course, "nextUrl": await _get_setting("reg_next_url", "")}
 
 

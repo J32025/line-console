@@ -156,7 +156,7 @@
       var items = (res.registrations || []).map(function (r) {
         return '<li class="d-flex justify-content-between align-items-center py-2 border-bottom">'
           + '<span>' + esc(r.course_raw || r.course) + '</span>'
-          + (r.paid ? '<span class="pill">ชำระแล้ว</span>' : '<span class="pill wait">รอชำระ</span>') + '</li>';
+          + (r.paid ? '<span class="pill">ชำระแล้ว รอติวตามเวลาที่กำหนด</span>' : '<span class="pill wait">รอโอนเงิน</span>') + '</li>';
       }).join('');
       $app.html(
         '<div class="list">' +
@@ -198,6 +198,8 @@
         '<option value="AC70" disabled>AC ระดับสูง</option>' +
         '</select><div class="invalid-feedback">กรุณาเลือกหลักสูตรที่ท่านจะสอบ</div></div>' +
 
+        '<div class="col-12" id="payInfo" style="display:none"></div>' +
+
         '<div class="col-12 batch-selection" id="batchSelection"><label for="batch"><i class="fa-solid fa-list-ol"></i> เลือกรุ่น</label>' +
         '<select id="batch" name="batch" class="form-control">' +
         '<option value="">กรุณาเลือกรุ่น</option><option value="รุ่น 1">รุ่น 1</option><option value="รุ่น 2">รุ่น 2</option>' +
@@ -214,11 +216,26 @@
         '<div class="col-12 text-center"><button type="submit" class="btn btn-warning w-100"><i class="bi bi-send-fill"></i>&nbsp;ลงทะเบียน</button></div>' +
         '</div></form>');
 
+      var paymentAccounts = res.paymentAccounts || [];
+      function showPayInfo(courseCode) {
+        var $box = $('#payInfo');
+        var acc = paymentAccounts.filter(function (a) { return String(a.course || '').toUpperCase().indexOf(String(courseCode).slice(0, 2).toUpperCase()) === 0; })[0];
+        if (!courseCode || !acc) { $box.hide().html(''); return; }
+        var price = acc.price != null ? acc.price : acc.full_price;
+        $box.html(
+          '<div class="alert alert-info mb-0">' +
+          '<div><i class="fa-solid fa-money-bill-wave"></i> ยอดที่ต้องชำระ: <b>' + (price != null ? Number(price).toLocaleString() + ' บาท' : 'ติดต่อแอดมิน') + '</b></div>' +
+          (acc.bank || acc.account_no ? '<div class="mt-1"><i class="fa-solid fa-building-columns"></i> โอนเข้าบัญชี: <b>' + esc(acc.bank || '-') + ' ' + esc(acc.account_no || '') + '</b> (' + esc(acc.account_name || '-') + ')</div>' : '') +
+          '<div class="mt-1 text-muted small">เมื่อลงทะเบียนแล้ว ระบบจะส่งรายละเอียดนี้ให้ในแชท LINE อีกครั้ง — โอนเงินแล้วส่งสลิปเข้ามาในแชทได้เลย</div>' +
+          '</div>');
+        $box.show();
+      }
       $('#problem').on('change', function () {
         var selected = $(this).val();
         var $batch = $('#batchSelection'), $batchInput = $('#batch');
         if (selected === 'PC70') { $batch.show(); $batchInput.attr('required', true); }
         else { $batch.hide(); $batchInput.attr('required', false); $batchInput.val(''); }
+        showPayInfo(selected);
       });
 
       $('#myForm').on('submit', function (event) {
@@ -294,12 +311,8 @@
         })
         .then(function (r) {
           $.LoadingOverlay('hide');
-          try {
-            liff.sendMessages([{ type: 'text', text: 'คุณ : ' + name + ' สังกัด : ' + device + ' หลักสูตร ' + courseInfo + ' ลงทะเบียนเรียบร้อยแล้ว' }])
-              .then(function () { if (liff.isInClient && liff.isInClient()) liff.closeWindow(); })
-              .catch(function (err) { console.error('sendMessages error:', err); });
-          } catch (err) { console.error('sendMessages error:', err); }
-          Swal.fire({ icon: 'success', title: 'ลงทะเบียนเรียบร้อย', allowOutsideClick: false, confirmButtonText: 'ตกลง' })
+          // สถานะ "รอโอนเงิน" พร้อมยอด/เลขบัญชี ระบบส่งเข้าแชท LINE ให้อัตโนมัติแล้ว (ฝั่ง server) ไม่ต้องพึ่ง liff.sendMessages
+          Swal.fire({ icon: 'success', title: 'ลงทะเบียนเรียบร้อย', text: 'สถานะ: รอโอนเงิน — ระบบส่งรายละเอียดการโอนเงินเข้าแชท LINE ให้แล้ว', allowOutsideClick: false, confirmButtonText: 'ตกลง' })
             .then(function () { goNext(r.nextUrl); });
         })
         .catch(function (e) {
