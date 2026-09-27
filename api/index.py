@@ -5107,6 +5107,44 @@ async def get_broadcast(bid: int, admin=Depends(current_admin)):
     return rows[0]
 
 
+@app.get("/api/postbacks/clicks")
+async def postback_clicks_summary(admin=Depends(current_admin), days: int = 30, data: str = ""):
+    """สรุปการกดปุ่ม postback ทุกที่ (rich menu / broadcast / flex) จาก webhook_events
+    ไม่ระบุ data = สรุปรายปุ่ม · ระบุ data = รายชื่อคนที่กดปุ่มนั้น (userId + ชื่อ + จำนวนครั้ง + ล่าสุด)"""
+    days = max(1, min(days, 365))
+    params = {"select": "line_user_id,postback_data,event_ts,created_at", "event_type": "eq.postback",
+              "created_at": f"gte.{_iso_ago(days=days)}", "order": "created_at.desc"}
+    if data:
+        params["postback_data"] = f"eq.{data}"
+    rows = await supa.select_all("webhook_events", params=params, cap=100000)
+    rows = [r for r in rows if r.get("line_user_id") and r.get("postback_data")]
+    if not data:
+        agg: dict = {}
+        for r in rows:
+            a = agg.setdefault(r["postback_data"], {"data": r["postback_data"], "clicks": 0, "uids": set(), "last": r["created_at"]})
+            a["clicks"] += 1
+            a["uids"].add(r["line_user_id"])
+        buttons = sorted(({"data": a["data"], "clicks": a["clicks"], "users": len(a["uids"]), "last": a["last"]}
+                          for a in agg.values()), key=lambda x: -x["clicks"])
+        return {"days": days, "total_clicks": len(rows), "unique_users": len({r["line_user_id"] for r in rows}),
+                "buttons": buttons[:200]}
+    per: dict = {}
+    for r in rows:
+        u = per.setdefault(r["line_user_id"], {"line_user_id": r["line_user_id"], "clicks": 0, "last": r["created_at"]})
+        u["clicks"] += 1
+    uids = list(per)
+    for i in range(0, len(uids), 80):
+        chunk = uids[i:i + 80]
+        try:
+            for u in await supa.select("line_users", params={
+                    "select": "line_user_id,display_name", "line_user_id": f"in.({','.join(chunk)})", "limit": "80"}):
+                per[u["line_user_id"]]["display_name"] = u.get("display_name")
+        except Exception:
+            pass
+    users = sorted(per.values(), key=lambda x: -x["clicks"])
+    return {"days": days, "data": data, "total_clicks": len(rows), "unique_users": len(users), "users": users[:1000]}
+
+
 @app.get("/api/broadcasts/{bid}/clicks")
 async def broadcast_clicks(bid: int, admin=Depends(current_admin)):
     """ใครคลิกปุ่ม postback ใน broadcast นี้บ้าง (userId + ชื่อ + ข้อมูลปุ่มที่กด + เวลา)"""

@@ -8,6 +8,63 @@ import TemplateGallery from '../components/TemplateGallery.jsx'
 
 const EMPTY = { data: '', label: '', match: 'exact', enabled: true, messages: [blank('text')] }
 
+function ClickStats() {
+  const t = useToast()
+  const [days, setDays] = useState(30)
+  const [sum, setSum] = useState(null)
+  const [pick, setPick] = useState(null)
+  const [detail, setDetail] = useState(null)
+  useEffect(() => { setSum(null); api.postbackClicks(days).then(setSum).catch((e) => t.err(e.message)) }, [days]) // eslint-disable-line
+  const open = (data) => { setPick(data); setDetail(null); api.postbackClicks(days, data).then(setDetail).catch((e) => t.err(e.message)) }
+  const csv = () => {
+    const rows = [['userId', 'ชื่อ', 'จำนวนครั้ง', 'ล่าสุด'], ...detail.users.map((u) => [u.line_user_id, u.display_name || '', u.clicks, u.last])]
+    const body = rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(',')).join('
+')
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(new Blob(['﻿' + body], { type: 'text/csv;charset=utf-8' }))
+    a.download = 'postback-clicks.csv'; a.click()
+  }
+  return (
+    <section className="card">
+      <div className="row spread" style={{ alignItems: 'center' }}>
+        <h3>📊 สรุปการกดปุ่ม (ทุกที่)</h3>
+        <select value={days} onChange={(e) => setDays(Number(e.target.value))}>
+          {[7, 30, 90, 365].map((d) => <option key={d} value={d}>{d} วัน</option>)}
+        </select>
+      </div>
+      {!sum ? <Spinner /> : (
+        <>
+          <p className="muted sm">กด {sum.total_clicks.toLocaleString()} ครั้ง · {sum.unique_users.toLocaleString()} คน — คลิกที่ปุ่มเพื่อดูรายชื่อคนที่กด</p>
+          <table>
+            <thead><tr><th>ปุ่ม (data)</th><th>ครั้ง</th><th>คน</th><th>ล่าสุด</th></tr></thead>
+            <tbody>
+              {sum.buttons.map((b) => (
+                <tr key={b.data} onClick={() => open(b.data)} style={{ cursor: 'pointer', fontWeight: pick === b.data ? 600 : 400 }}>
+                  <td>{b.data}</td><td>{b.clicks}</td><td>{b.users}</td><td className="muted sm">{new Date(b.last).toLocaleString('th-TH')}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
+      {pick && (
+        <div style={{ marginTop: 12 }}>
+          <div className="row spread"><b>ผู้กด: {pick}</b>{detail && <button className="sm" onClick={csv}>ดาวน์โหลด CSV</button>}</div>
+          {!detail ? <Spinner /> : (
+            <table>
+              <thead><tr><th>ชื่อ</th><th>userId</th><th>ครั้ง</th><th>ล่าสุด</th></tr></thead>
+              <tbody>{detail.users.map((u) => (
+                <tr key={u.line_user_id}><td>{u.display_name || '-'}</td><td className="muted sm">{u.line_user_id}</td><td>{u.clicks}</td>
+                  <td className="muted sm">{new Date(u.last).toLocaleString('th-TH')}</td></tr>
+              ))}</tbody>
+            </table>
+          )}
+        </div>
+      )}
+    </section>
+  )
+}
+
 export default function Postbacks() {
   const t = useToast()
   const [list, setList] = useState(null)
@@ -45,6 +102,8 @@ export default function Postbacks() {
   return (
     <div>
       <h1>จัดการ Postback <span className="muted sm">({onCount}/{list.length} เปิดใช้)</span></h1>
+
+      <ClickStats />
 
       <section className="card">
         <h3>นำเข้า postback code เป็นชุด</h3>

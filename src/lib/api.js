@@ -162,6 +162,7 @@ export const api = {
   nonFriends: () => req('GET', '/registrations/nonfriends'),
   flagNonFriends: () => req('POST', '/registrations/nonfriends/flag'),
 
+  postbackClicks: (days = 30, data = '') => req('GET', `/postbacks/clicks?days=${days}&data=${encodeURIComponent(data)}`),
   postbacks: () => req('GET', '/postbacks'),
   savePostback: (payload) => req('POST', '/postbacks', payload),
   importPostbacks: (codes) => req('POST', '/postbacks/import', { codes }),
