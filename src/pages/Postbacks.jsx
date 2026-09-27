@@ -18,8 +18,7 @@ function ClickStats() {
   const open = (data) => { setPick(data); setDetail(null); api.postbackClicks(days, data).then(setDetail).catch((e) => t.err(e.message)) }
   const csv = () => {
     const rows = [['userId', 'ชื่อ', 'จำนวนครั้ง', 'ล่าสุด'], ...detail.users.map((u) => [u.line_user_id, u.display_name || '', u.clicks, u.last])]
-    const body = rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(',')).join('
-')
+    const body = rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(',')).join('\n')
     const a = document.createElement('a')
     a.href = URL.createObjectURL(new Blob(['﻿' + body], { type: 'text/csv;charset=utf-8' }))
     a.download = 'postback-clicks.csv'; a.click()
