@@ -3,6 +3,7 @@ import { api } from '../lib/api.js'
 import { Spinner, useToast } from '../lib/ui.jsx'
 import { useProgress } from '../lib/progress.jsx'
 import RichMenuBuilder from '../components/RichMenuBuilder.jsx'
+import MenuUsersModal from '../components/MenuUsersModal.jsx'
 
 export default function RichMenus() {
   const t = useToast()
@@ -18,6 +19,7 @@ export default function RichMenus() {
   const [setDefault, setSetDefault] = useState(true)
   const [geminiModal, setGeminiModal] = useState(null) // { rid, name, enabled, temperature }
   const [geminiBusy, setGeminiBusy] = useState(false)
+  const [usersModal, setUsersModal] = useState(null) // { richMenuId, name }
 
   const load = () => {
     api.richmenus().then(setData).catch((e) => t.err(e.message))
@@ -111,7 +113,12 @@ export default function RichMenus() {
                 <td><input type="radio" checked={sel === m.richMenuId}
                            onChange={() => setSel(m.richMenuId)} /></td>
                 <td>{m.name} {m.richMenuId === defaultRichMenuId && <span className="chip ok">default</span>}</td>
-                <td><b>{(usage[m.richMenuId] || 0).toLocaleString()}</b></td>
+                <td>
+                  <button className="link" title="ดูว่าใครใช้เมนูนี้อยู่ — สลับ/ถอดเมนูให้เป็นกลุ่มหรือทีละคนได้"
+                          onClick={() => setUsersModal({ richMenuId: m.richMenuId, name: m.name })}>
+                    <b>{(usage[m.richMenuId] || 0).toLocaleString()}</b>
+                  </button>
+                </td>
                 <td>{m.chatBarText}</td>
                 <td className="muted sm">{m.size?.width}×{m.size?.height}</td>
                 <td className="mono xs">{m.richMenuId}</td>
@@ -134,6 +141,19 @@ export default function RichMenus() {
                 </td>
               </tr>
             ))}
+            {!!usage.__none__ && (
+              <tr>
+                <td></td>
+                <td className="muted">— ไม่มีเมนู —</td>
+                <td>
+                  <button className="link" title="ดูว่าใครไม่มีเมนูอยู่บ้าง — ผูกเมนูให้เป็นกลุ่มหรือทีละคนได้"
+                          onClick={() => setUsersModal({ richMenuId: null, name: 'ไม่มีเมนู' })}>
+                    <b>{usage.__none__.toLocaleString()}</b>
+                  </button>
+                </td>
+                <td colSpan={4}></td>
+              </tr>
+            )}
           </tbody>
         </table>
         {defaultRichMenuId && (
@@ -188,6 +208,11 @@ export default function RichMenus() {
       </section>
 
       {building && <RichMenuBuilder onCancel={() => setBuilding(false)} onDone={() => { setBuilding(false); load() }} />}
+
+      {usersModal && (
+        <MenuUsersModal richMenuId={usersModal.richMenuId} name={usersModal.name} menus={menus}
+                        onClose={() => setUsersModal(null)} onChanged={load} />
+      )}
 
       {geminiModal && (
         <div className="modal-bg" onClick={() => setGeminiModal(null)}>

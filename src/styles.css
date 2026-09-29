@@ -109,6 +109,8 @@ button.danger { color: var(--danger); border-color: #f3c9ca; background: #fff; }
 button.danger:hover { background: var(--danger-soft); }
 button.sm { padding: 6px 12px; font-size: .82rem; min-height: 32px; }
 button.xs { padding: 5px 10px; font-size: .76rem; min-height: 28px; border-radius: 7px; }
+button.link { background: none; border: none; padding: 0; min-height: auto; color: var(--primary); text-decoration: underline; }
+button.link:hover { background: none; opacity: .8; }
 
 input, select, textarea {
   font: inherit; border: 1px solid var(--border); border-radius: 9px;
