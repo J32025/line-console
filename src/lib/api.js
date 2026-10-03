@@ -139,6 +139,7 @@ export const api = {
   savePayAccount: (payload) => req('POST', '/payment-accounts', payload),
   delPayAccount: (id) => req('DELETE', `/payment-accounts/${id}`),
   settings: () => req('GET', '/settings'),
+  devCommands: () => req('GET', '/dev-commands'),
   setSetting: (key, value) => req('POST', '/settings', { key, value }),
 
   health: () => req('GET', '/health?deep=1'),

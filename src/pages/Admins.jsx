@@ -21,6 +21,9 @@ export default function Admins({ me }) {
   const [unregMenu, setUnregMenu] = useState('')
   const [menuList, setMenuList] = useState([])
   const [accts, setAccts] = useState([])
+  const [devEnabled, setDevEnabled] = useState(false)
+  const [devUids, setDevUids] = useState('')
+  const [devCmds, setDevCmds] = useState(null)
   const [na, setNa] = useState({ course: '', bank: '', account_no: '', account_name: '', price: '', full_price: '' })
   const [busy, setBusy] = useState('')
 
@@ -36,7 +39,10 @@ export default function Admins({ me }) {
       setRegCourses(Array.isArray(d.settings.reg_courses) ? d.settings.reg_courses.join(', ') : (d.settings.reg_courses || ''))
       setRegMenuMap(d.settings.reg_richmenu_map || {})
       setUnregMenu(d.settings.unregistered_richmenu_id || '')
+      setDevEnabled(!!d.settings.dev_command_enabled)
+      setDevUids((d.settings.dev_command_uids || []).join('\n'))
     }).catch(() => {})
+    api.devCommands().then((d) => setDevCmds(d.commands || [])).catch(() => {})
     api.payAccounts().then((d) => setAccts(d.accounts)).catch(() => {})
     api.richmenuUsage().then((d) => setMenuList((d.items || []).filter((m) => m.richMenuId))).catch(() => {})
   }
@@ -290,6 +296,52 @@ export default function Admins({ me }) {
                   try { await api.setSetting('ai_daily_limit', Number(aiLimit) || 0); t.ok('บันทึกแล้ว') }
                   catch (e) { t.err(e.message) } finally { setBusy('') }
                 }}>บันทึกโควต้า</button>
+      </section>
+
+      <section className="card">
+        <h3>🛠 คำสั่งพัฒนาระบบผ่าน LINE</h3>
+        <p className="muted xs">
+          เปิดแล้ว userId ที่ระบุด้านล่างพิมพ์ข้อความขึ้นต้นด้วย <code>/dev</code> คุยกับบอทโดยตรงได้ เช่น
+          "/dev เพิ่มปุ่มดาวน์โหลด CSV ในหน้า Users" — ระบบแค่ "รับคำสั่งเก็บคิวไว้ + ตอบรับทันที" เท่านั้น
+          ไม่ได้แก้โค้ด/deploy ให้อัตโนมัติ ต้องรอให้เปิดเซสชัน Claude Code มาอ่านคิวนี้ก่อนถึงจะเริ่มทำจริง
+        </p>
+        <label className="row" style={{ gap: 8, alignItems: 'center' }}>
+          <input type="checkbox" checked={devEnabled} onChange={(e) => setDevEnabled(e.target.checked)} />
+          เปิดใช้งาน
+        </label>
+        <textarea rows={3} style={{ marginTop: 8 }} placeholder="userId ที่อนุญาต (บรรทัดละ 1 คน)"
+                  value={devUids} onChange={(e) => setDevUids(e.target.value)} />
+        <button className="primary sm" style={{ marginTop: 8 }} disabled={busy === 'dev'}
+                onClick={async () => {
+                  setBusy('dev')
+                  try {
+                    await api.setSetting('dev_command_enabled', devEnabled)
+                    await api.setSetting('dev_command_uids', devUids.split('\n').map((s) => s.trim()).filter(Boolean))
+                    t.ok('บันทึกแล้ว')
+                  } catch (e) { t.err(e.message) } finally { setBusy('') }
+                }}>บันทึก</button>
+
+        {devCmds && devCmds.schema_missing && <p className="err sm" style={{ marginTop: 8 }}>{devCmds.hint}</p>}
+        {devCmds && !devCmds.schema_missing && (
+          <>
+            <h4 className="sm" style={{ marginTop: 14 }}>คิวคำสั่ง ({devCmds.commands.length})</h4>
+            {!devCmds.commands.length ? <p className="muted xs">ยังไม่มีคำสั่ง</p> : (
+              <table>
+                <thead><tr><th>#</th><th>คำสั่ง</th><th>สถานะ</th><th>เมื่อ</th></tr></thead>
+                <tbody>
+                  {devCmds.commands.map((c) => (
+                    <tr key={c.id}>
+                      <td>{c.id}</td>
+                      <td style={{ maxWidth: 360 }}>{c.command}{c.result && <div className="muted xs">ผล: {c.result}</div>}</td>
+                      <td><span className={`chip ${c.status}`}>{c.status}</span></td>
+                      <td className="muted xs">{new Date(c.created_at).toLocaleString('th-TH')}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </>
+        )}
       </section>
 
       <section className="card">

@@ -584,6 +584,15 @@ async def webhook(request: Request):
     if consent_uids:
         events = [e for e in events if e.get("source", {}).get("userId") not in consent_uids]
 
+    # ---- คำสั่งพัฒนาระบบผ่าน LINE (เฉพาะ userId ที่กำหนด, ปิดโดย default) ----
+    dev_uids: set = set()
+    try:
+        dev_uids = await _handle_dev_commands(events)
+    except Exception as e:
+        print("dev command error:", e)
+    if dev_uids:
+        events = [e for e in events if e.get("source", {}).get("userId") not in dev_uids]
+
     # ---- ดึงโปรไฟล์คนที่เพิ่ง follow (จังหวะที่ดีที่สุด) ----
     if follow_uids:
         try:
@@ -742,6 +751,51 @@ async def _handle_consent_keywords(events: list) -> set:
                               {"line_user_id": f"eq.{uid}"})
             if rtok:
                 await line.reply(rtok, [{"type": "text", "text": "เปิดรับข่าวสารเรียบร้อยครับ 🙏"}])
+    return handled
+
+
+_DEV_CMD_PREFIX = "/dev"
+
+
+async def _handle_dev_commands(events: list) -> set:
+    """รับคำสั่ง 'พัฒนาระบบ' ที่เจ้าของพิมพ์คุยกับบอทโดยตรง ขึ้นต้นด้วย /dev — เก็บคิวไว้ให้ Claude มาอ่านทีหลัง
+    ทำงานเฉพาะตอนเปิดใช้ (dev_command_enabled) และเฉพาะ userId ใน allow-list (dev_command_uids) เท่านั้น
+    ไม่ได้แก้โค้ด/deploy เองอัตโนมัติ — แค่รับคำสั่งเก็บคิว + ตอบรับทันทีว่ารับแล้ว"""
+    handled: set = set()
+    text_events = [e for e in events if e.get("type") == "message"
+                  and e.get("message", {}).get("type") == "text"
+                  and (e["message"].get("text") or "").strip().lower().startswith(_DEV_CMD_PREFIX)]
+    if not text_events:
+        return handled
+    if not await _get_setting("dev_command_enabled", False):
+        return handled
+    allow = set(await _get_setting("dev_command_uids", []) or [])
+    if not allow:
+        return handled
+    for e in text_events:
+        uid = e.get("source", {}).get("userId")
+        if not uid or uid not in allow:
+            continue
+        handled.add(uid)
+        cmd = (e["message"].get("text") or "").strip()[len(_DEV_CMD_PREFIX):].strip(": ").strip()
+        rtok = e.get("replyToken")
+        if not cmd:
+            if rtok:
+                await line.reply(rtok, [{"type": "text", "text":
+                    "พิมพ์คำสั่งต่อท้าย /dev ด้วยครับ เช่น '/dev เพิ่มปุ่มในหน้า Users ให้ดาวน์โหลด CSV'"}])
+            continue
+        try:
+            res = await supa.insert("dev_commands", {"line_user_id": uid, "command": cmd[:2000]})
+            cid = res[0]["id"] if res else "?"
+        except Exception as ex:
+            print("dev_commands insert error (รัน migration 0021 หรือยัง?):", ex)
+            if rtok:
+                await line.reply(rtok, [{"type": "text", "text": "รับคำสั่งไม่สำเร็จ (ระบบคิวยังไม่พร้อม) — แจ้งแอดมินช่วยตรวจสอบ"}])
+            continue
+        if rtok:
+            await line.reply(rtok, [{"type": "text", "text":
+                f"📥 รับคำสั่ง #{cid} แล้วครับ: {cmd[:120]}\nสถานะ: รอดำเนินการ — ต้องรอให้เปิดเซสชันดูแลระบบมาอ่านคิวนี้ก่อนถึงจะเริ่มทำ ไม่ใช่อัตโนมัติทันที"}])
+        await alert_admin("🛠 คำสั่งพัฒนาระบบใหม่", f"#{cid}: {cmd[:300]}", throttle_key=f"devcmd_{cid}")
     return handled
 
 
@@ -1635,6 +1689,48 @@ async def _triage_slips(apply: bool, limit: int = 25, offset: int = 0) -> dict:
     out.update({"processed": len(batch), "result": counts, "items": items,
                 "next_offset": offset + skipped, "left": max(0, len(cands) - offset - len(batch))})
     return out
+
+
+async def _dev_commands_list(status: str) -> dict:
+    params = {"select": "*", "order": "created_at.asc", "limit": "50"}
+    if status in ("pending", "done", "failed"):
+        params["status"] = f"eq.{status}"
+    try:
+        rows = await supa.select("dev_commands", params=params)
+    except Exception as e:
+        return {"schema_missing": True, "hint": f"ยังไม่ได้รัน migration 0021_dev_commands.sql — {e}", "commands": []}
+    return {"commands": rows}
+
+
+@app.get("/api/cron/dev-commands")
+async def cron_dev_commands_list(request: Request, status: str = "pending"):
+    """คิวคำสั่งพัฒนาระบบที่เจ้าของส่งมาทาง LINE (ดู migration 0021) — ให้ Claude มาเช็คตอนเปิดเซสชันดูแลระบบ"""
+    _check_cron_key(request)
+    return await _dev_commands_list(status)
+
+
+@app.get("/api/dev-commands")
+async def dev_commands_list(status: str = "", admin=Depends(current_admin)):
+    """เหมือน /api/cron/dev-commands แต่ auth แบบแอดมิน — ให้หน้า ผู้ดูแล แสดงคิวได้"""
+    return await _dev_commands_list(status)
+
+
+@app.post("/api/cron/dev-commands/{cid}/complete")
+async def cron_dev_commands_complete(cid: int, request: Request):
+    """ปิดงานคำสั่ง + ส่งผลสรุปกลับให้ผู้สั่งทาง LINE (ถ้า notify=true) — body: {result, notify, status}"""
+    _check_cron_key(request)
+    b = await _json_obj(request)
+    status = b.get("status") if b.get("status") in ("done", "failed") else "done"
+    result = str(b.get("result") or "")[:1500]
+    row = await supa.select("dev_commands", params={"id": f"eq.{cid}", "select": "line_user_id", "limit": "1"})
+    await supa.update("dev_commands", {"status": status, "result": result, "processed_at": NOW()}, {"id": f"eq.{cid}"})
+    if b.get("notify", True) and row:
+        emoji = "✅" if status == "done" else "⚠️"
+        try:
+            await line.push(row[0]["line_user_id"], [{"type": "text", "text": f"{emoji} คำสั่ง #{cid} {('เสร็จแล้ว' if status == 'done' else 'ทำไม่สำเร็จ')}ครับ\n{result}"}])
+        except Exception as e:
+            print("dev command notify push error:", e)
+    return {"ok": True}
 
 
 @app.get("/api/cron/slips-triage-report")
