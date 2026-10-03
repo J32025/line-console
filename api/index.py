@@ -6056,8 +6056,20 @@ async def _dg_slips():
     return f"✅ สลิปค้างตรวจ {s['pending']} ใบ"
 
 
+_DG_NONFRIENDS_TTL = 6 * 3600
+
+
 async def _dg_nonfriends():
-    r = await _flag_nonfriend_registrants(False)
+    # งานนี้แพงสุดในสรุปประจำวัน (เช็คเพื่อนกับ LINE สดทีละคนสำหรับผู้ลงทะเบียนทุกคน ~1,000 คน ~10 วิ)
+    # แต่สถานะเพื่อนของคนส่วนใหญ่ไม่เปลี่ยนรายวัน — cache ผลไว้ 6 ชม. กันรันซ้ำโดยไม่จำเป็น
+    # (ปุ่ม "ตรวจสอบ" ที่หน้ากระทบยอดยังคงเรียก _flag_nonfriend_registrants ตรง ๆ แบบสดเสมอ ไม่ผ่าน cache นี้)
+    cache = await _get_setting("dg_nonfriends_cache", None)
+    if isinstance(cache, dict) and time.time() - float(cache.get("at") or 0) < _DG_NONFRIENDS_TTL:
+        r = cache["r"]
+    else:
+        r = await _flag_nonfriend_registrants(False)
+        await supa.upsert("app_settings", {"key": "dg_nonfriends_cache", "value": {"r": r, "at": time.time()}, "updated_at": NOW()},
+                          on_conflict="key")
     n = r["non_friends"]
     extra = f" (เช็คไม่ได้ {r['unknown']})" if r.get("unknown") else ""
     if n:
