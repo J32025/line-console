@@ -576,7 +576,15 @@ async def webhook(request: Request):
                     p["block_count"] = (old.get("block_count") or 0) + 1
 
         if user_patches:
-            await supa.upsert("line_users", list(user_patches.values()), on_conflict="line_user_id")
+            try:
+                await supa.upsert("line_users", list(user_patches.values()), on_conflict="line_user_id")
+            except Exception as e:
+                # คอลัมน์ last_reply_token/_at (migration 0022) อาจยังไม่ได้รัน — ตัดสองคีย์นี้ออกแล้วลองใหม่
+                # กันไม่ให้การเก็บข้อมูล user ทั้งหมด (is_following/last_message ฯลฯ) พังไปด้วยจากฟีเจอร์เสริม
+                print("line_users upsert error, retry without reply-token fields:", e)
+                stripped = [{k: v for k, v in p.items() if k not in ("last_reply_token", "last_reply_token_at")}
+                           for p in user_patches.values()]
+                await supa.upsert("line_users", stripped, on_conflict="line_user_id")
     except Exception as e:
         print("webhook store error:", e)
         await alert_admin("webhook เก็บข้อมูลไม่สำเร็จ", str(e), "wh_store")
