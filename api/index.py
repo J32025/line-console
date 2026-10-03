@@ -531,6 +531,12 @@ async def webhook(request: Request):
             up["unread"] = None  # จะ increment ทีหลัง
             user_patches[uid] = up
 
+        # เก็บ reply token ล่าสุดของ user นี้ไว้ — ถ้าแอดมินมาตอบใน Inbox ทันช่วงที่ยังไม่หมดอายุ
+        # จะได้ตอบผ่าน reply token (ฟรี) แทน push (ดู inbox_send) ไม่ทันก็ fallback ไป push ตามปกติ
+        if ev.get("replyToken"):
+            user_patches[uid]["last_reply_token"] = ev["replyToken"]
+            user_patches[uid]["last_reply_token_at"] = event_ts
+
     try:
         if rows_ev:
             await supa.insert("webhook_events", rows_ev)
@@ -592,6 +598,15 @@ async def webhook(request: Request):
         print("dev command error:", e)
     if dev_uids:
         events = [e for e in events if e.get("source", {}).get("userId") not in dev_uids]
+
+    # ---- คำสั่ง /ตรวจข้อมูล (ทุกคนใช้ได้ — เช็คสถานะตัวเองแทนรอ push แจ้งอัตโนมัติ) ----
+    status_uids: set = set()
+    try:
+        status_uids = await _handle_status_check(events)
+    except Exception as e:
+        print("status check error:", e)
+    if status_uids:
+        events = [e for e in events if e.get("source", {}).get("userId") not in status_uids]
 
     # ---- ดึงโปรไฟล์คนที่เพิ่ง follow (จังหวะที่ดีที่สุด) ----
     if follow_uids:
@@ -796,6 +811,63 @@ async def _handle_dev_commands(events: list) -> set:
             await line.reply(rtok, [{"type": "text", "text":
                 f"📥 รับคำสั่ง #{cid} แล้วครับ: {cmd[:120]}\nสถานะ: รอดำเนินการ — ต้องรอให้เปิดเซสชันดูแลระบบมาอ่านคิวนี้ก่อนถึงจะเริ่มทำ ไม่ใช่อัตโนมัติทันที"}])
         await alert_admin("🛠 คำสั่งพัฒนาระบบใหม่", f"#{cid}: {cmd[:300]}", throttle_key=f"devcmd_{cid}")
+    return handled
+
+
+_STATUS_CMD = "/ตรวจข้อมูล"
+
+
+async def _status_check_text(uid: str) -> tuple[str, bool]:
+    """สร้างข้อความสถานะลงทะเบียน/การจ่ายเงิน/สลิปล่าสุดของ uid นี้ (ให้ user พิมพ์คำสั่งมาถามเอง
+    แทนการ push แจ้งอัตโนมัติ — ประหยัดโควต้า) คืนคู่ (ข้อความ, มีรายการจ่ายแล้วไหม — ใช้ตัดสินใจแนบปุ่มดูใบเสร็จ)"""
+    regs = await supa.select("registrations", params={
+        "line_user_id": f"eq.{uid}", "select": "course,course_raw,paid", "order": "created_at.desc"})
+    if not regs:
+        return "ยังไม่พบข้อมูลการลงทะเบียนของคุณครับ ลงทะเบียนได้ที่เมนูด้านล่างเลยครับ 🙏", False
+    lines = ["📋 สถานะของคุณ"]
+    any_paid = False
+    for r in regs:
+        course = r.get("course_raw") or r.get("course") or "-"
+        if r.get("paid"):
+            any_paid = True
+            lines.append(f"• {course}: 🟢 โอนเงินเรียบร้อยแล้ว รอติวตามเวลาที่กำหนด")
+        else:
+            lines.append(f"• {course}: 🟡 รอโอนเงิน")
+            pay = _pay_lines(await _pay_account_for(r.get("course") or course))
+            if pay:
+                lines.append(pay)
+    # สลิปล่าสุด (ถ้ามี) — โชว์สถานะ/เหตุผลแทนที่จะ push แจ้งตอนตรวจเสร็จแบบเดิม
+    try:
+        slip = await supa.select("slips", params={
+            "line_user_id": f"eq.{uid}", "select": "status,auto_note", "order": "id.desc", "limit": "1"})
+        if slip and slip[0]["status"] in ("new", "review"):
+            lines.append("🔎 มีสลิปที่คุณส่งมาอยู่ระหว่างตรวจสอบ รอสักครู่นะครับ")
+        elif slip and slip[0]["status"] == "rejected" and not any_paid:
+            lines.append(f"⚠️ สลิปล่าสุดยังไม่ผ่าน: {slip[0].get('auto_note') or 'กรุณาส่งใหม่หรือติดต่อแอดมิน'}")
+    except Exception:
+        pass
+    return "\n".join(lines), any_paid
+
+
+async def _handle_status_check(events: list) -> set:
+    """คำสั่ง /ตรวจข้อมูล — user พิมพ์เองเมื่ออยากรู้สถานะ ตอบผ่าน reply token (ฟรี) แทนการ push แจ้งอัตโนมัติ"""
+    handled: set = set()
+    for e in events:
+        if e.get("type") != "message" or e.get("message", {}).get("type") != "text":
+            continue
+        if (e["message"].get("text") or "").strip() != _STATUS_CMD:
+            continue
+        uid = e.get("source", {}).get("userId")
+        rtok = e.get("replyToken")
+        if not uid or not rtok:
+            continue
+        handled.add(uid)
+        text, any_paid = await _status_check_text(uid)
+        msg = {"type": "text", "text": text}
+        if any_paid and await _get_setting("send_receipt", True) is not False:
+            msg["quickReply"] = {"items": [{"type": "action", "action": {
+                "type": "postback", "label": "📄 ดูใบเสร็จ", "data": _RECEIPT_POSTBACK, "displayText": "ขอดูใบเสร็จ"}}]}
+        await line.reply(rtok, [msg])
     return handled
 
 
@@ -1063,7 +1135,7 @@ async def _analyze_image(image_bytes: bytes, mime: str) -> dict | None:
     return None
 
 
-_ACK_SLIP = "ขอตรวจสอบสลิปสักครู่นะครับ 🙏 ระบบจะแจ้งผลให้ทราบครับ"
+_ACK_SLIP = "ขอตรวจสอบสลิปสักครู่นะครับ 🙏 เช็คผลได้ทันทีโดยพิมพ์ /ตรวจข้อมูล"
 _ACK_MAYBE = "ขอตรวจสอบรูปนี้สักครู่นะครับ 🙏"
 _ACK_UNSURE = "ได้รับรูปแล้วครับ ทีมงานจะตรวจสอบให้นะครับ 🙏"
 _GENERIC_IMAGE_REPLY = "ได้รับรูปแล้วครับ 🙏 มีอะไรให้ช่วยเรื่องการติวหรือการสมัครเรียน พิมพ์บอกได้เลยนะครับ"
@@ -1318,22 +1390,15 @@ async def _handle_slips(img_events: list):
         except Exception as ex:
             print("slip update error:", ex)
 
-        # ตอบ user ตามผลตรวจอัตโนมัติ
-        # แนบปุ่ม "ดูใบเสร็จ" เป็น quick reply แทนการ push ใบเสร็จให้เองอัตโนมัติ (ลดใช้โควต้าข้อความ push
-        # ไม่ได้มีค่าใช้จ่ายเพิ่มเพราะ quick reply ติดไปกับข้อความเดียวกัน) — user กดเองเมื่ออยากได้ ตอบด้วย reply token (ฟรี)
-        verified_msg = {"type": "text", "text": f"✅ ตรวจสอบสลิปเรียบร้อยแล้ว\nยอด {amount} บาท · หลักสูตร {exp_course}\n\nสถานะ: 🟢 โอนเงินเรียบร้อยแล้ว รอติวตามเวลาที่กำหนด\nขอบคุณครับ 🙏"}
+        # ผลตรวจอัตโนมัติ — ไม่ push แจ้งผลให้ user เองแล้ว (ประหยัดโควต้า) ผลลัพธ์ดูได้ทันทีเมื่อพิมพ์ /ตรวจข้อมูล
+        # (ตอบผ่าน reply token ฟรี, ดู _status_check_text) ก่อนหน้านี้ตอนรับรูปแล้วตอบ _ACK_SLIP ด้วย reply token
+        # ไปแล้วว่าให้พิมพ์คำสั่งมาดูผล — ตรงนี้แค่ทำงานหลังบ้าน (mark จ่าย/automation) ไม่ต้องแจ้งซ้ำ
         if status == "verified":
-            if await _get_setting("send_receipt", True) is not False:
-                verified_msg["quickReply"] = {"items": [{"type": "action", "action": {
-                    "type": "postback", "label": "📄 ดูใบเสร็จ", "data": _RECEIPT_POSTBACK, "displayText": "ขอดูใบเสร็จ"}}]}
-            await line.push(uid, [verified_msg])
             try:
                 await _enroll_automations("slip_verified", [uid], {"course": exp_course})
                 await _mark_registration_paid(uid, exp_course)
             except Exception as ex:
                 print("slip_verified post error:", ex)
-        elif status == "rejected":
-            await line.push(uid, [{"type": "text", "text": "สลิปนี้เคยส่งเข้ามาแล้วครับ หากต้องการสอบถามเพิ่มเติมพิมพ์ 'ติดต่อแอดมิน'"}])
 
         # แจ้งแอดมิน
         prof = await line.get_profile(uid)
@@ -4667,11 +4732,29 @@ async def inbox_assign(uid: str, req: Request, admin=Depends(current_admin)):
     return {"ok": True}
 
 
+async def _reply_or_push(uid: str, msgs: list) -> tuple[int, str, str | None]:
+    """ตอบผ่าน reply token ล่าสุดของ uid นี้ก่อนถ้ายังสดพอ (ฟรี ไม่กินโควต้า) — ใช้ไม่ได้/หมดอายุ/ไม่มี
+    ค่อย fallback ไป push (ของเดิม) เสมอ ไม่กระทบความน่าเชื่อถือการส่ง เป็นแค่ fast path ประหยัดโควต้า"""
+    try:
+        row = await supa.select("line_users", params={
+            "select": "last_reply_token,last_reply_token_at", "line_user_id": f"eq.{uid}", "limit": "1"})
+        tok = row[0].get("last_reply_token") if row else None
+        at = row[0].get("last_reply_token_at") if row else None
+        if tok and at and (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(at)).total_seconds() < 60:
+            code, txt = await line.reply(tok, msgs)
+            if code == 200:
+                await supa.update("line_users", {"last_reply_token": None}, {"line_user_id": f"eq.{uid}"})
+                return 200, txt, None
+    except Exception as e:
+        print("reply-token fast path error (fallback to push):", e)
+    return await line.push(uid, msgs)
+
+
 @app.post("/api/inbox/{uid}/send")
 async def inbox_send(uid: str, req: Request, admin=Depends(current_admin)):
     b = await req.json()
     msgs = _normalize_messages(b.get("messages", []))
-    code, txt, rid = await line.push(uid, msgs)
+    code, txt, rid = await _reply_or_push(uid, msgs)
     if code != 200:
         raise HTTPException(400, txt)
     rows = [{"line_user_id": uid, "direction": "out", "by": admin["userId"],
@@ -7044,20 +7127,11 @@ async def public_reg_submit(req: Request):
                       f"{name}\nหลักสูตร {course} · {b.get('org') or '-'}\nโทร {tel}",
                       throttle_key=f"reg_{u['userId']}_{course}")
 
-    # แจ้งสถานะให้ผู้ลงทะเบียนทราบทันทีในแชท: ลงทะเบียนแล้ว + ยอด/บัญชีที่ต้องโอน (สถานะ: รอโอนเงิน)
-    try:
-        acc = await _pay_account_for(course)
-        lines = [f"📝 ลงทะเบียนหลักสูตร {course} เรียบร้อยแล้วครับ คุณ{name}",
-                 "สถานะ: 🟡 รอโอนเงิน"]
-        pay = _pay_lines(acc)
-        if pay:
-            lines += ["", pay]
-        lines += ["", "เมื่อโอนเงินแล้ว กรุณาส่งสลิปเข้ามาในแชทนี้ได้เลยครับ ระบบจะตรวจสอบให้อัตโนมัติ"]
-        await line.push(u["userId"], [{"type": "text", "text": "\n".join(lines)}])
-    except Exception as e:
-        print("reg-submit status push error:", e)
-
-    return {"ok": True, "course": course, "nextUrl": await _get_setting("reg_next_url", "")}
+    # ไม่ push แจ้งสถานะอัตโนมัติอีกต่อไป (ประหยัดโควต้า) — หน้า LIFF เองแจ้งผลสำเร็จอยู่แล้ว
+    # ยอด/บัญชีที่ต้องโอนดูได้จาก response นี้ (payment) ให้หน้าเว็บแสดงเลย และแจ้งให้พิมพ์ /ตรวจข้อมูล ดูซ้ำได้ทุกเมื่อ
+    acc = await _pay_account_for(course)
+    return {"ok": True, "course": course, "nextUrl": await _get_setting("reg_next_url", ""),
+            "payment": acc, "statusCmd": _STATUS_CMD}
 
 
 async def _flag_nonfriend_registrants(apply: bool, detail: bool = False) -> dict:

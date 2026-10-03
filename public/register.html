@@ -311,8 +311,15 @@
         })
         .then(function (r) {
           $.LoadingOverlay('hide');
-          // สถานะ "รอโอนเงิน" พร้อมยอด/เลขบัญชี ระบบส่งเข้าแชท LINE ให้อัตโนมัติแล้ว (ฝั่ง server) ไม่ต้องพึ่ง liff.sendMessages
-          Swal.fire({ icon: 'success', title: 'ลงทะเบียนเรียบร้อย', text: 'สถานะ: รอโอนเงิน — ระบบส่งรายละเอียดการโอนเงินเข้าแชท LINE ให้แล้ว', allowOutsideClick: false, confirmButtonText: 'ตกลง' })
+          // ไม่ push แจ้งเข้าแชทอัตโนมัติแล้ว (ประหยัดโควต้า) — โชว์ยอด/บัญชีที่หน้านี้เลย + บอกคำสั่งไว้เช็คซ้ำทีหลังได้
+          var acc = r.payment, price = acc && (acc.price != null ? acc.price : acc.full_price);
+          var html = '<p>สถานะ: <b>รอโอนเงิน</b></p>';
+          if (acc) {
+            html += '<p>ยอดที่ต้องชำระ: <b>' + (price != null ? Number(price).toLocaleString() + ' บาท' : 'ติดต่อแอดมิน') + '</b></p>';
+            if (acc.bank || acc.account_no) html += '<p>โอนเข้าบัญชี: <b>' + esc(acc.bank || '-') + ' ' + esc(acc.account_no || '') + '</b> (' + esc(acc.account_name || '-') + ')</p>';
+          }
+          html += '<p class="text-muted small">เช็คสถานะซ้ำได้ทุกเมื่อ โดยพิมพ์ <b>' + esc(r.statusCmd || '/ตรวจข้อมูล') + '</b> คุยกับน้องพัสดุในแชท LINE</p>';
+          Swal.fire({ icon: 'success', title: 'ลงทะเบียนเรียบร้อย', html: html, allowOutsideClick: false, confirmButtonText: 'ตกลง' })
             .then(function () { goNext(r.nextUrl); });
         })
         .catch(function (e) {
