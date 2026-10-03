@@ -1319,14 +1319,17 @@ async def _handle_slips(img_events: list):
             print("slip update error:", ex)
 
         # ตอบ user ตามผลตรวจอัตโนมัติ
+        # แนบปุ่ม "ดูใบเสร็จ" เป็น quick reply แทนการ push ใบเสร็จให้เองอัตโนมัติ (ลดใช้โควต้าข้อความ push
+        # ไม่ได้มีค่าใช้จ่ายเพิ่มเพราะ quick reply ติดไปกับข้อความเดียวกัน) — user กดเองเมื่ออยากได้ ตอบด้วย reply token (ฟรี)
+        verified_msg = {"type": "text", "text": f"✅ ตรวจสอบสลิปเรียบร้อยแล้ว\nยอด {amount} บาท · หลักสูตร {exp_course}\n\nสถานะ: 🟢 โอนเงินเรียบร้อยแล้ว รอติวตามเวลาที่กำหนด\nขอบคุณครับ 🙏"}
         if status == "verified":
-            await line.push(uid, [{"type": "text", "text": f"✅ ตรวจสอบสลิปเรียบร้อยแล้ว\nยอด {amount} บาท · หลักสูตร {exp_course}\n\nสถานะ: 🟢 โอนเงินเรียบร้อยแล้ว รอติวตามเวลาที่กำหนด\nขอบคุณครับ 🙏"}])
+            if await _get_setting("send_receipt", True) is not False:
+                verified_msg["quickReply"] = {"items": [{"type": "action", "action": {
+                    "type": "postback", "label": "📄 ดูใบเสร็จ", "data": _RECEIPT_POSTBACK, "displayText": "ขอดูใบเสร็จ"}}]}
+            await line.push(uid, [verified_msg])
             try:
                 await _enroll_automations("slip_verified", [uid], {"course": exp_course})
                 await _mark_registration_paid(uid, exp_course)
-                await _send_receipt(uid, {"id": slip_id, "amount": amount, "course": exp_course,
-                                          "bank": (ocr or {}).get("receiver_bank"), "ref": ref,
-                                          "date": (ocr or {}).get("date")})
             except Exception as ex:
                 print("slip_verified post error:", ex)
         elif status == "rejected":
@@ -1788,11 +1791,15 @@ async def cron_slips_triage(request: Request):
     return {"ok": True, "applied": apply, **res}
 
 
-async def _send_receipt(uid: str, s: dict):
-    """ส่งใบเสร็จให้ลูกค้าหลังสลิป verified (ปิดได้ด้วย setting send_receipt=false)"""
+_RECEIPT_POSTBACK = "ACT_VIEW_RECEIPT"   # ปุ่ม quick reply "ดูใบเสร็จ" แนบกับข้อความยืนยันสลิป — กดแล้วตอบผ่าน reply token
+
+
+async def _receipt_text(s: dict) -> str | None:
+    """สร้างข้อความใบเสร็จจากข้อมูลสลิป — คืน None ถ้าปิด setting send_receipt ไว้
+    ใช้ร่วมกันทั้งตอนแอดมินกดยืนยันเอง (push) และตอน user กดปุ่ม "ดูใบเสร็จ" เอง (reply, ดู _RECEIPT_POSTBACK)"""
     try:
         if await _get_setting("send_receipt", True) is False:
-            return
+            return None
     except Exception:
         pass
     acc = None
@@ -1817,10 +1824,9 @@ async def _send_receipt(uid: str, s: dict):
     if s.get("ref"):
         lines.append(f"อ้างอิง: {s['ref']}")
     lines.append("\nขอบคุณที่ชำระเงินครับ 🙏 เก็บข้อความนี้ไว้เป็นหลักฐาน")
-    try:
-        await line.push(uid, [{"type": "text", "text": "\n".join(lines)}])
-    except Exception as e:
-        print("receipt push error:", e)
+    return "\n".join(lines)
+
+
 
 
 async def _mark_registration_paid(uid: str, course_hint: str | None = None):
@@ -2746,6 +2752,18 @@ async def _handle_auto_replies(events: list, gemini_uids: set = frozenset()) -> 
             if uid in paused or uid in replied_uids:
                 continue
             if skip_images and e["type"] == "message" and e.get("message", {}).get("type") == "image":
+                continue
+
+            # ---- ปุ่ม "ดูใบเสร็จ" (แนบ quick reply ตอน slip verified) — ตอบสดด้วย reply token ไม่ใช่ push ----
+            if e["type"] == "postback" and e.get("postback", {}).get("data") == _RECEIPT_POSTBACK:
+                srow = await supa.select("slips", params={
+                    "select": "id,amount,expected_course,bank,ref,slip_date", "line_user_id": f"eq.{uid}",
+                    "status": "eq.verified", "order": "id.desc", "limit": "1"})
+                text = await _receipt_text({
+                    "id": srow[0]["id"], "amount": srow[0]["amount"], "course": srow[0]["expected_course"],
+                    "bank": srow[0]["bank"], "ref": srow[0]["ref"], "date": srow[0]["slip_date"]}) if srow else None
+                await line.reply(e["replyToken"], [{"type": "text", "text": text or "ยังไม่เจอรายการที่ยืนยันแล้วของคุณครับ ลองพิมพ์ 'ติดต่อแอดมิน' ได้เลย"}])
+                replied_uids.add(uid)
                 continue
 
             # ---- postback action (routing table) มาก่อน ----
@@ -6722,22 +6740,23 @@ async def update_slip(sid: int, req: Request, admin=Depends(current_admin)):
         r = await supa.select("slips", params={
             "id": f"eq.{sid}", "select": "line_user_id,expected_course,amount,bank,ref,slip_date", "limit": "1"})
         row = r[0] if r else None
-    # ตอบ user ถ้าขอ
+    # ตอบ user ถ้าขอ (ไม่มี reply token ให้ใช้ในจังหวะนี้ — มาจากปุ่มในคอนโซล ไม่ใช่ event จาก LINE — จึงต้อง push)
+    # แนบปุ่ม "ดูใบเสร็จ" แทนการ push ใบเสร็จแยกอีกฉบับ (ลดจำนวนข้อความ push ลง 1 ฉบับ/ครั้ง)
     if b.get("replyUser") and row:
-        msg = ("✅ ตรวจสอบสลิปเรียบร้อยแล้ว\n\nสถานะ: 🟢 โอนเงินเรียบร้อยแล้ว รอติวตามเวลาที่กำหนด\nขอบคุณครับ 🙏"
-               if b["status"] == "verified" else
-               "สลิปที่ส่งมายังตรวจสอบไม่ผ่าน รบกวนส่งใหม่หรือติดต่อแอดมินครับ 🙏")
-        await line.push(row["line_user_id"], [{"type": "text", "text": b.get("replyText") or msg}])
+        msg = {"type": "text", "text": b.get("replyText") or
+               ("✅ ตรวจสอบสลิปเรียบร้อยแล้ว\n\nสถานะ: 🟢 โอนเงินเรียบร้อยแล้ว รอติวตามเวลาที่กำหนด\nขอบคุณครับ 🙏"
+                if b["status"] == "verified" else
+                "สลิปที่ส่งมายังตรวจสอบไม่ผ่าน รบกวนส่งใหม่หรือติดต่อแอดมินครับ 🙏")}
+        if b["status"] == "verified" and not b.get("replyText") and await _get_setting("send_receipt", True) is not False:
+            msg["quickReply"] = {"items": [{"type": "action", "action": {
+                "type": "postback", "label": "📄 ดูใบเสร็จ", "data": _RECEIPT_POSTBACK, "displayText": "ขอดูใบเสร็จ"}}]}
+        await line.push(row["line_user_id"], [msg])
     # เข้า automation trigger=slip_verified (แอดมินกดผ่านเอง)
     if b.get("status") == "verified" and row:
         try:
             await _enroll_automations("slip_verified", [row["line_user_id"]],
                                       {"course": row.get("expected_course")})
             await _mark_registration_paid(row["line_user_id"], row.get("expected_course"))
-            await _send_receipt(row["line_user_id"], {
-                "id": sid, "amount": b.get("amount") or row.get("amount"),
-                "course": row.get("expected_course"), "bank": row.get("bank"),
-                "ref": row.get("ref"), "date": row.get("slip_date")})
         except Exception as e:
             print("slip_verified enroll error:", e)
     return {"ok": True}
