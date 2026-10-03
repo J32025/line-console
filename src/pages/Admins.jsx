@@ -42,7 +42,7 @@ export default function Admins({ me }) {
       setDevEnabled(!!d.settings.dev_command_enabled)
       setDevUids((d.settings.dev_command_uids || []).join('\n'))
     }).catch(() => {})
-    api.devCommands().then((d) => setDevCmds(d.commands || [])).catch(() => {})
+    api.devCommands().then(setDevCmds).catch(() => {})
     api.payAccounts().then((d) => setAccts(d.accounts)).catch(() => {})
     api.richmenuUsage().then((d) => setMenuList((d.items || []).filter((m) => m.richMenuId))).catch(() => {})
   }
