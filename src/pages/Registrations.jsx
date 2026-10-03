@@ -144,12 +144,21 @@ export default function Registrations() {
               <div className="table-scroll">
                 <table>
                   <thead>
-                    <tr><th>ชื่อ</th><th>หลักสูตร</th><th>สังกัด</th><th>เบอร์</th><th>จ่าย</th><th>สลิป</th><th></th></tr>
+                    <tr><th>ชื่อ</th><th>userId</th><th>หลักสูตร</th><th>สังกัด</th><th>เบอร์</th><th>จ่าย</th><th>สลิป</th><th></th></tr>
                   </thead>
                   <tbody>
                     {list.map((r) => (
                       <tr key={r.id}>
                         <td>{r.name || <span className="muted mono xs">{(r.line_user_id || '').slice(0, 10)}</span>}</td>
+                        <td>
+                          <span className="mono xs">{(r.line_user_id || '').slice(0, 10)}…</span>
+                          {r.line_user_id && (
+                            <button className="xs" style={{ marginLeft: 4 }}
+                                    onClick={() => { navigator.clipboard?.writeText(r.line_user_id); t.ok('คัดลอกแล้ว') }}>
+                              คัดลอก
+                            </button>
+                          )}
+                        </td>
                         <td><span className="chip">{r.course || '?'}</span></td>
                         <td className="sm ellipsis" style={{ maxWidth: 180 }}>{r.org || '–'}</td>
                         <td className="sm">{r.tel || '–'}</td>
@@ -162,7 +171,7 @@ export default function Registrations() {
                         <td><button className="xs" onClick={() => setDetail(r.id)}>รายละเอียด</button></td>
                       </tr>
                     ))}
-                    {!list.length && <tr><td colSpan={7} className="muted center">ไม่มีข้อมูล</td></tr>}
+                    {!list.length && <tr><td colSpan={8} className="muted center">ไม่มีข้อมูล</td></tr>}
                   </tbody>
                 </table>
                 {list.length < total && (
