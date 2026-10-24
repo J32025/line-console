@@ -52,7 +52,10 @@ async def current_admin(authorization: str = Header(default="")) -> dict:
     if OPEN_SIGNUP:
         # bootstrap: คนแรกที่ล็อกอินกลายเป็น owner ถ้าตาราง admins ว่าง
         any_admin = await supa.count("admins")
-        role = "owner" if any_admin == 0 else "admin"
+        if any_admin > 0:
+            # มี owner แล้ว: ห้ามเพิ่มแอดมินเองผ่าน OPEN_SIGNUP ที่เปิดค้างไว้ (เพิ่มได้ที่หน้า Admins เท่านั้น)
+            raise HTTPException(403, f"บัญชีนี้ไม่มีสิทธิ์ ({user['userId']})")
+        role = "owner"
         await supa.upsert("admins", {
             "line_user_id": user["userId"], "name": user["name"], "role": role,
         }, on_conflict="line_user_id")
