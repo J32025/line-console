@@ -24,6 +24,7 @@ from _lib.config import REG_LIFF_CHANNEL_ID
 from _lib.config import SLIP_SUCCESS_RICHMENU_ID
 from _lib.config import SUPABASE_SERVICE_ROLE_KEY
 from _lib.config import SUPABASE_URL
+from _lib.registrations import _REG_PRICES_DEFAULT, _course_base, _norm_course, _reconcile_data  # noqa: F401  (ย้ายไป registrations.py)
 from fastapi import Depends
 from fastapi import HTTPException
 from fastapi import Request
@@ -3432,22 +3433,6 @@ async def _liff_channel_token() -> tuple[str | None, str | None]:
 # ============================================================
 # REGISTRATIONS (รายชื่อผู้ลงทะเบียนเรียน)
 # ============================================================
-def _norm_course(raw: str) -> str | None:
-    s = (raw or "").strip()
-    if not s:
-        return None
-    su = s.upper().replace(" ", "")
-    base = next((c for c in ("FC", "IC", "PC", "AC") if su.startswith(c)), None)
-    if not base:
-        return s[:24]
-    code = base + "70"
-    if any(x in s for x in ("รุ่น 2", "รุ่น2", "รุ่น๒", "รุ่นที่2", "รุ่นที่ 2")):
-        return code + "-2"
-    if any(x in s for x in ("รุ่น 1", "รุ่น1", "รุ่น๑", "รุ่นที่1", "รุ่นที่ 1")):
-        return code + "-1"
-    return code
-
-
 _REG_COLS = {
     "timestamp": "form_ts", "regid": "reg_id", "uid": "line_user_id", "name": "name",
     "tel": "tel", "สังกัด": "org", "หลักสูตร": "course_raw", "email": "email", "job": "job",
@@ -3606,101 +3591,6 @@ async def _flag_nonfriend_registrants(apply: bool, detail: bool = False) -> dict
     return out
 
 
-async def _reconcile_data() -> dict:
-    """กระทบยอด: ทะเบียน vs สลิปที่ยืนยัน vs สถานะจ่าย"""
-    regs = await supa.select_all("registrations", params={
-        "select": "id,line_user_id,course,course_raw,name,tel,org,paid,created_at"})
-    slips = await supa.select_all("slips", params={
-        "select": "id,line_user_id,expected_course,amount,created_at", "status": "eq.verified"})
-    accts = await supa.select("payment_accounts", params={"select": "course,price,full_price"})
-
-    def _price(course):
-        base = (course or "")[:2].upper()
-        for a in accts:
-            if str(a.get("course") or "").upper().startswith(base):
-                return float(a.get("price") or 0)
-        return 0.0
-
-    slips_by_uid: dict[str, list] = {}
-    for s in slips:
-        slips_by_uid.setdefault(s["line_user_id"], []).append(s)
-
-    def _slip_for(uid, course):
-        base = (course or "")[:2].upper()
-        for s in slips_by_uid.get(uid, []):
-            if base and str(s.get("expected_course") or "").upper().startswith(base) and not s.get("_used"):
-                return s
-        return None
-
-    course_map: dict[str, dict] = {}
-    unpaid, paid_not_marked = [], []
-    for r in regs:
-        c = r.get("course") or "?"
-        cm = course_map.setdefault(c, {"course": c, "registered": 0, "paid": 0,
-                                       "slip_verified": 0, "revenue": 0.0, "unpaid": 0})
-        cm["registered"] += 1
-        s = _slip_for(r["line_user_id"], c)
-        if s:
-            s["_used"] = True
-            cm["slip_verified"] += 1
-            cm["revenue"] += float(s.get("amount") or 0)
-        if r.get("paid"):
-            cm["paid"] += 1
-        else:
-            cm["unpaid"] += 1
-            item = {"id": r["id"], "line_user_id": r["line_user_id"], "name": r.get("name"),
-                    "tel": r.get("tel"), "org": r.get("org"), "course": c}
-            if s:
-                item["slip_amount"] = s.get("amount")
-                item["slip_date"] = s.get("created_at")
-                paid_not_marked.append(item)
-            else:
-                unpaid.append(item)
-
-    reg_keys = {(r["line_user_id"], (r.get("course") or "")[:2].upper()) for r in regs}
-    slip_no_reg = []
-    for s in slips:
-        base = str(s.get("expected_course") or "").upper()[:2]
-        if not base:
-            slip_no_reg.append({"id": s["id"], "line_user_id": s["line_user_id"],
-                                "amount": s.get("amount"), "created_at": s.get("created_at"),
-                                "reason": "สลิปไม่ระบุคอร์ส"})
-        elif (s["line_user_id"], base) not in reg_keys:
-            slip_no_reg.append({"id": s["id"], "line_user_id": s["line_user_id"],
-                                "amount": s.get("amount"), "created_at": s.get("created_at"),
-                                "course": s.get("expected_course"), "reason": "ไม่มีทะเบียนคอร์สนี้"})
-
-    # แนบชื่อ user ให้ slip_no_reg
-    uids = list({x["line_user_id"] for x in slip_no_reg})
-    if uids:
-        for i in range(0, len(uids), 60):
-            names = {u["line_user_id"]: u.get("display_name") for u in await supa.select("line_users", params={
-                "select": "line_user_id,display_name", "line_user_id": f"in.({','.join(uids[i:i+60])})", "limit": "200"})}
-            for x in slip_no_reg:
-                if x["line_user_id"] in names:
-                    x["name"] = names[x["line_user_id"]]
-
-    for cm in course_map.values():
-        cm["expected_revenue"] = round(_price(cm["course"]) * cm["registered"])
-        cm["revenue"] = round(cm["revenue"])
-
-    return {
-        "by_course": sorted(course_map.values(), key=lambda x: -x["registered"]),
-        "totals": {
-            "registered": len(regs),
-            "paid_marked": sum(1 for r in regs if r.get("paid")),
-            "slip_verified": len(slips),
-            "revenue": round(sum(float(s.get("amount") or 0) for s in slips)),
-            "expected_revenue": round(sum(_price(r.get("course")) for r in regs)),
-        },
-        "issues": {
-            "unpaid": unpaid[:300], "unpaid_count": len(unpaid),
-            "paid_not_marked": paid_not_marked[:300], "paid_not_marked_count": len(paid_not_marked),
-            "slip_no_reg": slip_no_reg[:300], "slip_no_reg_count": len(slip_no_reg),
-        },
-    }
-
-
 async def _mark_registrations_paid_by_ids(ids: list[int]) -> int:
     if not ids:
         return 0
@@ -3722,12 +3612,3 @@ async def _mark_registrations_paid_by_ids(ids: list[int]) -> int:
         except Exception as e:
             print("mark-paid tag error:", e)
     return len(ids)
-
-
-_REG_PRICES_DEFAULT = {"FC": 1499, "IC": 1999, "PC": 999}
-
-
-def _course_base(course: str) -> str:
-    """ตัดตัวเลข/รุ่นออก เหลือแค่รหัสหลักสูตรฐาน — FC70->FC, PC70-2->PC, VIP->VIP"""
-    m = re.match(r"[A-Za-zก-๙]+", course or "")
-    return (m.group(0).upper() if m else (course or "?"))

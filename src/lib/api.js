@@ -104,6 +104,8 @@ export const api = {
   registrations: (qs = {}) => req('GET', '/registrations?' + new URLSearchParams(qs)),
   registrationsSummary: () => req('GET', '/registrations/summary'),
   registration: (id) => req('GET', `/registrations/${id}`),
+  registrationHistory: (id) => req('GET', `/registrations/${id}/history`),
+  registrationDuplicates: () => req('GET', '/registrations/duplicates'),
   updateRegistration: (id, patch) => req('PATCH', `/registrations/${id}`, patch),
   importRegistrations: (payload) => req('POST', '/registrations/import', payload),
   retagRegistrations: () => req('POST', '/registrations/retag'),

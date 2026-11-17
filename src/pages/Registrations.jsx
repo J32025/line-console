@@ -10,19 +10,21 @@ export default function Registrations() {
   const [total, setTotal] = useState(0)
   const [f, setF] = useState({ course: '', paid: '', q: '' })
   const [offset, setOffset] = useState(0)
+  const [sort, setSort] = useState({ key: '', dir: 'asc' })   // เรียงตามคอลัมน์ (ฝั่งเซิร์ฟเวอร์ เพราะรายการแบ่งหน้า)
   const [busy, setBusy] = useState('')
   const [imp, setImp] = useState(null)     // import modal: {text}
   const [msg, setMsg] = useState(null)     // message modal: {text}
   const [detail, setDetail] = useState(null)
-  const [view, setView] = useState('list')   // list | reconcile
+  const [view, setView] = useState('list')   // list | reconcile | dups
   const [rec, setRec] = useState(null)
   const [editPrices, setEditPrices] = useState(null) // {FC:1499, IC:1999, PC:999, ...} ระหว่างแก้
   const LIMIT = 100
 
   const loadSum = () => api.registrationsSummary().then(setSum).catch((e) => t.err(e.message))
-  const load = (off = 0) => {
+  const load = (off = 0, s = sort) => {
     setBusy('list')
     const qs = { limit: LIMIT, offset: off }
+    if (s.key) { qs.sort = s.key; qs.dir = s.dir }
     if (f.course) qs.course = f.course
     if (f.paid) qs.paid = f.paid
     if (f.q.trim()) qs.q = f.q.trim()
@@ -31,7 +33,7 @@ export default function Registrations() {
   }
   const loadRec = () => { setRec(null); api.reconcile().then(setRec).catch((e) => t.err(e.message)) }
   useEffect(() => { loadSum(); load(0) }, []) // eslint-disable-line
-  useEffect(() => { load(0) }, [f.course, f.paid]) // eslint-disable-line
+  useEffect(() => { load(0) }, [f.course, f.paid, sort]) // eslint-disable-line
   useEffect(() => { if (view === 'reconcile' && !rec) loadRec() }, [view]) // eslint-disable-line
 
   const doImport = async () => {
@@ -84,7 +86,10 @@ export default function Registrations() {
       <div className="dash-nav" style={{ position: 'static', border: 0, marginBottom: 10 }}>
         <button className={view === 'list' ? 'active' : ''} onClick={() => setView('list')}>รายชื่อ</button>
         <button className={view === 'reconcile' ? 'active' : ''} onClick={() => setView('reconcile')}>กระทบยอด</button>
+        <button className={view === 'dups' ? 'active' : ''} onClick={() => setView('dups')}>ข้อมูลซ้ำ</button>
       </div>
+
+      {view === 'dups' && <DuplicatesView onMerged={() => { loadSum(); load(0) }} />}
 
       {view === 'reconcile' && <ReconcileView rec={rec} reload={loadRec} onMarked={() => { loadRec(); loadSum(); }} />}
 
@@ -144,7 +149,14 @@ export default function Registrations() {
               <div className="table-scroll">
                 <table>
                   <thead>
-                    <tr><th>ชื่อ</th><th>userId</th><th>หลักสูตร</th><th>สังกัด</th><th>เบอร์</th><th>จ่าย</th><th>สลิป</th><th></th></tr>
+                    <tr>
+                      <SortTh k="name" sort={sort} setSort={setSort}>ชื่อ</SortTh><th>userId</th>
+                      <SortTh k="course" sort={sort} setSort={setSort}>หลักสูตร</SortTh>
+                      <SortTh k="org" sort={sort} setSort={setSort}>สังกัด</SortTh>
+                      <SortTh k="tel" sort={sort} setSort={setSort}>เบอร์</SortTh>
+                      <SortTh k="paid" sort={sort} setSort={setSort}>จ่าย</SortTh>
+                      <SortTh k="created_at" sort={sort} setSort={setSort}>ลงเมื่อ</SortTh><th>สลิป</th><th></th>
+                    </tr>
                   </thead>
                   <tbody>
                     {list.map((r) => (
@@ -167,11 +179,12 @@ export default function Registrations() {
                             {r.paid ? '✓ จ่ายแล้ว' : 'ค้างจ่าย'}
                           </button>
                         </td>
+                        <td className="sm">{r.created_at ? new Date(r.created_at).toLocaleDateString('th-TH') : '–'}</td>
                         <td>{r.slip_url ? <a href={r.slip_url} target="_blank" rel="noreferrer">ดู</a> : '–'}</td>
                         <td><button className="xs" onClick={() => setDetail(r.id)}>รายละเอียด</button></td>
                       </tr>
                     ))}
-                    {!list.length && <tr><td colSpan={8} className="muted center">ไม่มีข้อมูล</td></tr>}
+                    {!list.length && <tr><td colSpan={9} className="muted center">ไม่มีข้อมูล</td></tr>}
                   </tbody>
                 </table>
                 {list.length < total && (
@@ -244,6 +257,79 @@ export default function Registrations() {
   )
 }
 
+const FIELD_LABEL = { name: 'ชื่อ', tel: 'เบอร์', email: 'อีเมล', org: 'สังกัด', job: 'ตำแหน่ง', course: 'หลักสูตร', course_raw: 'หลักสูตร (ที่กรอก)', paid: 'จ่ายเงิน', approved: 'อนุมัติ', note: 'โน้ต' }
+const fmtVal = (v) => (v === true ? 'ใช่' : v === false ? 'ไม่' : v == null || v === '' ? '(ว่าง)' : String(v))
+
+function SortTh({ k, sort, setSort, children }) {
+  const on = sort.key === k
+  return (
+    <th style={{ cursor: 'pointer', whiteSpace: 'nowrap' }} title="คลิกเพื่อเรียงลำดับ"
+        onClick={() => setSort(on ? (sort.dir === 'asc' ? { key: k, dir: 'desc' } : { key: '', dir: 'asc' }) : { key: k, dir: 'asc' })}>
+      {children}{on ? (sort.dir === 'asc' ? ' ▲' : ' ▼') : ''}
+    </th>
+  )
+}
+
+// คนเดียวลงทะเบียนด้วยหลายบัญชี LINE (เบอร์โทร/อีเมลตรงกัน) — เลือกบัญชีหลักแล้วรวมบัญชีอื่นเข้ามา
+function DuplicatesView({ onMerged }) {
+  const t = useToast()
+  const [d, setD] = useState(null)
+  const [busy, setBusy] = useState('')
+  const load = () => { setD(null); api.registrationDuplicates().then(setD).catch((e) => t.err(e.message)) }
+  useEffect(load, []) // eslint-disable-line
+
+  const merge = async (g, into) => {
+    const others = g.members.filter((m) => m.line_user_id !== into.line_user_id && !m.merged_into)
+    const label = (m) => m.name || m.display_name || m.line_user_id.slice(0, 10)
+    if (!confirm(`รวมบัญชี ${others.map(label).join(', ')} เข้ากับ "${label(into)}"?\n\nระบบจะย้ายทะเบียน สลิป งาน และโน้ตไปที่บัญชีหลัก และทำเครื่องหมายบัญชีอื่นว่าถูกรวมแล้ว (ย้อนกลับไม่ได้)`)) return
+    setBusy(into.line_user_id)
+    try {
+      for (const o of others) await api.mergeUsers({ from: o.line_user_id, into: into.line_user_id })
+      t.ok('รวมบัญชีแล้ว'); onMerged(); load()
+    } catch (e) { t.err(e.message) } finally { setBusy('') }
+  }
+
+  if (!d) return <Spinner />
+  return (
+    <section className="card">
+      <div className="row spread"><h3>ข้อมูลซ้ำ — {nf(d.total)} กลุ่ม</h3><button className="xs" onClick={load}>ตรวจใหม่</button></div>
+      <p className="muted xs">
+        กลุ่มที่เบอร์โทรหรืออีเมลตรงกันแต่ใช้บัญชี LINE คนละบัญชี (คนเดียวลงหลายหลักสูตรด้วยบัญชีเดียวไม่นับ) —
+        ตรวจให้แน่ใจว่าเป็นคนเดียวกันก่อนรวม เพราะรวมแล้วย้อนกลับไม่ได้
+      </p>
+      {!d.groups.length && <p className="muted sm">ไม่พบข้อมูลซ้ำ 👍</p>}
+      {d.groups.map((g, gi) => (
+        <div key={gi} style={{ border: '1px solid var(--border, #ddd)', borderRadius: 8, padding: 8, marginBottom: 8 }}>
+          <div className="row wrap" style={{ gap: 6, alignItems: 'center' }}>
+            {g.reasons.map((r) => <span key={r} className="chip">{r === 'tel' ? 'เบอร์ตรงกัน' : 'อีเมลตรงกัน'}</span>)}
+            {g.conflict && <span className="chip failed">มีหลักสูตรซ้ำข้ามบัญชี — รวมไม่ได้ ต้องแก้หลักสูตรของแถวใดแถวหนึ่งก่อน</span>}
+          </div>
+          <div className="table-scroll">
+            <table>
+              <thead><tr><th>ชื่อ</th><th>บัญชี LINE</th><th>ทะเบียน</th><th></th></tr></thead>
+              <tbody>
+                {g.members.map((m) => (
+                  <tr key={m.line_user_id} style={m.merged_into ? { opacity: 0.5 } : undefined}>
+                    <td>{m.name || '–'}</td>
+                    <td className="sm">{m.display_name || '–'} <span className="mono xs">{m.line_user_id.slice(0, 10)}…</span>
+                      {m.is_following === false && <span className="chip failed">unfollow</span>}
+                      {m.merged_into && <span className="chip">รวมแล้ว</span>}</td>
+                    <td className="sm">{m.regs.map((x) => `${x.course}${x.paid ? '✓' : ''}`).join(', ')}</td>
+                    <td>{!m.merged_into && (
+                      <button className="xs" disabled={g.conflict || !!busy} onClick={() => merge(g, m)}>
+                        {busy === m.line_user_id && <InlineSpinner />}ใช้บัญชีนี้เป็นหลัก
+                      </button>)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ))}
+    </section>
+  )
+}
+
 function RegDetail({ id, onClose, onSaved }) {
   const t = useToast()
   const [d, setD] = useState(null)
@@ -254,9 +340,12 @@ function RegDetail({ id, onClose, onSaved }) {
 
   const [edit, setEdit] = useState(null) // {name, tel, org, email, job, course} ระหว่างแก้
   const [saving, setSaving] = useState(false)
+  const [hist, setHist] = useState([])
+  const loadHist = () => api.registrationHistory(id).then((r) => setHist(r.history || [])).catch(() => setHist([]))
+  useEffect(() => { loadHist() }, [id]) // eslint-disable-line
   const reload = () => api.registration(id).then((r) => { setD(r); setNote(r.registration.note || '') })
   const save = async (patch) => {
-    try { await api.updateRegistration(id, patch); t.ok('บันทึกแล้ว'); onSaved() } catch (e) { t.err(e.message) }
+    try { await api.updateRegistration(id, patch); t.ok('บันทึกแล้ว'); onSaved(); loadHist() } catch (e) { t.err(e.message) }
   }
   const startEdit = () => {
     const r = d.registration
@@ -272,7 +361,7 @@ function RegDetail({ id, onClose, onSaved }) {
     try {
       await api.updateRegistration(id, patch)
       await reload()
-      t.ok('บันทึกข้อมูลแล้ว'); setEdit(null); onSaved()
+      t.ok('บันทึกข้อมูลแล้ว'); setEdit(null); onSaved(); loadHist()
     } catch (e) { t.err(e.message) } finally { setSaving(false) }
   }
 
@@ -337,6 +426,21 @@ function RegDetail({ id, onClose, onSaved }) {
                       {s.amount && <span>{Number(s.amount).toLocaleString()} บาท</span>}
                       {s.expected_course && <span className="muted xs">{s.expected_course}</span>}
                       <span className="muted xs">{new Date(s.created_at).toLocaleDateString('th-TH')}</span>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+            {hist.length > 0 && (
+              <>
+                <h4 className="sm" style={{ marginTop: 12 }}>ประวัติการแก้ไข ({hist.length})</h4>
+                <ul className="loglist">
+                  {hist.map((h) => (
+                    <li key={h.id} style={{ display: 'block' }}>
+                      <span className="muted xs">{new Date(h.created_at).toLocaleString('th-TH')} · {h.actor || '–'}</span>
+                      {Object.entries(h.result?.changes || {}).map(([k, c]) => (
+                        <div key={k} className="sm">{FIELD_LABEL[k] || k}: <span className="muted">{fmtVal(c.from)}</span> → <b>{fmtVal(c.to)}</b></div>
+                      ))}
                     </li>
                   ))}
                 </ul>

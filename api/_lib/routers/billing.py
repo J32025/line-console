@@ -10,6 +10,7 @@ import datetime as dt
 import re
 import time
 from fastapi import APIRouter
+from _lib.registrations import diff_fields, find_duplicate_groups, order_param
 from _lib.core import (NOW, _EASYSLIP_RESERVE, _RECEIPT_POSTBACK, _REG_COLS, _REG_PRICES_DEFAULT, _REREG_TAG, _STATUS_CMD, _broadcast_begin, _broadcast_finish, _clean_str, _client_ip, _course_base, _easyslip_remaining, _enroll_automations, _flag_nonfriend_registrants, _gather_dict, _get_setting, _json_obj, _mark_registration_paid, _mark_registrations_paid_by_ids, _norm_course, _normalize_messages, _oa_add_friend_url, _pay_account_for, _rate_limit_db, _reconcile_data, _reg_courses, _reg_payment_accounts_public, _reprocess_candidates, _reprocess_slips, _require_slip_tools_role, _retag_from_registrations, _set_rereg_flag, _triage_candidates, _triage_slips, _user_tags, _verify_member_token, alert_admin)
 
 router = APIRouter()
@@ -413,8 +414,8 @@ async def registrations_import(req: Request, admin=Depends(current_admin)):
 
 @router.get("/api/registrations")
 async def registrations_list(admin=Depends(current_admin), course: str = "", paid: str = "",
-                             q: str = "", limit: int = 100, offset: int = 0):
-    params = {"select": "*", "order": "created_at.desc",
+                             q: str = "", limit: int = 100, offset: int = 0, sort: str = "", dir: str = ""):
+    params = {"select": "*", "order": order_param(sort, dir),
               "limit": str(min(limit, 500)), "offset": str(max(offset, 0))}
     if course:
         params["course"] = f"eq.{course}"
@@ -591,6 +592,28 @@ async def reconcile_mark_paid(req: Request, admin=Depends(current_admin)):
     return {"ok": True, "marked": marked}
 
 
+@router.get("/api/registrations/duplicates")
+async def registrations_duplicates(admin=Depends(current_admin)):
+    """คนเดียวที่ลงทะเบียนด้วยหลายบัญชี LINE (เบอร์โทรหรืออีเมลตรงกัน) พร้อมชื่อ LINE ของแต่ละบัญชี"""
+    regs = await supa.select_all("registrations", params={
+        "select": "id,line_user_id,name,tel,email,course,paid"})
+    groups = find_duplicate_groups(regs)
+    uids = sorted({m["line_user_id"] for g in groups for m in g["members"]})
+    users = {}
+    for i in range(0, len(uids), 60):
+        for u in await supa.select("line_users", params={
+                "select": "line_user_id,display_name,is_following,merged_into",
+                "line_user_id": f"in.({','.join(uids[i:i + 60])})", "limit": "200"}):
+            users[u["line_user_id"]] = u
+    for g in groups:
+        for m in g["members"]:
+            u = users.get(m["line_user_id"]) or {}
+            m["display_name"], m["is_following"], m["merged_into"] = u.get("display_name"), u.get("is_following"), u.get("merged_into")
+    # บัญชีที่ถูกรวมไปแล้ว (merged_into) ไม่ใช่ข้อมูลซ้ำที่ต้องจัดการอีก
+    groups = [g for g in groups if sum(1 for m in g["members"] if not m["merged_into"]) >= 2]
+    return {"groups": groups, "total": len(groups)}
+
+
 @router.get("/api/registrations/summary")
 async def registrations_summary(admin=Depends(current_admin)):
     rows = await supa.select_all("registrations", params={"select": "course,paid,approved,line_user_id"})
@@ -662,6 +685,15 @@ async def registration_detail(rid: int, admin=Depends(current_admin)):
     return {"registration": reg, "user": user, "slips": slips_rows, "other_registrations": other_regs}
 
 
+@router.get("/api/registrations/{rid}/history")
+async def registration_history(rid: int, admin=Depends(current_admin)):
+    """ประวัติการแก้ไขทะเบียนรายการนี้ (ใหม่สุดก่อน) จากตาราง operations"""
+    rows = await supa.select("operations", params={
+        "select": "id,actor,action,params,result,created_at", "action": "like.registration.*",
+        "params->>id": f"eq.{rid}", "order": "created_at.desc", "limit": "50"})
+    return {"history": rows}
+
+
 @router.patch("/api/registrations/{rid}")
 async def registration_update(rid: int, req: Request, admin=Depends(current_admin)):
     b = await req.json()
@@ -689,8 +721,17 @@ async def registration_update(rid: int, req: Request, admin=Depends(current_admi
             if dup:
                 raise HTTPException(409, f"คนนี้ลงทะเบียนหลักสูตร {course} ไว้แล้ว (แถวอื่น) — แก้ซ้ำไม่ได้")
         patch["course"], patch["course_raw"] = course, raw
+    before = await supa.select("registrations", params={"id": f"eq.{rid}", "select": "*", "limit": "1"})
+    if not before:
+        raise HTTPException(404, "ไม่พบ")
+    changes = diff_fields(before[0], patch)
     patch["updated_at"] = NOW()
     await supa.update("registrations", patch, {"id": f"eq.{rid}"})
+    if changes:
+        await supa.log_operation(
+            admin.get("name") or admin.get("userId"), "registration.update",
+            {"id": rid, "line_user_id": before[0].get("line_user_id"), "name": before[0].get("name")},
+            {"changes": changes})
     if "course" in patch:
         await _retag_from_registrations()  # ติด tag หลักสูตรใหม่ให้ line_users
     # sync tag จ่ายแล้ว
