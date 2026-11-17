@@ -665,9 +665,34 @@ async def registration_detail(rid: int, admin=Depends(current_admin)):
 @router.patch("/api/registrations/{rid}")
 async def registration_update(rid: int, req: Request, admin=Depends(current_admin)):
     b = await req.json()
-    patch = {k: b[k] for k in ("paid", "approved", "note", "name", "tel", "org", "email", "course") if k in b}
+    patch = {k: b[k] for k in ("paid", "approved", "note") if k in b}
+    # ข้อมูลผู้ลงทะเบียน: ล้างอักขระควบคุม ตัดช่องว่าง ค่าว่าง = ล้างข้อมูลช่องนั้น
+    for k, mx in (("name", 200), ("tel", 40), ("org", 300), ("email", 200), ("job", 200)):
+        if k in b:
+            v = _clean_str(str(b[k] or "").strip())
+            patch[k] = v[:mx] if v else None
+    if patch.get("email") and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", patch["email"]):
+        raise HTTPException(400, "รูปแบบอีเมลไม่ถูกต้อง")
+    if "course" in b:
+        # แก้หลักสูตร: เก็บข้อความที่กรอกใน course_raw และคำนวณรหัสมาตรฐาน (FC70 / PC70-1 ...) ให้เอง
+        raw = (_clean_str(str(b["course"] or "").strip()) or "")[:100]
+        course = _norm_course(raw)
+        if not course:
+            raise HTTPException(400, "กรุณาระบุหลักสูตร")
+        cur = await supa.select("registrations", params={"id": f"eq.{rid}", "select": "line_user_id,course", "limit": "1"})
+        if not cur:
+            raise HTTPException(404, "ไม่พบ")
+        if cur[0].get("line_user_id") and course != cur[0].get("course"):
+            dup = await supa.select("registrations", params={
+                "line_user_id": f"eq.{cur[0]['line_user_id']}", "course": f"eq.{course}", "id": f"neq.{rid}",
+                "select": "id", "limit": "1"})
+            if dup:
+                raise HTTPException(409, f"คนนี้ลงทะเบียนหลักสูตร {course} ไว้แล้ว (แถวอื่น) — แก้ซ้ำไม่ได้")
+        patch["course"], patch["course_raw"] = course, raw
     patch["updated_at"] = NOW()
     await supa.update("registrations", patch, {"id": f"eq.{rid}"})
+    if "course" in patch:
+        await _retag_from_registrations()  # ติด tag หลักสูตรใหม่ให้ line_users
     # sync tag จ่ายแล้ว
     if b.get("paid") is True:
         r = await supa.select("registrations", params={"id": f"eq.{rid}", "select": "line_user_id", "limit": "1"})

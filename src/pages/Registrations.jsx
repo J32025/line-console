@@ -252,8 +252,28 @@ function RegDetail({ id, onClose, onSaved }) {
     api.registration(id).then((r) => { setD(r); setNote(r.registration.note || '') }).catch((e) => t.err(e.message))
   }, [id]) // eslint-disable-line
 
+  const [edit, setEdit] = useState(null) // {name, tel, org, email, job, course} ระหว่างแก้
+  const [saving, setSaving] = useState(false)
+  const reload = () => api.registration(id).then((r) => { setD(r); setNote(r.registration.note || '') })
   const save = async (patch) => {
     try { await api.updateRegistration(id, patch); t.ok('บันทึกแล้ว'); onSaved() } catch (e) { t.err(e.message) }
+  }
+  const startEdit = () => {
+    const r = d.registration
+    setEdit({ name: r.name || '', tel: r.tel || '', org: r.org || '', email: r.email || '', job: r.job || '', course: r.course_raw || r.course || '' })
+  }
+  const saveEdit = async () => {
+    const r = d.registration
+    const patch = {}
+    for (const k of ['name', 'tel', 'org', 'email', 'job']) if (edit[k].trim() !== (r[k] || '')) patch[k] = edit[k]
+    if (edit.course.trim() !== (r.course_raw || r.course || '')) patch.course = edit.course
+    if (!Object.keys(patch).length) { setEdit(null); return }
+    setSaving(true)
+    try {
+      await api.updateRegistration(id, patch)
+      await reload()
+      t.ok('บันทึกข้อมูลแล้ว'); setEdit(null); onSaved()
+    } catch (e) { t.err(e.message) } finally { setSaving(false) }
   }
 
   return (
@@ -262,11 +282,32 @@ function RegDetail({ id, onClose, onSaved }) {
         <div className="row spread"><h3>รายละเอียดผู้ลงทะเบียน</h3><button className="xs" onClick={onClose}>✕</button></div>
         {!d ? <Spinner /> : (
           <>
+            {edit ? (
+              <div style={{ marginBottom: 8 }}>
+                {[['name', 'ชื่อ-สกุล'], ['tel', 'เบอร์โทร'], ['email', 'อีเมล'], ['org', 'สังกัด'], ['job', 'ตำแหน่ง/อาชีพ'], ['course', 'หลักสูตร']].map(([k, label]) => (
+                  <label key={k} className="row" style={{ gap: 8, alignItems: 'center', marginBottom: 6 }}>
+                    <span className="sm" style={{ width: 90 }}>{label}</span>
+                    <input value={edit[k]} style={{ flex: 1 }} onChange={(e) => setEdit({ ...edit, [k]: e.target.value })} />
+                  </label>
+                ))}
+                <p className="muted xs">หลักสูตร: พิมพ์เช่น FC70, IC70, PC70 รุ่น 1 — ระบบแปลงเป็นรหัสมาตรฐานและติด tag ให้ใหม่ (สถานะจ่ายเงิน/สลิปไม่เปลี่ยน)</p>
+                <div className="row">
+                  <button className="sm primary" disabled={saving} onClick={saveEdit}>{saving && <InlineSpinner />}บันทึกข้อมูล</button>
+                  <button className="sm" disabled={saving} onClick={() => setEdit(null)}>ยกเลิก</button>
+                </div>
+              </div>
+            ) : (
+              <div className="row spread" style={{ marginBottom: 4 }}>
+                <span className="muted xs">ข้อมูลที่ผู้ลงทะเบียนกรอก</span>
+                <button className="xs" onClick={startEdit}>✎ แก้ไขข้อมูล</button>
+              </div>
+            )}
             <table className="kv"><tbody>
               <tr><th>ชื่อ</th><td>{d.registration.name || '–'}</td></tr>
               <tr><th>หลักสูตร</th><td><span className="chip">{d.registration.course}</span> <span className="muted xs">{d.registration.course_raw}</span></td></tr>
               <tr><th>สังกัด</th><td>{d.registration.org || '–'}</td></tr>
               <tr><th>เบอร์ / อีเมล</th><td>{d.registration.tel || '–'} · {d.registration.email || '–'}</td></tr>
+              <tr><th>ตำแหน่ง</th><td>{d.registration.job || '–'}</td></tr>
               <tr><th>REGID</th><td className="mono xs">{d.registration.reg_id || '–'}</td></tr>
               <tr><th>LINE</th><td>{d.user?.display_name || <span className="mono xs">{d.registration.line_user_id}</span>} {d.user && !d.user.is_following && <span className="chip failed">unfollow</span>}</td></tr>
               <tr><th>ลงเมื่อ</th><td className="sm">{d.registration.form_ts || '–'}</td></tr>
