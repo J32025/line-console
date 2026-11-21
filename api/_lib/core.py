@@ -984,19 +984,10 @@ async def _handle_slips(img_events: list):
             print("slip pre-insert error:", ex)
 
         # 2) สลับ rich menu ทันที — เฉพาะเมื่อมั่นใจว่าเป็นสลิป (notify_all อย่างเดียวไม่สลับ)
+        #    ล้มเหลวแล้วแจ้งแอดมิน + ลองซ้ำ (เดิมเงียบ) ดู _link_slip_menu
+        menu_ok = False
         if is_slip and SLIP_SUCCESS_RICHMENU_ID:
-            try:
-                old_map = await _fetch_current_menu_map([uid])
-                ok_link, _code = await line.user_richmenu_link(uid, SLIP_SUCCESS_RICHMENU_ID)
-                if ok_link:
-                    ts_link = NOW()
-                    new_row = {"line_user_id": uid, "current_rich_menu_id": SLIP_SUCCESS_RICHMENU_ID,
-                               "rich_menu_status": "assigned", "rich_menu_checked_at": ts_link,
-                               "updated_at": ts_link}
-                    await supa.upsert("line_users", [new_row], on_conflict="line_user_id")
-                    await _log_richmenu_diffs(old_map, [new_row], "slip", "system")
-            except Exception as ex:
-                print("slip richmenu link error:", ex)
+            menu_ok = bool((await _link_slip_menu(uid)).get("ok"))
 
         # ============ ตอนนี้ค่อยอ่านสลิป (ช้า) แล้ว update row ============
         ocr = await _easyslip_verify(content) if content else None
@@ -1016,6 +1007,12 @@ async def _handle_slips(img_events: list):
         ev = await _evaluate_slip(ocr, exp_course, slip_id)
         status, matched, auto_note, dup_ref = ev["status"], ev["matched"], ev["auto_note"], ev["dup_ref"]
         amount, ref, exp_course = ev["amount"], ev["ref"], ev["exp_course"]
+
+        # 2b) ตาข่ายนิรภัย: ประตูด้านบนไม่แน่ใจ/AI ล่ม จึงยังไม่สลับเมนู แต่ EasySlip ยืนยันแล้วว่าเป็นสลิปโอนเงินจริง
+        #     (หรือผ่านตรวจจนเป็น verified) -> สลับเมนูให้ตอนนี้ กันคนจ่ายจริงแต่เมนูไม่เปลี่ยน
+        if (not menu_ok and SLIP_SUCCESS_RICHMENU_ID
+                and (status == "verified" or (ocr and ocr.get("verified") and ocr.get("source") != "gemini"))):
+            menu_ok = bool((await _link_slip_menu(uid, source="slip_verified")).get("ok"))
 
         # 3) update slip row ด้วยผลที่อ่านได้
         patch = {"ocr": ocr, "amount": amount, "ref": None if dup_ref else ref,
@@ -2780,6 +2777,93 @@ async def _sync_richmenu_for(uids: list[str], source: str = "sync", actor: str |
         summary["db_error"] = str(e)
     summary["history_logged"] = await _log_richmenu_diffs(old_map, patch, source, actor)
     return {"total": len(uids), **summary}
+
+
+async def _link_slip_menu(uid: str, source: str = "slip", actor: str = "system") -> dict:
+    """ผูก rich menu 'หลังส่งสลิป' (SLIP_SUCCESS_RICHMENU_ID) ให้ user — ลองซ้ำ 1 ครั้งเมื่อ LINE ล่ม/429
+    ล้มเหลวแล้วต้องไม่เงียบ: บันทึก operations + แจ้งแอดมิน (throttle ตามรหัสผิดพลาด) · สำเร็จ = เขียน line_users + richmenu_history"""
+    rid = SLIP_SUCCESS_RICHMENU_ID
+    if not rid or not uid:
+        return {"ok": False, "reason": "disabled"}
+    code = None
+    ok = False
+    try:
+        old_map = await _fetch_current_menu_map([uid])
+    except Exception:
+        old_map = {}
+    for attempt in range(2):
+        try:
+            ok, code = await line.user_richmenu_link(uid, rid)
+        except Exception as ex:  # noqa: BLE001
+            ok, code = False, f"exc:{type(ex).__name__}"
+        if ok:
+            break
+        if isinstance(code, int) and 400 <= code < 500 and code != 429:
+            break   # 4xx (เมนูไม่มี/ไม่ได้เป็นเพื่อน) ลองซ้ำก็ไม่หาย
+        if attempt == 0:
+            await asyncio.sleep(0.6)
+    if not ok:
+        print("slip richmenu link failed:", uid[:10], code)
+        try:
+            await supa.log_operation(actor, "richmenu.slip_link_failed", {"uid": uid, "source": source},
+                                     {"code": str(code), "richMenuId": rid}, status="error")
+        except Exception:
+            pass
+        hint = {404: "ไม่พบ Rich Menu ID นี้ใน LINE — ตรวจ SLIP_SUCCESS_RICHMENU_ID",
+                400: "LINE ปฏิเสธ (ผู้ใช้อาจบล็อก/ไม่ใช่เพื่อน หรือ ID ผิด)"}.get(code, "")
+        await alert_admin("สลับ Rich Menu หลังส่งสลิปไม่สำเร็จ",
+                          f"LINE ตอบ {code} {hint}\nuser {uid[:10]}…", throttle_key=f"slipmenu_{code}")
+        return {"ok": False, "reason": f"line {code}"}
+    try:
+        ts = NOW()
+        row = {"line_user_id": uid, "current_rich_menu_id": rid, "rich_menu_status": "assigned",
+               "rich_menu_checked_at": ts, "updated_at": ts}
+        await supa.upsert("line_users", [row], on_conflict="line_user_id")
+        await _log_richmenu_diffs(old_map, [row], source, actor)
+    except Exception as ex:  # noqa: BLE001
+        print("slip richmenu db write error:", ex)   # เมนูเปลี่ยนที่ LINE แล้ว — แค่บันทึกลง DB พลาด
+    return {"ok": True}
+
+
+async def _slip_menu_repair(apply: bool, limit: int = 60) -> dict:
+    """ซ่อมย้อนหลัง: คนที่ส่งสลิปแล้ว (verified/review) แต่ 'ไม่เคยได้' เมนูหลังส่งสลิปเลย
+    ตั้งใจแตะเฉพาะคนที่ไม่เคยมีแถว richmenu_history ที่ new = เมนูนี้ — ไม่ดึงคนที่เคยได้แล้วถูกย้ายไปเมนูอื่นทีหลัง
+    (เช่น ห้อง Zoom/ตามคอร์ส) กลับมา · dry-run เป็นค่าเริ่มต้น เช็คเมนูสดจาก LINE ก่อนทุกคน"""
+    rid = SLIP_SUCCESS_RICHMENU_ID
+    if not rid:
+        return {"skipped": "SLIP_SUCCESS_RICHMENU_ID ว่าง"}
+    slips = await supa.select_all("slips", params={"select": "line_user_id,status", "status": "in.(verified,review)"})
+    slip_uids = {s["line_user_id"] for s in slips if s.get("line_user_id")}
+    users = await supa.select_all("line_users", params={
+        "select": "line_user_id,current_rich_menu_id", "is_following": "eq.true"})
+    following = {u["line_user_id"]: u.get("current_rich_menu_id") for u in users}
+    got = await supa.select_all("richmenu_history", params={
+        "select": "line_user_id", "new_rich_menu_id": f"eq.{rid}"})
+    got_uids = {h["line_user_id"] for h in got}
+    cands = sorted(u for u in slip_uids if u in following and u not in got_uids and following[u] != rid)
+    batch = cands[:max(1, limit)]
+    out = {"richMenuId": rid, "slip_users": len(slip_uids), "never_received_candidates": len(cands),
+           "batch": len(batch), "remaining_after": max(0, len(cands) - len(batch)),
+           "already_on_menu": 0, "linked": 0, "failed": 0, "would_link": 0, "applied": apply}
+    sem = asyncio.Semaphore(8)
+
+    async def one(uid):
+        async with sem:
+            try:
+                live = await line.user_richmenu_get(uid)
+            except Exception:
+                live = "?"
+            if live == rid:
+                out["already_on_menu"] += 1
+                return
+            if not apply:
+                out["would_link"] += 1
+                return
+            r = await _link_slip_menu(uid, source="slip_repair", actor="admin")
+            out["linked" if r.get("ok") else "failed"] += 1
+
+    await asyncio.gather(*[one(u) for u in batch])
+    return out
 
 
 async def _richmenu_auto_unregistered(limit: int = 300) -> dict:

@@ -8,9 +8,27 @@ from fastapi import Request
 import asyncio
 import base64
 from fastapi import APIRouter
-from _lib.core import (NOW, _fetch_current_menu_map, _get_setting, _log_richmenu_diffs, _richmenu_auto_unregistered, _richmenu_usage_data, _sync_richmenu_for, _uids_by_filter)
+from _lib.core import (NOW, _fetch_current_menu_map, _get_setting, _log_richmenu_diffs, _richmenu_auto_unregistered, _richmenu_usage_data, _sync_richmenu_for, _uids_by_filter, _require_slip_tools_role, _slip_menu_repair)
 
 router = APIRouter()
+
+
+@router.post("/api/richmenu/slip-repair")
+async def richmenu_slip_repair(req: Request, admin=Depends(current_admin)):
+    """ซ่อมคนที่ส่งสลิปแล้วแต่ไม่เคยได้เมนูหลังส่งสลิป — body {apply:false(default), limit:60}
+    dry-run ก่อนเสมอ แล้วค่อยส่ง apply:true (เรียกซ้ำจนกว่า remaining_after = 0)"""
+    _require_slip_tools_role(admin)
+    b = {}
+    try:
+        b = await req.json()
+    except Exception:
+        pass
+    apply = bool(b.get("apply"))
+    limit = max(1, min(int(b.get("limit") or 60), 100))
+    res = await _slip_menu_repair(apply, limit)
+    if apply:
+        await supa.log_operation(admin["userId"], "richmenu.slip_repair", {"limit": limit}, res)
+    return res
 
 
 # RICH MENU
