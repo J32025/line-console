@@ -1493,6 +1493,8 @@ async def _reply_rule(reply_token: str, rule: dict, name: str | None = None):
     msgs = rule["messages"][:5]
     if name is not None and _has_placeholder(msgs):
         msgs = _personalize(msgs, name)
+    if rule.get("trigger") in ("text", "fallback"):
+        msgs = await _attach_course_qr(msgs)   # ผู้ใช้สอบถามเข้ามา -> แนบปุ่มดูรายละเอียดหลักสูตร
     code, _ = await line.reply(reply_token, msgs)
     if code == 200:
         await supa.update("auto_replies",
@@ -2194,7 +2196,7 @@ async def _handle_gemini_replies(events: list) -> set:
         if _is_urgent(question) and uid not in _gemini_escalations:
             # safety net: ข้อความมีลักษณะร้องเรียน/เร่งด่วน -> ส่งต่อแอดมินเสมอ ไม่ปล่อยให้โมเดลตัดสินใจเองอย่างเดียว
             _gemini_escalations[uid] = f"ข้อความอาจร้องเรียน/เร่งด่วน: {question[:100]}"
-        code, _ = await line.reply(e["replyToken"], [{"type": "text", "text": answer[:4900]}])
+        code, _ = await line.reply(e["replyToken"], await _attach_course_qr([{"type": "text", "text": answer[:4900]}]))
         if code == 200:
             handled.add(uid)
             out_msgs.append({"line_user_id": uid, "direction": "out", "by": "gemini",
@@ -2237,7 +2239,9 @@ async def _handle_auto_replies(events: list, gemini_uids: set = frozenset()) -> 
     })
     for r in rules:
         r.setdefault("trigger", "text")
-    if not rules:
+    has_course_pb = any(e.get("type") == "postback" and
+                        (e.get("postback", {}).get("data") or "").startswith(_COURSE_QR_PREFIX) for e in repliable)
+    if not rules and not has_course_pb:
         return set()
 
     # หา user ที่ปิด auto-reply ไว้ (แอดมินกำลังคุยเอง)
@@ -2297,6 +2301,17 @@ async def _handle_auto_replies(events: list, gemini_uids: set = frozenset()) -> 
                     "bank": srow[0]["bank"], "ref": srow[0]["ref"], "date": srow[0]["slip_date"]}) if srow else None
                 await line.reply(e["replyToken"], [{"type": "text", "text": text or "ยังไม่เจอรายการที่ยืนยันแล้วของคุณครับ ลองพิมพ์ 'ติดต่อแอดมิน' ได้เลย"}])
                 replied_uids.add(uid)
+                continue
+
+            # ---- ปุ่ม quick reply "รายละเอียดหลักสูตร" (course_info:FC) — ตอบสดจากข้อมูลจริงใน DB ----
+            if e["type"] == "postback" and (e.get("postback", {}).get("data") or "").startswith(_COURSE_QR_PREFIX):
+                pfx = e["postback"]["data"][len(_COURSE_QR_PREFIX):]
+                msgs = await _course_info_messages(pfx)
+                code, _ = await line.reply(e["replyToken"], msgs)
+                if code == 200:
+                    replied_uids.add(uid)
+                    out_msgs.append({"line_user_id": uid, "direction": "out", "by": "postback",
+                                     "msg_type": "text", "text": msgs[0].get("text"), "payload": msgs[0]})
                 continue
 
             # ---- postback action (routing table) มาก่อน ----
@@ -3552,6 +3567,127 @@ async def _reg_payment_accounts_public() -> list:
         return accts
     except Exception:
         return []
+
+
+_COURSE_QR_PREFIX = "course_info:"
+_course_qr_cache: dict = {"exp": 0.0, "courses": []}
+
+
+def _course_prefix(s) -> str:
+    return re.sub(r"[^A-Za-z]", "", str(s or "")).upper()[:2]
+
+
+async def _open_courses() -> list[dict]:
+    """หลักสูตรที่เปิดขาย (payment_accounts ที่ active) ไม่ซ้ำตามอักษร 2 ตัวแรก — cache 5 นาที"""
+    if _course_qr_cache["exp"] > time.time():
+        return _course_qr_cache["courses"]
+    out: list[dict] = []
+    try:
+        accts = await supa.select("payment_accounts", params={
+            "select": "course", "active": "eq.true", "order": "id.asc"})
+        seen: set = set()
+        for a in accts:
+            p = _course_prefix(a.get("course"))
+            if p and p not in seen:
+                seen.add(p)
+                out.append({"prefix": p, "label": str(a.get("course") or p)})
+    except Exception as ex:  # noqa: BLE001
+        print("open courses error:", ex)
+        return _course_qr_cache["courses"]   # DB ล่ม -> ใช้ค่าเก่า
+    _course_qr_cache.update(exp=time.time() + 300, courses=out)
+    return out
+
+
+async def _course_quick_reply(exclude: str | None = None, extra: list | None = None) -> dict | None:
+    """quick reply ปุ่ม 'ดูรายละเอียดหลักสูตร' ของทุกหลักสูตรที่เปิด (ปิดได้ที่ setting course_quick_reply=false)
+    ปุ่มส่ง postback course_info:<FC|IC|..> -> _handle_auto_replies ตอบรายละเอียดกลับ (LINE จำกัด 13 ปุ่ม)"""
+    if (await _get_setting("course_quick_reply", True)) is False:
+        return None
+    items = []
+    for c in await _open_courses():
+        if c["prefix"] == exclude:
+            continue
+        items.append({"type": "action", "action": {
+            "type": "postback", "label": f"📘 {c['label']}"[:20],
+            "data": f"{_COURSE_QR_PREFIX}{c['prefix']}",
+            "displayText": f"ขอดูรายละเอียดหลักสูตร {c['label']}"[:300]}})
+    items = (items + list(extra or []))[:13]
+    return {"items": items} if items else None
+
+
+async def _attach_course_qr(msgs: list) -> list:
+    """แนบ quick reply หลักสูตรกับข้อความสุดท้าย (LINE ให้ quickReply อยู่ที่ข้อความสุดท้ายเท่านั้น)
+    ไม่ทับ quick reply ที่กฎ/ข้อความมีอยู่แล้ว"""
+    try:
+        if not msgs or not isinstance(msgs[-1], dict) or msgs[-1].get("quickReply"):
+            return msgs
+        qr = await _course_quick_reply()
+        if not qr:
+            return msgs
+        return list(msgs[:-1]) + [{**msgs[-1], "quickReply": qr}]
+    except Exception as ex:  # noqa: BLE001
+        print("attach course qr error:", ex)
+        return msgs
+
+
+def _thai_date(s) -> str:
+    try:
+        d = dt.date.fromisoformat(str(s)[:10])
+        return f"{d.day}/{d.month}/{d.year + 543}"
+    except Exception:
+        return str(s or "")
+
+
+async def _course_info_messages(prefix: str) -> list:
+    """ข้อความรายละเอียดหลักสูตร (ราคา/คลาสที่เปิด/วิธีโอน) + quick reply หลักสูตรอื่น/ลงทะเบียน/แอดมิน
+    ไม่แสดงลิงก์ Zoom/เอกสาร (เป็นของผู้ลงทะเบียนแล้ว)"""
+    prefix = _course_prefix(prefix)
+    accts = [a for a in await supa.select("payment_accounts", params={"select": "*", "active": "eq.true"})
+             if _course_prefix(a.get("course")) == prefix]
+    if not accts:
+        text = "ยังไม่พบรายละเอียดหลักสูตรนี้ในระบบครับ 🙏 เดี๋ยวแอดมินช่วยแจ้งให้นะครับ"
+    else:
+        lines = [f"📘 หลักสูตร {accts[0].get('course') or prefix}"]
+        for a in accts:
+            price, full = a.get("price"), a.get("full_price")
+            tag = f"{a['course']}: " if len(accts) > 1 else ""
+            if price is not None and full is not None and float(full) > float(price):
+                lines.append(f"💰 {tag}{float(price):,.0f} บาท (ราคาเต็ม {float(full):,.0f} บาท)")
+            elif price is not None or full is not None:
+                lines.append(f"💰 {tag}{float(price if price is not None else full):,.0f} บาท")
+        try:
+            cls = await supa.select("classes", params={
+                "select": "name,cohort,start_date,schedule,capacity", "course": f"like.{prefix}*",
+                "status": "in.(open,running)", "order": "start_date.asc", "limit": "3"})
+        except Exception:
+            cls = []
+        if cls:
+            lines.append("")
+            lines.append("📅 คลาสที่เปิด")
+            for c in cls:
+                title = c.get("name") or (f"รุ่น {c['cohort']}" if c.get("cohort") else "คลาส")
+                start = f" · เริ่ม {_thai_date(c['start_date'])}" if c.get("start_date") else ""
+                lines.append(f"• {title}{start}")
+                if c.get("schedule"):
+                    lines.append(f"  ตารางเรียน: {c['schedule']}")
+        else:
+            lines.append("")
+            lines.append("📅 ยังไม่มีคลาสที่เปิดรับในตอนนี้ ติดตามประกาศได้เลยครับ")
+        a0 = accts[0]
+        if a0.get("account_no"):
+            lines.append("")
+            lines.append(f"💳 โอนเข้าบัญชี: {a0.get('bank') or '-'} {a0['account_no']} ({a0.get('account_name') or '-'})")
+        text = "\n".join(lines)[:4900]
+    extra = []
+    reg_url = await _get_setting("reg_liff_url", None)
+    if reg_url:
+        extra.append({"type": "action", "action": {"type": "uri", "label": "📝 ลงทะเบียน", "uri": str(reg_url)}})
+    extra.append({"type": "action", "action": {"type": "message", "label": "🙋 ติดต่อแอดมิน", "text": "ติดต่อแอดมิน"}})
+    qr = await _course_quick_reply(exclude=prefix, extra=extra)
+    msg = {"type": "text", "text": text}
+    if qr:
+        msg["quickReply"] = qr
+    return [msg]
 
 
 def _pay_lines(acc: dict | None) -> str:
