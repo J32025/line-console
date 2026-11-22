@@ -8,9 +8,15 @@ from fastapi import Request
 import asyncio
 import base64
 from fastapi import APIRouter
-from _lib.core import (NOW, _fetch_current_menu_map, _get_setting, _log_richmenu_diffs, _richmenu_auto_unregistered, _richmenu_usage_data, _sync_richmenu_for, _uids_by_filter, _require_slip_tools_role, _slip_menu_repair)
+from _lib.core import (NOW, _fetch_current_menu_map, _get_setting, _log_richmenu_diffs, _richmenu_auto_unregistered, _richmenu_usage_data, _sync_richmenu_for, _uids_by_filter, _require_slip_tools_role, _slip_menu_diagnose, _slip_menu_repair)
 
 router = APIRouter()
+
+
+@router.get("/api/richmenu/slip-diagnose")
+async def richmenu_slip_diagnose(admin=Depends(current_admin)):
+    """ตรวจสุขภาพเมนูหลังส่งสลิปในคลิกเดียว (อ่านอย่างเดียว ตัวเลขรวม ไม่มีข้อมูลส่วนตัว)"""
+    return await _slip_menu_diagnose()
 
 
 @router.post("/api/richmenu/slip-repair")

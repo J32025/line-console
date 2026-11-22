@@ -40,6 +40,8 @@ export const api = {
 
   richmenus: () => req('GET', '/richmenus'),
   richmenuUsage: () => req('GET', '/richmenu/usage'),
+  slipMenuDiagnose: () => req('GET', '/richmenu/slip-diagnose'),
+  slipMenuRepair: (apply, limit = 60) => req('POST', '/richmenu/slip-repair', { apply, limit }),
   createMenu: (payload) => req('POST', '/richmenu/create', payload),
   uploadMenuImage: (rid, imageBase64) => req('POST', `/richmenu/${rid}/image`, { imageBase64 }),
   setDefaultMenu: (richMenuId) => req('POST', '/richmenu/default', { richMenuId }),

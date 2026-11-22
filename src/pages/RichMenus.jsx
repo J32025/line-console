@@ -4,6 +4,7 @@ import { Spinner, useToast } from '../lib/ui.jsx'
 import { useProgress } from '../lib/progress.jsx'
 import RichMenuBuilder from '../components/RichMenuBuilder.jsx'
 import MenuUsersModal from '../components/MenuUsersModal.jsx'
+import SlipMenuHealth from '../components/SlipMenuHealth.jsx'
 
 export default function RichMenus() {
   const t = useToast()
@@ -96,6 +97,8 @@ export default function RichMenus() {
   return (
     <div>
       <h1>Rich Menu</h1>
+
+      <SlipMenuHealth />
 
       <section className="card">
         <div className="row spread">

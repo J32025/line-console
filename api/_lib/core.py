@@ -9,6 +9,7 @@ from _lib.config import ANTHROPIC_MODEL
 from _lib.config import APP_URL
 from _lib.config import CRON_SECRET
 from _lib.config import EASYSLIP_TOKEN
+from _lib.config import ENFORCE_RICHMENU_ID
 from _lib.config import GEMINI_API_KEY
 from _lib.config import GEMINI_MODEL
 from _lib.config import GEMINI_TRIGGER_MENU_NAME
@@ -32,6 +33,7 @@ import anthropic
 import asyncio
 import base64
 import copy
+import collections
 import datetime as dt
 import gzip
 import hashlib
@@ -2838,6 +2840,77 @@ async def _link_slip_menu(uid: str, source: str = "slip", actor: str = "system")
     except Exception as ex:  # noqa: BLE001
         print("slip richmenu db write error:", ex)   # เมนูเปลี่ยนที่ LINE แล้ว — แค่บันทึกลง DB พลาด
     return {"ok": True}
+
+
+async def _slip_menu_diagnose() -> dict:
+    """ตรวจสุขภาพเรื่อง 'ส่งสลิปแล้วเมนูไม่เปลี่ยน' ในคลิกเดียว — อ่านอย่างเดียว คืนเฉพาะตัวเลขรวม (ไม่มีข้อมูลส่วนตัว)"""
+    rid = SLIP_SUCCESS_RICHMENU_ID
+    out: dict = {"richMenuId": rid or None}
+
+    async def safe(name, coro):
+        try:
+            return await coro
+        except Exception as ex:  # noqa: BLE001
+            out.setdefault("errors", {})[name] = str(ex)[:120]
+            return None
+
+    # 1) เมนูปลายทางยังอยู่ใน LINE ไหม (สาเหตุ 404 เงียบที่พบบ่อย)
+    if rid:
+        m = await safe("line_menu", line.richmenu_get(rid))
+        out["menu_exists_in_line"] = bool(m)
+        out["menu_name"] = (m or {}).get("name")
+    out["default_menu"] = await safe("default", line.richmenu_get_default())
+    out["enforce_menu_env"] = bool(ENFORCE_RICHMENU_ID)
+
+    # 2) สลิป
+    slips = await safe("slips", supa.select_all("slips", params={"select": "line_user_id,status,created_at"})) or []
+    since7 = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=7)).isoformat()
+    out["slips_total"] = len(slips)
+    out["slips_by_status"] = dict(collections.Counter(s.get("status") for s in slips))
+    out["slips_last7d_by_status"] = dict(collections.Counter(s.get("status") for s in slips if (s.get("created_at") or "") >= since7))
+    slip_uids = {s["line_user_id"] for s in slips if s.get("line_user_id")}
+    out["slip_users"] = len(slip_uids)
+
+    # 3) ใครได้/ไม่ได้เมนู
+    users = await safe("users", supa.select_all("line_users", params={
+        "select": "line_user_id,current_rich_menu_id,is_following"})) or []
+    umap = {u["line_user_id"]: u for u in users}
+    hist = await safe("history", supa.select_all("richmenu_history", params={
+        "select": "line_user_id,source", "new_rich_menu_id": f"eq.{rid}"})) if rid else []
+    hist = hist or []
+    got = {h["line_user_id"] for h in hist}
+    out["menu_assigned_by_source"] = dict(collections.Counter(h.get("source") for h in hist))
+    out["slip_users_following"] = sum(1 for u in slip_uids if umap.get(u, {}).get("is_following"))
+    out["slip_users_not_following"] = sum(1 for u in slip_uids if u in umap and not umap[u].get("is_following"))
+    out["slip_users_not_in_line_users"] = sum(1 for u in slip_uids if u not in umap)
+    out["slip_users_on_menu_now"] = sum(1 for u in slip_uids if umap.get(u, {}).get("current_rich_menu_id") == rid)
+    out["slip_users_never_received_menu"] = sum(1 for u in slip_uids if u not in got)
+    out["slip_users_never_received_but_following"] = sum(
+        1 for u in slip_uids if u not in got and umap.get(u, {}).get("is_following"))
+
+    # 4) คิวงานสลิป
+    jobs = await safe("jobs", supa.select_all("webhook_jobs", params={"select": "status,attempts,error,created_at"})) or []
+    out["jobs_by_status"] = dict(collections.Counter(j.get("status") for j in jobs))
+    pend = [j["created_at"] for j in jobs if j.get("status") == "pending" and j.get("created_at")]
+    out["jobs_oldest_pending"] = min(pend) if pend else None
+    out["jobs_top_errors"] = collections.Counter(
+        (j.get("error") or "")[:70] for j in jobs if j.get("error")).most_common(5)
+
+    # 5) ทะเบียนที่ยังไม่จ่าย vs สลิป
+    regs = await safe("regs", supa.select_all("registrations", params={"select": "line_user_id,paid"})) or []
+    unpaid = [r for r in regs if not r.get("paid")]
+    out["registrations_total"] = len(regs)
+    out["registrations_unpaid"] = len(unpaid)
+    out["unpaid_with_slip"] = sum(1 for r in unpaid if r.get("line_user_id") in slip_uids)
+    out["unpaid_without_slip"] = len(unpaid) - out["unpaid_with_slip"]
+
+    # 6) ความล้มเหลวที่เพิ่งบันทึกไว้
+    ops = await safe("ops", supa.select("operations", params={
+        "select": "created_at,result", "action": "eq.richmenu.slip_link_failed",
+        "order": "created_at.desc", "limit": "50"})) or []
+    out["slip_link_failures_recent"] = len(ops)
+    out["slip_link_failure_codes"] = dict(collections.Counter(str((o.get("result") or {}).get("code")) for o in ops))
+    return out
 
 
 async def _slip_menu_repair(apply: bool, limit: int = 60) -> dict:

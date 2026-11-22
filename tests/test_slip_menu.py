@@ -89,3 +89,33 @@ def test_repair_skips_users_who_already_had_menu(env, monkeypatch):
     assert r["never_received_candidates"] == 2 and r["would_link"] == 2 and not env["links"]
     r = asyncio.run(core._slip_menu_repair(True))
     assert r["linked"] == 2 and {l[0] for l in env["links"]} == {"A", "C"}
+
+
+def test_diagnose_counts(env, monkeypatch):
+    tables = {
+        "slips": [{"line_user_id": "A", "status": "verified", "created_at": "2099-01-01"},
+                  {"line_user_id": "B", "status": "review", "created_at": "2000-01-01"}],
+        "line_users": [{"line_user_id": "A", "current_rich_menu_id": RID, "is_following": True},
+                       {"line_user_id": "B", "current_rich_menu_id": None, "is_following": True}],
+        "richmenu_history": [{"line_user_id": "A", "source": "slip"}],
+        "webhook_jobs": [{"status": "failed", "error": "boom", "created_at": "2026-01-01"}],
+        "registrations": [{"line_user_id": "B", "paid": False}, {"line_user_id": "Z", "paid": False}],
+    }
+    async def sel_all(t, params=None, **k):
+        return tables[t]
+    async def sel(t, params=None, **k):
+        return []
+    async def rget(rid):
+        return None   # เมนูไม่อยู่ใน LINE
+    async def dflt():
+        return "d"
+    monkeypatch.setattr(core.supa, "select_all", sel_all)
+    monkeypatch.setattr(core.supa, "select", sel)
+    monkeypatch.setattr(core.line, "richmenu_get", rget)
+    monkeypatch.setattr(core.line, "richmenu_get_default", dflt)
+    r = asyncio.run(core._slip_menu_diagnose())
+    assert r["menu_exists_in_line"] is False
+    assert r["slip_users"] == 2 and r["slip_users_on_menu_now"] == 1
+    assert r["slip_users_never_received_menu"] == 1 and r["slip_users_never_received_but_following"] == 1
+    assert r["jobs_by_status"] == {"failed": 1}
+    assert r["unpaid_with_slip"] == 1 and r["unpaid_without_slip"] == 1
