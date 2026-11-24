@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { api } from '../lib/api.js'
 import { Spinner, InlineSpinner, useToast } from '../lib/ui.jsx'
 import UserDetail from './UserDetail.jsx'
+import { fetchMenuUserIds, copyUserIds } from '../lib/copyUserIds.js'
 
 const PAGE = 50
 
@@ -18,6 +19,7 @@ export default function MenuUsersModal({ richMenuId, name, menus, onClose, onCha
   const [busy, setBusy] = useState(false)
   const [detailUid, setDetailUid] = useState(null)
   const [changed, setChanged] = useState(false)
+  const [copying, setCopying] = useState(false)
 
   const menuParam = richMenuId || 'none'
 
@@ -41,6 +43,14 @@ export default function MenuUsersModal({ richMenuId, name, menus, onClose, onCha
     rows.forEach((u) => (allOn ? n.delete(u.line_user_id) : n.add(u.line_user_id)))
     return n
   })
+
+  const fileName = `userids-${(richMenuId || 'none').slice(-8)}`
+
+  const copyAll = async () => {
+    setCopying(true)
+    try { await copyUserIds(await fetchMenuUserIds(menuParam, q), t, fileName) }
+    catch (e) { t.err(e.message) } finally { setCopying(false) }
+  }
 
   const applyChange = async () => {
     if (!sel.size) return
@@ -68,6 +78,15 @@ export default function MenuUsersModal({ richMenuId, name, menus, onClose, onCha
         </div>
 
         <input placeholder="ค้นชื่อ / userId" value={q} onChange={(e) => setQ(e.target.value)} style={{ marginBottom: 8 }} />
+
+        <div className="row wrap" style={{ gap: 8, marginBottom: 8 }}>
+          <button className="sm primary" onClick={copyAll} disabled={copying || !total}>
+            {copying && <InlineSpinner />}📋 คัดลอก userId ทั้งหมด ({total.toLocaleString()}){q ? ' ตามคำค้น' : ''}
+          </button>
+          <button className="sm" onClick={() => copyUserIds([...sel], t, fileName)} disabled={!sel.size}>
+            📋 คัดลอกที่เลือก ({sel.size.toLocaleString()})
+          </button>
+        </div>
 
         {!rows ? <Spinner /> : (
           <>

@@ -5,6 +5,7 @@ import { useProgress } from '../lib/progress.jsx'
 import RichMenuBuilder from '../components/RichMenuBuilder.jsx'
 import MenuUsersModal from '../components/MenuUsersModal.jsx'
 import SlipMenuHealth from '../components/SlipMenuHealth.jsx'
+import { fetchMenuUserIds, copyUserIds } from '../lib/copyUserIds.js'
 
 export default function RichMenus() {
   const t = useToast()
@@ -124,7 +125,14 @@ export default function RichMenus() {
                 </td>
                 <td>{m.chatBarText}</td>
                 <td className="muted sm">{m.size?.width}×{m.size?.height}</td>
-                <td className="mono xs">{m.richMenuId}</td>
+                <td className="mono xs">
+                  {m.richMenuId}{' '}
+                  <button className="xs" title="คัดลอก userId ของทุกคนที่ใช้เมนูนี้ (บรรทัดละคน)"
+                          onClick={async () => {
+                            try { await copyUserIds(await fetchMenuUserIds(m.richMenuId), t, `userids-${m.richMenuId.slice(-8)}`) }
+                            catch (e) { t.err(e.message) }
+                          }}>📋 userId</button>
+                </td>
                 <td className="row">
                   <button className="xs" onClick={() => api.setDefaultMenu(m.richMenuId).then(() => { t.ok('ตั้ง default'); load() }).catch((e) => t.err(e.message))}>
                     ตั้ง default
