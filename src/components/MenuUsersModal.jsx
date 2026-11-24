@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { api } from '../lib/api.js'
 import { Spinner, InlineSpinner, useToast } from '../lib/ui.jsx'
 import UserDetail from './UserDetail.jsx'
-import { fetchMenuUsers, fetchMenuUserIds, lineNames, copyUserIds } from '../lib/copyUserIds.js'
+import { fetchMenuUsers, fetchMenuUserIds, lineNames, nameIdRows, copyUserIds } from '../lib/copyUserIds.js'
 
 const PAGE = 50
 
@@ -53,12 +53,13 @@ export default function MenuUsersModal({ richMenuId, name, menus, onClose, onCha
   }
 
   // selectedOnly: ดึงทั้งเมนู (ไม่กรองคำค้น) แล้วคัดเฉพาะคนที่ติ๊ก เพราะคนที่เลือกอาจอยู่คนละหน้า/คนละคำค้น
-  const copyNames = async (selectedOnly) => {
+  const copyNames = async (selectedOnly, withId = false) => {
     setCopying(true)
     try {
       let users = await fetchMenuUsers(menuParam, selectedOnly ? '' : q)
       if (selectedOnly) users = users.filter((u) => sel.has(u.line_user_id))
-      await copyUserIds(lineNames(users), t, `names-${(richMenuId || 'none').slice(-8)}`, 'ชื่อ LINE')
+      await copyUserIds((withId ? nameIdRows : lineNames)(users), t,
+        `${withId ? 'name-userid' : 'names'}-${(richMenuId || 'none').slice(-8)}`, withId ? 'ชื่อ + userId' : 'ชื่อ LINE')
     } catch (e) { t.err(e.message) } finally { setCopying(false) }
   }
 
@@ -101,6 +102,12 @@ export default function MenuUsersModal({ richMenuId, name, menus, onClose, onCha
           </button>
           <button className="sm" onClick={() => copyNames(true)} disabled={copying || !sel.size}>
             👤 คัดลอกชื่อที่เลือก ({sel.size.toLocaleString()})
+          </button>
+          <button className="sm primary" onClick={() => copyNames(false, true)} disabled={copying || !total}>
+            🧾 คัดลอก ชื่อ + userId ทั้งหมด ({total.toLocaleString()}){q ? ' ตามคำค้น' : ''}
+          </button>
+          <button className="sm" onClick={() => copyNames(true, true)} disabled={copying || !sel.size}>
+            🧾 ชื่อ + userId ที่เลือก ({sel.size.toLocaleString()})
           </button>
         </div>
 

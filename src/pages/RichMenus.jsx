@@ -5,7 +5,7 @@ import { useProgress } from '../lib/progress.jsx'
 import RichMenuBuilder from '../components/RichMenuBuilder.jsx'
 import MenuUsersModal from '../components/MenuUsersModal.jsx'
 import SlipMenuHealth from '../components/SlipMenuHealth.jsx'
-import { fetchMenuUsers, fetchMenuUserIds, lineNames, copyUserIds } from '../lib/copyUserIds.js'
+import { fetchMenuUsers, fetchMenuUserIds, lineNames, nameIdRows, copyUserIds } from '../lib/copyUserIds.js'
 
 export default function RichMenus() {
   const t = useToast()
@@ -136,7 +136,12 @@ export default function RichMenus() {
                           onClick={async () => {
                             try { await copyUserIds(lineNames(await fetchMenuUsers(m.richMenuId)), t, `names-${m.richMenuId.slice(-8)}`, 'ชื่อ LINE') }
                             catch (e) { t.err(e.message) }
-                          }}>👤 ชื่อ LINE</button>
+                          }}>👤 ชื่อ LINE</button>{' '}
+                  <button className="xs" title="คัดลอกสองคอลัมน์: ชื่อ LINE และ userId ของทุกคนที่ใช้เมนูนี้"
+                          onClick={async () => {
+                            try { await copyUserIds(nameIdRows(await fetchMenuUsers(m.richMenuId)), t, `name-userid-${m.richMenuId.slice(-8)}`, 'ชื่อ + userId') }
+                            catch (e) { t.err(e.message) }
+                          }}>🧾 ชื่อ + userId</button>
                 </td>
                 <td className="row">
                   <button className="xs" onClick={() => api.setDefaultMenu(m.richMenuId).then(() => { t.ok('ตั้ง default'); load() }).catch((e) => t.err(e.message))}>
