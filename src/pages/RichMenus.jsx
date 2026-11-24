@@ -5,7 +5,7 @@ import { useProgress } from '../lib/progress.jsx'
 import RichMenuBuilder from '../components/RichMenuBuilder.jsx'
 import MenuUsersModal from '../components/MenuUsersModal.jsx'
 import SlipMenuHealth from '../components/SlipMenuHealth.jsx'
-import { fetchMenuUserIds, copyUserIds } from '../lib/copyUserIds.js'
+import { fetchMenuUsers, fetchMenuUserIds, lineNames, copyUserIds } from '../lib/copyUserIds.js'
 
 export default function RichMenus() {
   const t = useToast()
@@ -131,7 +131,12 @@ export default function RichMenus() {
                           onClick={async () => {
                             try { await copyUserIds(await fetchMenuUserIds(m.richMenuId), t, `userids-${m.richMenuId.slice(-8)}`) }
                             catch (e) { t.err(e.message) }
-                          }}>📋 userId</button>
+                          }}>📋 userId</button>{' '}
+                  <button className="xs" title="คัดลอกชื่อ LINE ของทุกคนที่ใช้เมนูนี้ (บรรทัดละคน)"
+                          onClick={async () => {
+                            try { await copyUserIds(lineNames(await fetchMenuUsers(m.richMenuId)), t, `names-${m.richMenuId.slice(-8)}`, 'ชื่อ LINE') }
+                            catch (e) { t.err(e.message) }
+                          }}>👤 ชื่อ LINE</button>
                 </td>
                 <td className="row">
                   <button className="xs" onClick={() => api.setDefaultMenu(m.richMenuId).then(() => { t.ok('ตั้ง default'); load() }).catch((e) => t.err(e.message))}>

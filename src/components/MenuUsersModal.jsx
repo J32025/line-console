@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { api } from '../lib/api.js'
 import { Spinner, InlineSpinner, useToast } from '../lib/ui.jsx'
 import UserDetail from './UserDetail.jsx'
-import { fetchMenuUserIds, copyUserIds } from '../lib/copyUserIds.js'
+import { fetchMenuUsers, fetchMenuUserIds, lineNames, copyUserIds } from '../lib/copyUserIds.js'
 
 const PAGE = 50
 
@@ -52,6 +52,16 @@ export default function MenuUsersModal({ richMenuId, name, menus, onClose, onCha
     catch (e) { t.err(e.message) } finally { setCopying(false) }
   }
 
+  // selectedOnly: ดึงทั้งเมนู (ไม่กรองคำค้น) แล้วคัดเฉพาะคนที่ติ๊ก เพราะคนที่เลือกอาจอยู่คนละหน้า/คนละคำค้น
+  const copyNames = async (selectedOnly) => {
+    setCopying(true)
+    try {
+      let users = await fetchMenuUsers(menuParam, selectedOnly ? '' : q)
+      if (selectedOnly) users = users.filter((u) => sel.has(u.line_user_id))
+      await copyUserIds(lineNames(users), t, `names-${(richMenuId || 'none').slice(-8)}`, 'ชื่อ LINE')
+    } catch (e) { t.err(e.message) } finally { setCopying(false) }
+  }
+
   const applyChange = async () => {
     if (!sel.size) return
     const label = target ? `เปลี่ยนเป็น "${menus.find((m) => m.richMenuId === target)?.name}"` : 'ถอดเมนู'
@@ -85,6 +95,12 @@ export default function MenuUsersModal({ richMenuId, name, menus, onClose, onCha
           </button>
           <button className="sm" onClick={() => copyUserIds([...sel], t, fileName)} disabled={!sel.size}>
             📋 คัดลอกที่เลือก ({sel.size.toLocaleString()})
+          </button>
+          <button className="sm primary" onClick={() => copyNames(false)} disabled={copying || !total}>
+            👤 คัดลอกชื่อ LINE ทั้งหมด ({total.toLocaleString()}){q ? ' ตามคำค้น' : ''}
+          </button>
+          <button className="sm" onClick={() => copyNames(true)} disabled={copying || !sel.size}>
+            👤 คัดลอกชื่อที่เลือก ({sel.size.toLocaleString()})
           </button>
         </div>
 
