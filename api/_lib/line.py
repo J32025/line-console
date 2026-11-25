@@ -67,6 +67,20 @@ async def get_profile(user_id: str):
         return r.json()
     return None
 
+async def fetch_profile(user_id: str) -> tuple[str, dict | None]:
+    """ดึงโปรไฟล์แบบบอกสาเหตุ: ('ok', profile) · ('gone', None) = LINE ตอบ 404 (บล็อก/ไม่ใช่เพื่อน)
+    · ('unknown', None) = 429/5xx/timeout ฯลฯ — ผู้เรียกต้องไม่เปลี่ยนสถานะผู้ใช้จากกรณีนี้"""
+    try:
+        r = await _req("GET", f"/v2/bot/profile/{user_id}", retries=2)
+        if r.status_code == 200:
+            return "ok", r.json()
+        if r.status_code == 404:
+            return "gone", None
+    except Exception:
+        pass
+    return "unknown", None
+
+
 async def is_friend(user_id: str):
     """เป็นเพื่อนกับบัญชีนี้อยู่ไหม — เช็คกับ LINE ตรง ๆ (ไม่พึ่งค่าใน DB ที่อาจคลาดเคลื่อนจาก import/webhook ตกหล่น)
     True = เป็นเพื่อน (ดึงโปรไฟล์ได้) · False = ไม่ได้เป็นเพื่อน/บล็อกอยู่ (LINE ตอบ 404)

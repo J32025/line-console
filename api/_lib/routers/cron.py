@@ -14,7 +14,7 @@ from fastapi import Request
 import asyncio
 import datetime as dt
 from fastapi import APIRouter
-from _lib.core import (NOW, _ai_baseline, _backfill_users, _broadcast_begin, _broadcast_finish, _check_cron_key, _cron_authorized, _cron_last_run, _cron_stale, _dev_commands_list, _enroll_inactive_automations, _fetch_current_menu_map, _flag_nonfriend_registrants, _get_setting, _health_digest_lines, _iso_ago, _json_obj, _kb_autogen_batch, _log_richmenu_diffs, _make_backup, _mark_registrations_paid_by_ids, _norm_question, _normalize_messages, _reconcile_data, _reprocess_slips, _retag_from_registrations, _richmenu_auto_unregistered, _richmenu_usage_data, _run_webhook_jobs, _slips_summary, _sync_richmenu_for, _triage_recall_check, _triage_refresh_notes, _triage_slips, alert_admin, health)
+from _lib.core import (NOW, _ai_baseline, _backfill_users, _broadcast_begin, _broadcast_finish, _check_cron_key, _cron_authorized, _cron_last_run, _cron_stale, _dev_commands_list, _enroll_inactive_automations, _fetch_current_menu_map, _flag_nonfriend_registrants, _get_setting, _health_digest_lines, _iso_ago, _json_obj, _kb_autogen_batch, _log_richmenu_diffs, _make_backup, _mark_registrations_paid_by_ids, _norm_question, _normalize_messages, _reconcile_data, _reprocess_slips, _retag_from_registrations, _richmenu_auto_unregistered, _richmenu_usage_data, _run_webhook_jobs, _slips_summary, _sync_richmenu_for, _sync_stale_profiles, _triage_recall_check, _triage_refresh_notes, _triage_slips, alert_admin, health)
 
 router = APIRouter()
 
@@ -413,6 +413,10 @@ async def cron_run_automations(request: Request):
         await _enroll_inactive_automations()
     except Exception as e:
         print("inactive enroll error:", e)
+    try:
+        await asyncio.wait_for(_sync_stale_profiles(30), timeout=15)   # ทยอยซิงค์ชื่อ LINE
+    except Exception as e:
+        print("profile sync error:", repr(e))
     due = await supa.select("automation_runs", params={
         "select": "*", "status": "eq.pending", "run_at": f"lte.{NOW()}",
         "order": "run_at.asc", "limit": "200"})

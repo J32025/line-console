@@ -2954,6 +2954,80 @@ async def _slip_menu_repair(apply: bool, limit: int = 60) -> dict:
     return out
 
 
+async def _upsert_profile_rows(rows: list[dict]) -> bool:
+    """upsert แยกกลุ่มตามชุดคีย์ (PostgREST ต้องการให้ทุกแถวในคำขอมีคีย์เหมือนกัน)
+    ถ้ายังไม่ได้รัน migration 0025 (ไม่มีคอลัมน์ profile_synced_at) ตัดคีย์นั้นแล้วลองใหม่ · คืน False เมื่อต้องตัด"""
+    groups: dict = {}
+    for r in rows:
+        groups.setdefault(tuple(sorted(r)), []).append(r)
+    has_col = True
+    for g in groups.values():
+        for i in range(0, len(g), 400):
+            chunk = g[i:i + 400]
+            try:
+                await supa.upsert("line_users", chunk, on_conflict="line_user_id")
+            except Exception as ex:  # noqa: BLE001
+                detail = f"{ex} {getattr(getattr(ex, 'response', None), 'text', '')} {getattr(ex, 'detail', '')}"
+                if "profile_synced_at" not in detail:
+                    raise
+                has_col = False
+                await supa.upsert("line_users", [{k: v for k, v in r.items() if k != "profile_synced_at"}
+                                                 for r in chunk], on_conflict="line_user_id")
+    return has_col
+
+
+async def _refresh_profiles(uids: list[str], touch: bool = True, concurrency: int = 8) -> dict:
+    """ดึงชื่อ/รูปล่าสุดจาก LINE แล้วบันทึก · ตั้ง is_following=false เฉพาะเมื่อ LINE ตอบ 404 จริง
+    ดึงไม่สำเร็จด้วยเหตุอื่น = ไม่แตะแถวนั้นเลย · touch=False (cron) ไม่ขยับ updated_at กันลำดับรายชื่อสลับ"""
+    sem = asyncio.Semaphore(concurrency)
+    count = {"ok": 0, "gone": 0, "unknown": 0}
+    patch: list = []
+
+    async def one(uid):
+        async with sem:
+            state, p = await line.fetch_profile(uid)
+        count[state] += 1
+        if state == "unknown":
+            return
+        row = {"line_user_id": uid, "is_following": state == "ok", "profile_synced_at": NOW()}
+        if touch:
+            row["updated_at"] = NOW()
+        if state == "ok":
+            row.update({"display_name": _clean_str(p.get("displayName")),
+                        "picture_url": _clean_str(p.get("pictureUrl")),
+                        "status_message": _clean_str(p.get("statusMessage")),
+                        "language": _clean_str(p.get("language"))})
+        patch.append(row)
+
+    await asyncio.gather(*[one(u) for u in uids])
+    if patch:
+        await _upsert_profile_rows(patch)
+    return {"processed": len(uids), "profiles_fetched": count["ok"],
+            "not_following": count["gone"], "errors": count["unknown"]}
+
+
+_PROFILE_MAX_AGE_DAYS = 7
+
+
+async def _sync_stale_profiles(limit: int = 30) -> dict:
+    """cron: ทยอยอัปเดตชื่อผู้ติดตามที่ยังไม่เคยซิงค์ หรือซิงค์นานเกิน 7 วัน (เก่าสุดก่อน)
+    ปิดได้ที่ setting profile_auto_sync=false · ยังไม่รัน migration 0025 = ข้าม"""
+    if (await _get_setting("profile_auto_sync", True)) is False:
+        return {"skipped": "ปิดไว้ (profile_auto_sync=false)"}
+    cutoff = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=_PROFILE_MAX_AGE_DAYS)
+              ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        rows = await supa.select("line_users", params={
+            "select": "line_user_id", "is_following": "eq.true",
+            "or": f"(profile_synced_at.is.null,profile_synced_at.lt.{cutoff})",
+            "order": "profile_synced_at.asc.nullsfirst", "limit": str(limit)})
+    except Exception as ex:  # noqa: BLE001
+        return {"skipped": f"อ่านรายชื่อไม่ได้ (รัน migration 0025 หรือยัง?): {str(ex)[:100]}"}
+    if not rows:
+        return {"processed": 0}
+    return await _refresh_profiles([r["line_user_id"] for r in rows], touch=False)
+
+
 async def _richmenu_auto_unregistered(limit: int = 300) -> dict:
     """หา follower ที่ยังไม่เคยถูกตั้งเมนูเฉพาะ (rich_menu_status none/ว่าง — แปลว่ายังใช้เมนู default ของบอทอยู่)
     และยังไม่มีแถวใน registrations เลย -> สลับเป็นเมนู unregistered_richmenu_id (ตั้งค่าที่หน้า Admins)

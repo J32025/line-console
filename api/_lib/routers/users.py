@@ -9,7 +9,7 @@ import asyncio
 import datetime as dt
 import re
 from fastapi import APIRouter
-from _lib.core import (NOW, PIPELINE_STAGES, _INBOX_SELECT, _STAGE_LABEL, _backfill_users, _clean_str, _enroll_automations, _gather_dict, _inbox_slip_counts, _iso_ago, _normalize_messages, _parse_ts, _reply_or_push, _tok, _uids_by_filter, events, users)
+from _lib.core import (_refresh_profiles, NOW, PIPELINE_STAGES, _INBOX_SELECT, _STAGE_LABEL, _backfill_users, _clean_str, _enroll_automations, _gather_dict, _inbox_slip_counts, _iso_ago, _normalize_messages, _parse_ts, _reply_or_push, _tok, _uids_by_filter, events, users)
 
 router = APIRouter()
 
@@ -186,35 +186,11 @@ async def refresh_profile(req: Request, admin=Depends(current_admin)):
             remaining_after = max(0, await supa.count(
                 "line_users", {"is_following": "eq.true", "display_name": "is.null"}) - len(uids))
 
-    sem = asyncio.Semaphore(12)
-    got = [0]
-    unfollow = [0]
-    patch = []
-
-    async def one(uid):
-        async with sem:
-            p = await line.get_profile(uid)
-            if p:
-                got[0] += 1
-                patch.append({
-                    "line_user_id": uid,
-                    "display_name": _clean_str(p.get("displayName")),
-                    "picture_url": _clean_str(p.get("pictureUrl")),
-                    "status_message": _clean_str(p.get("statusMessage")),
-                    "language": _clean_str(p.get("language")),
-                    "is_following": True, "updated_at": NOW(),
-                })
-            else:
-                unfollow[0] += 1
-                patch.append({"line_user_id": uid, "is_following": False, "updated_at": NOW()})
-
-    await asyncio.gather(*[one(u) for u in uids])
-    for i in range(0, len(patch), 400):
-        await supa.upsert("line_users", patch[i:i + 400], on_conflict="line_user_id")
+    res = await _refresh_profiles(uids)
     await supa.log_operation(admin["userId"], "users.refresh_profile",
-                             {"count": len(uids)}, {"got": got[0], "unfollow": unfollow[0]})
-    return {"processed": len(uids), "profiles_fetched": got[0],
-            "not_following": unfollow[0], "remaining": remaining_after}
+                             {"count": len(uids)}, {"got": res["profiles_fetched"],
+                                                    "unfollow": res["not_following"], "errors": res["errors"]})
+    return {**res, "remaining": remaining_after}
 
 
 @router.post("/api/users/sync-followers")

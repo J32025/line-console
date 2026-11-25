@@ -85,7 +85,11 @@ export default function Users() {
         if (tot === 0) tot = r.processed + r.remaining
         task.setTotal(tot)
         task.set(done + unfollow, `ดึงได้ ${done.toLocaleString()} · ไม่ติดตาม ${unfollow}`)
-        if (r.remaining === 0 || r.processed === 0) break
+        // ดึงไม่สำเร็จทั้งชุด (LINE จำกัดความถี่/ล่ม) -> หยุด ไม่วนยิงซ้ำ
+        if (r.remaining === 0 || r.processed === 0 || r.profiles_fetched + r.not_following === 0) {
+          if (r.errors) t.err(`ดึงไม่สำเร็จ ${r.errors} คน (สถานะเดิมไม่ถูกเปลี่ยน) — ลองใหม่ภายหลังได้`)
+          break
+        }
       }
       t.ok(`ดึงโปรไฟล์เสร็จ: ${done.toLocaleString()} คน`)
       load()

@@ -20,6 +20,7 @@ export default function MenuUsersModal({ richMenuId, name, menus, onClose, onCha
   const [detailUid, setDetailUid] = useState(null)
   const [changed, setChanged] = useState(false)
   const [copying, setCopying] = useState(false)
+  const [syncing, setSyncing] = useState('')
 
   const menuParam = richMenuId || 'none'
 
@@ -63,6 +64,22 @@ export default function MenuUsersModal({ richMenuId, name, menus, onClose, onCha
     } catch (e) { t.err(e.message) } finally { setCopying(false) }
   }
 
+  // ดึงชื่อล่าสุดจาก LINE ของทุกคนในรายการ (ตามคำค้น) ทีละ 200 คน ก่อนคัดลอก
+  const syncNames = async () => {
+    setSyncing('กำลังเตรียมรายชื่อ…')
+    let ok = 0, gone = 0, errors = 0
+    try {
+      const ids = await fetchMenuUserIds(menuParam, q)
+      for (let i = 0; i < ids.length; i += 200) {
+        setSyncing(`อัปเดตชื่อ ${i.toLocaleString()}/${ids.length.toLocaleString()}…`)
+        const r = await api.refreshProfiles({ target: 'list', userIds: ids.slice(i, i + 200) })
+        ok += r.profiles_fetched; gone += r.not_following; errors += r.errors || 0
+      }
+      t.ok(`อัปเดตชื่อแล้ว ${ok.toLocaleString()} คน · บล็อก/เลิกเป็นเพื่อน ${gone.toLocaleString()} · ดึงไม่สำเร็จ ${errors.toLocaleString()}${errors ? ' (กดซ้ำได้)' : ''}`)
+    } catch (e) { t.err(`อัปเดตชื่อหยุดกลางทาง (สำเร็จแล้ว ${ok} คน): ${e.message}`) }
+    finally { setSyncing(''); setChanged(true); load() }
+  }
+
   const applyChange = async () => {
     if (!sel.size) return
     const label = target ? `เปลี่ยนเป็น "${menus.find((m) => m.richMenuId === target)?.name}"` : 'ถอดเมนู'
@@ -91,6 +108,10 @@ export default function MenuUsersModal({ richMenuId, name, menus, onClose, onCha
         <input placeholder="ค้นชื่อ / userId" value={q} onChange={(e) => setQ(e.target.value)} style={{ marginBottom: 8 }} />
 
         <div className="row wrap" style={{ gap: 8, marginBottom: 8 }}>
+          <button className="sm" onClick={syncNames} disabled={!!syncing || copying || !total}
+                  title="ดึงชื่อและรูปล่าสุดจาก LINE ก่อนคัดลอก (ไม่เสียโควต้าข้อความ)">
+            {syncing ? <><InlineSpinner />{syncing}</> : `🔄 อัปเดตชื่อล่าสุด (${total.toLocaleString()})${q ? ' ตามคำค้น' : ''}`}
+          </button>
           <button className="sm primary" onClick={copyAll} disabled={copying || !total}>
             {copying && <InlineSpinner />}📋 คัดลอก userId ทั้งหมด ({total.toLocaleString()}){q ? ' ตามคำค้น' : ''}
           </button>
