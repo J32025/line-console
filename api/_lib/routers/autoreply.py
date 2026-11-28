@@ -8,6 +8,7 @@ from fastapi import HTTPException
 from fastapi import Request
 import re
 from fastapi import APIRouter
+from _lib import question_analysis
 from _lib.core import (NOW, _GAP_STOP, _KB_TOPIC_SETTING_KEY, _PROCUREMENT_TOPICS, _gemini_kb_cache, _get_setting, _iso_ago, _kb_autogen_batch, _match, _normalize_messages, _teach_find, _teach_mark, _teach_public, _teach_state, _tok)
 
 router = APIRouter()
@@ -95,6 +96,12 @@ async def kb_gaps(admin=Depends(current_admin), days: int = 14):
     top_keywords = [{"word": w, "count": c} for w, c in words.most_common(30) if c >= 2]
     return {"days": days, "total": len(texts),
             "top_questions": top_questions, "top_keywords": top_keywords, "samples": texts[:60]}
+
+
+@router.get("/api/kb/question-analysis")
+async def kb_question_analysis(admin=Depends(current_admin), days: int = 30, refresh: int = 0):
+    """จัดกลุ่มคำถามขาเข้าทั้งหมด (AI ถ้าใช้ได้ ไม่งั้นจัดตามคำสำคัญ)"""
+    return await question_analysis.analyze(max(1, min(days, 90)), bool(refresh))
 
 
 @router.get("/api/kb/teach")

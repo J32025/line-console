@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api } from '../lib/api.js'
 import { Spinner, InlineSpinner, useToast } from '../lib/ui.jsx'
+import QuestionAnalysis from '../components/QuestionAnalysis.jsx'
 
 const EMPTY = { title: '', body: '', keywords: '', category: '', enabled: true }
 
@@ -105,6 +106,8 @@ export default function KB() {
           </>
         )}
       </section>
+
+      <QuestionAnalysis onArticle={(q) => { articleFromQuestion(q); window.scrollTo({ top: 0, behavior: 'smooth' }) }} />
 
       <section className="card">
         <div className="row spread" style={{ alignItems: 'center' }}>
