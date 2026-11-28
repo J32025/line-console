@@ -160,6 +160,8 @@ export const api = {
   delKb: (id) => req('DELETE', `/kb/${id}`),
   kbGaps: (days = 14) => req('GET', `/kb/gaps?days=${days}`),
   kbAutogenStatus: () => req('GET', '/kb/autogen/status'),
+  smartAnswersConfig: () => req('GET', '/smart-answers/config'),
+  smartAnswersTest: (text, userId, config) => req('POST', '/smart-answers/test', { text, userId, config }),
   questionAnalysis: (days = 30, refresh = 0) => req('GET', `/kb/question-analysis?days=${days}&refresh=${refresh}`),
   kbTeach: (refresh = 0) => req('GET', `/kb/teach?refresh=${refresh}`),
   kbTeachSave: (key, answer, title) => req('POST', '/kb/teach', { key, answer, title }),

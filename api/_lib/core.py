@@ -465,7 +465,18 @@ async def _status_check_text(uid: str) -> tuple[str, bool]:
     แทนการ push แจ้งอัตโนมัติ — ประหยัดโควต้า) คืนคู่ (ข้อความ, มีรายการจ่ายแล้วไหม — ใช้ตัดสินใจแนบปุ่มดูใบเสร็จ)"""
     regs = await supa.select("registrations", params={
         "line_user_id": f"eq.{uid}", "select": "course,course_raw,paid", "order": "created_at.desc"})
+    if await _is_member_menu_user(uid):
+        lines = ["📋 สถานะของคุณ", "✅ คุณมีสิทธิ์เข้าใช้งานแล้วครับ ใช้งานได้จากเมนูด้านล่าง"]
+        lines += [f"• {r.get('course_raw') or r.get('course') or '-'}" for r in regs]
+        return "\n".join(lines), any(r.get("paid") for r in regs)
     if not regs:
+        try:
+            has_slip = await supa.select("slips", params={"line_user_id": f"eq.{uid}", "select": "id", "limit": "1"})
+        except Exception:
+            has_slip = []
+        if has_slip:
+            return ("📎 ระบบได้รับรูปสลิปของคุณแล้ว แต่ยังไม่พบข้อมูลการลงทะเบียนครับ\n"
+                    "กรุณาลงทะเบียนที่เมนูด้านล่าง (ใช้ LINE บัญชีนี้) หรือพิมพ์ ติดต่อแอดมิน 🙏"), False
         return "ยังไม่พบข้อมูลการลงทะเบียนของคุณครับ ลงทะเบียนได้ที่เมนูด้านล่างเลยครับ 🙏", False
     lines = ["📋 สถานะของคุณ"]
     any_paid = False
@@ -2243,7 +2254,9 @@ async def _handle_auto_replies(events: list, gemini_uids: set = frozenset()) -> 
         r.setdefault("trigger", "text")
     has_course_pb = any(e.get("type") == "postback" and
                         (e.get("postback", {}).get("data") or "").startswith(_COURSE_QR_PREFIX) for e in repliable)
-    if not rules and not has_course_pb:
+    # ไม่มีกฎเลยก็ยังต้องทำต่อถ้ามีข้อความตัวอักษร (ระบบตอบอัตโนมัติอัจฉริยะ)
+    has_text = any(e.get("type") == "message" and e.get("message", {}).get("type") == "text" for e in repliable)
+    if not rules and not has_course_pb and not has_text:
         return set()
 
     # หา user ที่ปิด auto-reply ไว้ (แอดมินกำลังคุยเอง)
@@ -2335,6 +2348,21 @@ async def _handle_auto_replies(events: list, gemini_uids: set = frozenset()) -> 
                     continue
 
             rule = _pick_rule(e, rules)
+            # ---- ตอบอัตโนมัติอัจฉริยะ: หลังกฎคีย์เวิร์ดของเจ้าของ แต่ก่อน fallback/AI ----
+            if (e["type"] == "message" and e.get("message", {}).get("type") == "text"
+                    and (not rule or rule.get("trigger") == "fallback")):
+                try:
+                    from _lib import smart_answers   # import ตอนใช้ กันวนกับ core
+                    smart = await smart_answers.handle(e)
+                except Exception as ex:  # noqa: BLE001 — พังแล้วต้องยังใช้ fallback/AI ได้
+                    print("smart answer error:", repr(ex))
+                    smart = None
+                if smart:
+                    replied_uids.add(uid)
+                    out_msgs.append({"line_user_id": uid, "direction": "out", "by": "smart", "msg_type": "text",
+                                     "text": smart["message"]["text"],
+                                     "payload": {**smart["message"], "intents": smart["intents"]}})
+                    continue
             if not rule:
                 continue
             # user บนเมนู Gemini + กฎที่เจอคือ fallback -> ไม่ตอบ ปล่อยให้ Gemini จัดการ
@@ -2796,12 +2824,54 @@ async def _sync_richmenu_for(uids: list[str], source: str = "sync", actor: str |
     return {"total": len(uids), **summary}
 
 
+# เมนูของสมาชิกที่มีสิทธิ์แล้ว (จ่ายเงินแล้ว หรือ VIP) — VIP อาจไม่มี paid=true ในทะเบียน จึงต้องดูจากเมนูด้วย
+# ปรับชื่อได้ที่ setting member_menu_names (list หรือข้อความคั่นด้วย ,)
+_MEMBER_MENU_DEFAULT = ["PRETEST_70"]
+_member_menu_cache: dict = {"exp": 0.0, "ids": set(), "names": None}
+
+
+async def _member_menu_ids() -> set | None:
+    """richMenuId ของเมนูสมาชิก (เทียบด้วยชื่อ) · None = อ่านรายการเมนูจาก LINE ไม่ได้"""
+    raw = await _get_setting("member_menu_names", None)
+    if isinstance(raw, str):
+        raw = raw.split(",")
+    names = tuple(sorted({str(x).strip().lower() for x in (raw or _MEMBER_MENU_DEFAULT) if str(x).strip()}))
+    if _member_menu_cache["exp"] > time.time() and _member_menu_cache["names"] == names:
+        return _member_menu_cache["ids"]
+    try:
+        menus = await line.richmenu_list()
+    except Exception as ex:  # noqa: BLE001
+        print("member menu list error:", ex)
+        return None
+    ids = {m["richMenuId"] for m in menus if str(m.get("name") or "").strip().lower() in names}
+    _member_menu_cache.update(exp=time.time() + 600, ids=ids, names=names)
+    return ids
+
+
+async def _is_member_menu_user(uid: str) -> bool:
+    """ผู้ใช้ถือเมนูสมาชิกอยู่ไหม — ถาม LINE สดก่อน ถ้าถามไม่ได้ใช้ค่าที่บันทึกไว้ใน line_users"""
+    ids = await _member_menu_ids() if uid else None
+    if not ids:
+        return False
+    try:
+        return (await line.user_richmenu_get(uid)) in ids
+    except Exception:  # noqa: BLE001
+        try:
+            rows = await supa.select("line_users", params={
+                "select": "current_rich_menu_id", "line_user_id": f"eq.{uid}", "limit": "1"})
+            return bool(rows) and rows[0].get("current_rich_menu_id") in ids
+        except Exception:  # noqa: BLE001
+            return False
+
+
 async def _link_slip_menu(uid: str, source: str = "slip", actor: str = "system") -> dict:
     """ผูก rich menu 'หลังส่งสลิป' (SLIP_SUCCESS_RICHMENU_ID) ให้ user — ลองซ้ำ 1 ครั้งเมื่อ LINE ล่ม/429
     ล้มเหลวแล้วต้องไม่เงียบ: บันทึก operations + แจ้งแอดมิน (throttle ตามรหัสผิดพลาด) · สำเร็จ = เขียน line_users + richmenu_history"""
     rid = SLIP_SUCCESS_RICHMENU_ID
     if not rid or not uid:
         return {"ok": False, "reason": "disabled"}
+    if await _is_member_menu_user(uid):
+        return {"ok": False, "reason": "member_menu"}   # สมาชิก/VIP ห้ามย้ายกลับไปเมนูรอเรียน
     code = None
     ok = False
     try:
@@ -2884,9 +2954,12 @@ async def _slip_menu_diagnose() -> dict:
     out["slip_users_not_following"] = sum(1 for u in slip_uids if u in umap and not umap[u].get("is_following"))
     out["slip_users_not_in_line_users"] = sum(1 for u in slip_uids if u not in umap)
     out["slip_users_on_menu_now"] = sum(1 for u in slip_uids if umap.get(u, {}).get("current_rich_menu_id") == rid)
-    out["slip_users_never_received_menu"] = sum(1 for u in slip_uids if u not in got)
+    member_ids = await safe("member_menus", _member_menu_ids()) or set()
+    on_member = {u for u in slip_uids if umap.get(u, {}).get("current_rich_menu_id") in member_ids}
+    out["slip_users_on_member_menu"] = len(on_member)
+    out["slip_users_never_received_menu"] = sum(1 for u in slip_uids if u not in got and u not in on_member)
     out["slip_users_never_received_but_following"] = sum(
-        1 for u in slip_uids if u not in got and umap.get(u, {}).get("is_following"))
+        1 for u in slip_uids if u not in got and u not in on_member and umap.get(u, {}).get("is_following"))
 
     # 4) คิวงานสลิป
     jobs = await safe("jobs", supa.select_all("webhook_jobs", params={"select": "status,attempts,error,created_at"})) or []
@@ -2928,11 +3001,16 @@ async def _slip_menu_repair(apply: bool, limit: int = 60) -> dict:
     got = await supa.select_all("richmenu_history", params={
         "select": "line_user_id", "new_rich_menu_id": f"eq.{rid}"})
     got_uids = {h["line_user_id"] for h in got}
-    cands = sorted(u for u in slip_uids if u in following and u not in got_uids and following[u] != rid)
+    member_ids = await _member_menu_ids()
+    if member_ids is None:
+        return {"skipped": "อ่านรายการ Rich Menu จาก LINE ไม่ได้ จึงแยกสมาชิก/VIP ไม่ได้ — ไม่ซ่อมเพื่อความปลอดภัย"}
+    cands = sorted(u for u in slip_uids if u in following and u not in got_uids
+                   and following[u] != rid and following[u] not in member_ids)
     batch = cands[:max(1, limit)]
     out = {"richMenuId": rid, "slip_users": len(slip_uids), "never_received_candidates": len(cands),
            "batch": len(batch), "remaining_after": max(0, len(cands) - len(batch)),
-           "already_on_menu": 0, "linked": 0, "failed": 0, "would_link": 0, "applied": apply}
+           "already_on_menu": 0, "member_skipped": 0, "unknown_skipped": 0,
+           "linked": 0, "failed": 0, "would_link": 0, "applied": apply}
     sem = asyncio.Semaphore(8)
 
     async def one(uid):
@@ -2940,7 +3018,11 @@ async def _slip_menu_repair(apply: bool, limit: int = 60) -> dict:
             try:
                 live = await line.user_richmenu_get(uid)
             except Exception:
-                live = "?"
+                out["unknown_skipped"] += 1   # ไม่รู้ว่าถือเมนูอะไร -> ไม่แตะ
+                return
+            if live in member_ids:
+                out["member_skipped"] += 1
+                return
             if live == rid:
                 out["already_on_menu"] += 1
                 return

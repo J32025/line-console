@@ -60,6 +60,7 @@ export default function SlipMenuHealth() {
                   <tr><td>เมนูปลายทาง</td><td>{d.menu_name || '-'} <small>{d.richMenuId}</small> {d.menu_exists_in_line === false ? '❌ ไม่พบใน LINE' : '✔ มีอยู่'}</td></tr>
                   <tr><td>คนที่เคยส่งสลิป</td><td>{n(d.slip_users)} (ยังเป็นเพื่อน {n(d.slip_users_following)} · เลิกติดตาม {n(d.slip_users_not_following)} · ไม่มีใน line_users {n(d.slip_users_not_in_line_users)})</td></tr>
                   <tr><td>ตอนนี้อยู่บนเมนูนี้</td><td>{n(d.slip_users_on_menu_now)}</td></tr>
+                  <tr><td>อยู่เมนูสมาชิก/VIP (ไม่ต้องซ่อม)</td><td>{n(d.slip_users_on_member_menu)}</td></tr>
                   <tr><td>ไม่เคยได้เมนูนี้เลย</td><td><b>{n(d.slip_users_never_received_menu)}</b> (ยังเป็นเพื่อน {n(d.slip_users_never_received_but_following)})</td></tr>
                   <tr><td>ได้เมนูนี้ แยกตามที่มา</td><td>{JSON.stringify(d.menu_assigned_by_source)}</td></tr>
                   <tr><td>สลิปทั้งหมด</td><td>{n(d.slips_total)} {JSON.stringify(d.slips_by_status)}</td></tr>
@@ -74,7 +75,7 @@ export default function SlipMenuHealth() {
             <p>
               ผลซ่อม{rep.applied ? '' : ' (ตัวอย่าง)'}: เข้าข่าย {n(rep.never_received_candidates)} · ชุดนี้ {n(rep.batch)} ·
               {rep.applied ? ` สลับแล้ว ${n(rep.linked)} · ล้มเหลว ${n(rep.failed)}` : ` จะสลับ ${n(rep.would_link)}`} ·
-              อยู่บนเมนูแล้ว {n(rep.already_on_menu)} · เหลือ {n(rep.remaining_after)}
+              อยู่บนเมนูแล้ว {n(rep.already_on_menu)} · ข้ามสมาชิก/VIP {n(rep.member_skipped)} · ข้ามเพราะตรวจเมนูไม่ได้ {n(rep.unknown_skipped)} · เหลือ {n(rep.remaining_after)}{rep.skipped ? ` · ${rep.skipped}` : ''}
             </p>
           )}
         </div>

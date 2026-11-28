@@ -22,6 +22,8 @@ const TRIGGERS = [
 const MATCH = { contains: 'มีคำนี้', exact: 'ตรงเป๊ะ', prefix: 'ขึ้นต้นด้วย', any: 'พิมพ์อะไรก็ตอบ' }
 const EMPTY = { trigger: 'text', name: '', match_type: 'contains', keywords: '', priority: 0, enabled: true, messages: [blank('text')] }
 
+import SmartAnswers from '../components/SmartAnswers.jsx'
+
 export default function AutoReply() {
   const t = useToast()
   const [rules, setRules] = useState(null)
@@ -74,6 +76,8 @@ export default function AutoReply() {
   return (
     <div>
       <h1>ตอบอัตโนมัติ</h1>
+
+      <SmartAnswers />
 
       <section className="card">
         <div className="row spread">
